@@ -50,7 +50,7 @@ export class TestnetRemoteConfig implements Config {
   indexer = 'https://indexer-rs.testnet-02.midnight.network/api/v1/graphql';
   indexerWS = 'wss://indexer-rs.testnet-02.midnight.network/api/v1/graphql/ws';
   node = 'https://rpc.testnet-02.midnight.network';
-  proofServer = 'http://13.53.62.251:6300/';
+  proofServer = 'http://midnight-proof-server-alb-1996898234.eu-north-1.elb.amazonaws.com:6300/';
 
   setNetworkId() {
     setNetworkId(NetworkId.TestNet);

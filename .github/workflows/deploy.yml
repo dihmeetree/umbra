@@ -1,0 +1,85 @@
+name: Deploy UI and API to AWS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------
+      # 1. Checkout the repository
+      # ------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------
+      # 2. Set up Node.js and Yarn
+      # ------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'yarn'
+
+      # ------------------------------
+      # 3. Install dependencies with Yarn
+      # ------------------------------
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      # ------------------------------
+      # 4. Authenticate Turbo Remote Caching
+      # ------------------------------
+      - name: Set up Turbo Remote Cache
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+        run: |
+          echo "🔐 Authenticating with Turbo..."
+          npx turbo login --token=${TURBO_TOKEN}
+          npx turbo link
+
+      # ------------------------------
+      # 5. Build contract (cached via Turbo Remote)
+      # ------------------------------
+      - name: Build Contract
+        run: yarn turbo run build:contract --filter=contract
+
+      # ------------------------------
+      # 6. Build API and UI using cached contract artifacts
+      # ------------------------------
+      - name: Build API and UI
+        run: yarn turbo run build --filter=api --filter=ui
+
+      # ------------------------------
+      # 7. Build Docker image (UI)
+      # ------------------------------
+      - name: Build UI Docker image
+        run: |
+          cd apps/ui
+          docker build -t ${{ secrets.ECR_REGISTRY }}/statera-dapp:latest .
+
+      # ------------------------------
+      # 8. Login to AWS ECR
+      # ------------------------------
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ------------------------------
+      # 9. Push Docker image to ECR
+      # ------------------------------
+      - name: Push Docker image
+        run: docker push ${{ secrets.ECR_REGISTRY }}/statera-dapp:latest
+
+      # ------------------------------
+      # 10. Deploy to AWS ECS
+      # ------------------------------
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ecs-task.json
+          service: statera-dapp-task-service-ehbdzvbp
+          cluster: statera-dapp-cluster
+          wait-for-service-stability: true

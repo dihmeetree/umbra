@@ -5,6 +5,8 @@ node_modules
 managed
 logs
 midnight-level-db
+#Ignore cli workspace when pushing
+cli
 Dockerfile
 fetch-zk-params.sh
 .pnp
