@@ -81,5 +81,5 @@ jobs:
         with:
           task-definition: ecs-task.json
           service: statera-dapp-task-service-ehbdzvbp
-          cluster: statera-dapp-cluster
+          cluster: statera-dapp
           wait-for-service-stability: true
