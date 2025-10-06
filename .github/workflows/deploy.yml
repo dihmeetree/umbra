@@ -79,7 +79,7 @@ jobs:
       - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
-          task-definition: ecs-task.json
+          task-definition: statera-dapp-task
           service: statera-dapp-task-service-ehbdzvbp
           cluster: statera-dapp
           wait-for-service-stability: true
