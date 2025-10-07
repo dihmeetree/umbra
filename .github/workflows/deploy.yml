@@ -3,12 +3,12 @@ name: Deploy UI to S3
 on:
   push:
     branches:
-      - main # Change to your default branch
+      - dev # Change to your default branch
   pull-request:
     branches:
-      - main 
+      - dev 
     paths:
-      - "apps/ui/dist/**" # Only trigger when dist folder changes
+      - "packages/ui/dist/**" # Only trigger when dist folder changes
   workflow_dispatch: # Allows manual triggering
 
 jobs:
@@ -28,5 +28,5 @@ jobs:
 
       - name: Deploy to S3
         run: |
-          aws s3 sync apps/ui/dist s3://${{ secrets.S3_BUCKET_NAME }} --delete
+          aws s3 sync packages/ui/dist s3://${{ secrets.S3_BUCKET_NAME }} --delete
         # --delete removes files in S3 that aren't in dist
