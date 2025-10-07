@@ -1,0 +1,4 @@
+#Build Outputs
+build
+.next/
+dist

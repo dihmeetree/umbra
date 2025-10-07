@@ -1,0 +1,22 @@
+{"level":30,"time":1755652249054,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Attempting to restore serialized wallet state"}
+{"level":30,"time":1755652249135,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 0, transactions=0"}
+{"level":30,"time":1755652255565,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 24620, transactions=0"}
+{"level":30,"time":1755652255637,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Your offset offset is: 0 restored offset: 0 ok"}
+{"level":30,"time":1755652255656,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 24620, transactions=0"}
+{"level":30,"time":1755652269502,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 14423, transactions=2"}
+{"level":30,"time":1755652274913,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 14351, transactions=11"}
+{"level":30,"time":1755652281653,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 12543, transactions=29"}
+{"level":30,"time":1755652287194,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 12037, transactions=55"}
+{"level":30,"time":1755652292638,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 10841, transactions=81"}
+{"level":30,"time":1755652298079,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 9256, transactions=102"}
+{"level":30,"time":1755652303120,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 7154, transactions=117"}
+{"level":30,"time":1755652308245,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 6745, transactions=135"}
+{"level":30,"time":1755652313471,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 5665, transactions=151"}
+{"level":30,"time":1755652319267,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 3551, transactions=169"}
+{"level":30,"time":1755652324955,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 469, transactions=186"}
+{"level":30,"time":1755652330633,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Waiting for funds. Backend lag: 0, wallet lag: 0, transactions=189"}
+{"level":30,"time":1755652330635,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Wallet was able to sync from restored state"}
+{"level":30,"time":1755652330705,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Your wallet seed is: a5fc8af584684f25cc24f8f6b3d1b546dc580c6f59fecd6c3aa8f069fed42d0a"}
+{"level":30,"time":1755652330705,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Your wallet address is: mn_shield-addr_test14x2wqvmjcj42qrm8see8wlp93un9m5qkshjdmfmzx9gxvek0ulnsxqqlh0jvs5wrvdacmjjz6pxdrmnca79x9dsw7jhvc2sh4zewxzh64sdna6d9"}
+{"level":30,"time":1755652330706,"pid":13024,"hostname":"codebiginrs-desktop","msg":"Your wallet balance is: 10682126"}
+{"level":30,"time":1755652330778,"pid":13024,"hostname":"codebiginrs-desktop","joinContract":{"contractAddress":"0200a03ee06ac2eb8a4cafe8490dc472e0943bf21d8baa4bec46405fd9ea9e89321a"}}

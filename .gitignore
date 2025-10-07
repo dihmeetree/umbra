@@ -3,8 +3,6 @@
 # Dependencies
 node_modules
 managed
-logs
-midnight-level-db
 #Ignore cli workspace when pushing
 cli
 Dockerfile
@@ -27,12 +25,6 @@ coverage
 
 # Vercel
 .vercel
-
-# Build Outputs
-.next/
-out/
-build
-dist
 
 
 # Debug
