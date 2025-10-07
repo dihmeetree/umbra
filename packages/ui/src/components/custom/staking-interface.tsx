@@ -155,7 +155,7 @@ export function StakingInterface() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setStakeAmount("2")}
+                      onClick={() => setStakeAmount("3")}
                     >
                       25%
                     </Button>
