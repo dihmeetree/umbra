@@ -1,15 +1,13 @@
-name: Deploy UI to S3
+name: Cached Deploy (Use Turbo Cache)
 
 on:
   push:
     branches:
-      - dev # Change to your default branch
+      - dev
   pull-request:
     branches:
-      - dev 
-    paths:
-      - "packages/ui/dist/**" # Only trigger when dist folder changes
-  workflow_dispatch: # Allows manual triggering
+      - dev
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -19,14 +17,38 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore Turborepo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            turbo-${{ runner.os }}-
+
+      - name: Restore previous dist artifacts (if cached externally)
+        run: ls -R packages/ui/dist || echo "No dist found — ensure previous build cache exists!"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1 # Change to your region
+          aws-region: us-east-1
 
-      - name: Deploy to S3
+      - name: Deploy UI dist to S3
         run: |
-          aws s3 sync packages/ui/dist s3://${{ secrets.S3_BUCKET_NAME }} --delete
-        # --delete removes files in S3 that aren't in dist
+          if [ -d "packages/ui/dist" ]; then
+            aws s3 sync packages/ui/dist s3://${{ secrets.S3_BUCKET_NAME }} --delete
+          else
+            echo "Error: UI dist folder not found in cache. Exiting."
+            exit 1
+          fi
