@@ -11,7 +11,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
       # 1️⃣ Checkout repository
       - name: Checkout code
@@ -26,7 +26,16 @@ jobs:
       - name: Enable Corepack (for Yarn 4)
         run: corepack enable
 
-      # 3️⃣ Cache Yarn dependencies
+      # 3️⃣ Install Compact compiler
+      - name: Install Compact compiler
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.compact/bin" >> $GITHUB_PATH
+
+      - name: Verify Compact installation
+        run: compact --version
+
+      # 4️⃣ Cache Yarn dependencies
       - name: Get Yarn cache directory
         id: yarn-cache-dir-path
         run: echo "dir=$(yarn config get cacheFolder)" >> $GITHUB_OUTPUT
@@ -39,27 +48,45 @@ jobs:
           restore-keys: |
             yarn-${{ runner.os }}-
 
-      # 4️⃣ Restore Turborepo cache
+      # 5️⃣ Cache Compact compiler
+      - name: Cache Compact compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.compact
+          key: compact-${{ runner.os }}-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
+          restore-keys: |
+            compact-${{ runner.os }}-
+
+      # 6️⃣ Cache compiled contracts (OPTIMIZATION)
+      - name: Cache compiled contracts
+        uses: actions/cache@v4
+        with:
+          path: packages/contracts/**/dist
+          key: contracts-${{ runner.os }}-${{ hashFiles('packages/contracts/**/*.compact') }}
+          restore-keys: |
+            contracts-${{ runner.os }}-
+
+      # 7️⃣ Restore Turborepo cache
       - name: Cache Turbo
         uses: actions/cache@v4
         with:
           path: |
             .turbo
             node_modules/.cache/turbo
-          key: turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-${{ hashFiles('**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx') }}
+          key: turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-${{ hashFiles('**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.compact') }}
           restore-keys: |
             turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-
             turbo-${{ runner.os }}-
 
-      # 5️⃣ Install dependencies (workspace-aware)
+      # 8️⃣ Install dependencies (workspace-aware)
       - name: Install dependencies
         run: yarn install --immutable
 
-      # 6️⃣ Build only the UI folder (Vite React)
+      # 9️⃣ Build UI with dependencies (including contracts)
       - name: Build UI (Vite)
         run: yarn turbo run build --filter=@statera/statera-ui
 
-      # 7️⃣ Configure AWS credentials
+      # 🔟 Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -67,7 +94,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # 8️⃣ Upload to AWS S3
+      # 1️⃣1️⃣ Upload to AWS S3
       - name: Deploy to S3
         run: |
           aws s3 sync ./packages/ui/dist s3://${{ secrets.AWS_S3_BUCKET }} --delete
