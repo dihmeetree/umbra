@@ -13,17 +13,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repo
+      # 1️⃣ Checkout the repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node
+      # 2️⃣ Setup Node + Yarn cache
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'yarn' # Enable Yarn dependency cache
 
-      # 3️⃣ Restore Turbo cache
+      # 3️⃣ Restore Turbo cache (build cache)
       - name: Restore Turbo cache
         uses: actions/cache@v4
         with:
@@ -32,18 +33,26 @@ jobs:
           restore-keys: |
             turbo-${{ runner.os }}-
 
-      # 4️⃣ Install dependencies
+      # 4️⃣ Install dependencies using Yarn
       - name: Install dependencies
-        run: npm ci
+        run: yarn install --frozen-lockfile
 
-      # 5️⃣ Reuse Turbo cached build (no rebuild if cache valid)
+      # 5️⃣ Reuse cached Vite build (no rebuild if cache valid)
       - name: Reuse cached Vite build
-        run: npx turbo run build --filter=ui --cache-dir=.turbo --force=false
+        run: yarn turbo run build --filter=ui --cache-dir=.turbo --force=false
 
       # 6️⃣ Install Vercel CLI
       - name: Install Vercel CLI
-        run: npm install -g vercel
+        run: yarn global add vercel
 
-      # 7️⃣ Deploy to Vercel (using prebuilt dist)
+      # 7️⃣ Deploy prebuilt dist folder to Vercel
       - name: Deploy to Vercel
         run: vercel deploy ./packages/ui/dist --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+      
+      # 8️⃣ Save Turbo cache (optional but recommended)
+      - name: Save Turbo cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ hashFiles('**/turbo.json') }}
