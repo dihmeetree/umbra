@@ -13,18 +13,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout the repo
+      # 1️⃣ Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node + Yarn cache
+      # 2️⃣ Setup Node.js (with Corepack)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'yarn' # Enable Yarn dependency cache
+          cache: "yarn"
 
-      # 3️⃣ Restore Turbo cache (build cache)
+      # 3️⃣ Enable Corepack and use the correct Yarn version
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          corepack prepare yarn@4.9.2 --activate
+          yarn --version
+
+      # 4️⃣ Restore Turbo cache
       - name: Restore Turbo cache
         uses: actions/cache@v4
         with:
@@ -33,23 +40,23 @@ jobs:
           restore-keys: |
             turbo-${{ runner.os }}-
 
-      # 4️⃣ Install dependencies using Yarn
+      # 5️⃣ Install dependencies using Yarn 4
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: yarn install --immutable
 
-      # 5️⃣ Reuse cached Vite build (no rebuild if cache valid)
-      - name: Reuse cached Vite build
+      # 6️⃣ Reuse cached Turbo build (no rebuild if cache valid)
+      - name: Build UI using Turbo cache
         run: yarn turbo run build --filter=ui --cache-dir=.turbo --force=false
 
-      # 6️⃣ Install Vercel CLI
+      # 7️⃣ Install Vercel CLI with Yarn 4
       - name: Install Vercel CLI
-        run: yarn global add vercel
+        run: yarn dlx vercel@latest --version
 
-      # 7️⃣ Deploy prebuilt dist folder to Vercel
+      # 8️⃣ Deploy prebuilt Vite dist to Vercel
       - name: Deploy to Vercel
-        run: vercel deploy ./packages/ui/dist --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        run: yarn dlx vercel deploy ./packages/ui/dist --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
       
-      # 8️⃣ Save Turbo cache (optional but recommended)
+       # Save Turbo cache (optional but recommended)
       - name: Save Turbo cache
         if: always()
         uses: actions/cache@v4
