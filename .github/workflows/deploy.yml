@@ -1,62 +1,53 @@
-name: Deploy Vite UI to AWS S3
+name: Deploy UI to AWS S3
 
 on:
   push:
-    branches:
-      - dev
-  pull_request:
-    branches:
-      - dev
+    branches: [main]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout the repo
-      - name: Checkout repository
+      # 1️⃣ Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node.js (with Corepack)
+      # 2️⃣ Setup Node.js and Corepack
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: "yarn"
 
-      # 3️⃣ Enable Corepack and correct Yarn version
-      - name: Enable Corepack (Yarn 4)
-        run: |
-          corepack enable
-          corepack prepare yarn@4.9.2 --activate
-          yarn --version
+      - name: Enable Corepack (for Yarn 4)
+        run: corepack enable
 
-      # 4️⃣ Restore Turbo cache
-      - name: Restore Turbo cache
+      # 3️⃣ Restore Turborepo cache
+      - name: Cache Turbo
         uses: actions/cache@v4
         with:
           path: .turbo
-          key: turbo-${{ runner.os }}-${{ hashFiles('**/turbo.json') }}
+          key: turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}
           restore-keys: |
             turbo-${{ runner.os }}-
 
-      # 5️⃣ Install dependencies
+      # 4️⃣ Install dependencies (workspace-aware)
       - name: Install dependencies
         run: yarn install --immutable
 
-      # 6️⃣ Build only the UI workspace (Vite)
-      - name: Build UI app with Turbo cache
-        run: yarn turbo run build --filter=ui --cache-dir=.turbo --force=false
+      # 5️⃣ Build only the UI folder (Vite React)
+      - name: Build UI (Vite)
+        run: yarn turbo run build --filter=ui
 
-      # 7️⃣ Configure AWS credentials
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # 6️⃣ Upload to AWS S3
+      - name: Deploy to S3
+        uses: aws-actions/s3-sync@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # 8️⃣ Upload the Vite build output to S3
-      - name: Upload dist to S3
-        run: |
-          aws s3 sync ./packages/ui/dist s3://${{ secrets.AWS_S3_BUCKET_NAME }} --delete
+          bucket: ${{ secrets.AWS_S3_BUCKET }}
+          region: ${{ secrets.AWS_REGION }}
+          source: ./packages/ui/dist
+          destination: /
+          delete: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
