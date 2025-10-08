@@ -1,4 +1,4 @@
-name: Deploy UI to Vercel
+name: Build and Deploy UI to Vercel
 
 on:
   push:
@@ -9,8 +9,33 @@ on:
       - dev
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build UI (using Turbo cache)
+        run: yarn turbo run build --filter=@statera/statera-ui...
+
+      - name: Upload UI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: statera-ui-dist
+          path: packages/ui/.next
+
   deploy:
     runs-on: ubuntu-latest
+    needs: build
     steps:
       - name: Download UI artifact
         uses: actions/download-artifact@v4
