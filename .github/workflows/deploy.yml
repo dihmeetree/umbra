@@ -57,7 +57,7 @@ jobs:
 
       # 6️⃣ Build only the UI folder (Vite React)
       - name: Build UI (Vite)
-        run: yarn turbo run build --filter=ui
+        run: yarn turbo run build --filter=@statera/statera-ui
 
       # 7️⃣ Configure AWS credentials
       - name: Configure AWS credentials
