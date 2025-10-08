@@ -32,8 +32,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
           echo "$HOME/.compact/bin" >> $GITHUB_PATH
 
+      - name: Set default Compact compiler
+        run: |
+          compact update
+
       - name: Verify Compact installation
-        run: compact --version
+        run: |
+          compact --version
 
       # 4️⃣ Cache Yarn dependencies
       - name: Get Yarn cache directory
