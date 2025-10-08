@@ -89,6 +89,14 @@ jobs:
 
       # 9️⃣ Build UI with dependencies (including contracts)
       - name: Build UI (Vite)
+        env: 
+          VITE_CONTRACT_ADDRESS: ${{ secrets.VITE_CONTRACT_ADDRESS }}
+          VITE_NETWORK_ID: ${{ secrets.VITE_NETWORK_ID }}
+          VITE_LOGGING_LEVEL: ${{ secrets.VITE_LOGGING_LEVEL }}
+          VITE_INDEXER_URL: ${{ secrets.VITE_INDEXER_URL }}
+          VITE_INDEXER_WS_URL: ${{ secrets.VITE_INDEXER_WS_URL }}
+          VITE_PROOF_SERVER_URI: ${{ secrets.VITE_PROOF_SERVER_URI }}
+          VITE_SERVER_SIDE_BOT_CONNECTION_URL: ${{ secrets.VITE_SERVER_SIDE_BOT_CONNECTION_URL }}
         run: yarn turbo run build --filter=@statera/statera-ui
 
       # 🔟 Configure AWS credentials
