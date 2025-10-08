@@ -2,7 +2,7 @@ name: Deploy UI to AWS S3
 
 on:
   push:
-    branches: 
+    branches:
       - dev
   pull_request:
     branches:
@@ -17,41 +17,57 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node.js and Corepack
+      # 2️⃣ Setup Node.js 22 and Corepack
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Enable Corepack (for Yarn 4)
         run: corepack enable
 
-      # 3️⃣ Restore Turborepo cache
+      # 3️⃣ Cache Yarn dependencies
+      - name: Get Yarn cache directory
+        id: yarn-cache-dir-path
+        run: echo "dir=$(yarn config get cacheFolder)" >> $GITHUB_OUTPUT
+
+      - name: Cache Yarn dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+          key: yarn-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      # 4️⃣ Restore Turborepo cache
       - name: Cache Turbo
         uses: actions/cache@v4
         with:
-          path: .turbo
-          key: turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-${{ hashFiles('**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx') }}
           restore-keys: |
+            turbo-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-
             turbo-${{ runner.os }}-
 
-      # 4️⃣ Install dependencies (workspace-aware)
+      # 5️⃣ Install dependencies (workspace-aware)
       - name: Install dependencies
         run: yarn install --immutable
 
-      # 5️⃣ Build only the UI folder (Vite React)
+      # 6️⃣ Build only the UI folder (Vite React)
       - name: Build UI (Vite)
         run: yarn turbo run build --filter=ui
 
-      # 6️⃣ Upload to AWS S3
-      - name: Deploy to S3
-        uses: aws-actions/s3-sync@v2
+      # 7️⃣ Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          bucket: ${{ secrets.AWS_S3_BUCKET }}
-          region: ${{ secrets.AWS_REGION }}
-          source: ./packages/ui/dist
-          destination: /
-          delete: true
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # 8️⃣ Upload to AWS S3
+      - name: Deploy to S3
+        run: |
+          aws s3 sync ./packages/ui/dist s3://${{ secrets.AWS_S3_BUCKET }} --delete
