@@ -11,7 +11,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
       # 1️⃣ Checkout repository
       - name: Checkout code
@@ -32,13 +32,14 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
           echo "$HOME/.compact/bin" >> $GITHUB_PATH
 
-      - name: Set default Compact compiler
+      - name: Set Compact compiler to 0.25.0
         run: |
           compact update 0.25.0
 
       - name: Verify Compact installation
         run: |
           compact --version
+          compact default
 
       # 4️⃣ Cache Yarn dependencies
       - name: Get Yarn cache directory
@@ -53,23 +54,23 @@ jobs:
           restore-keys: |
             yarn-${{ runner.os }}-
 
-      # 5️⃣ Cache Compact compiler
+      # 5️⃣ Cache Compact compiler (with version in key)
       - name: Cache Compact compiler
         uses: actions/cache@v4
         with:
           path: ~/.compact
-          key: compact-v3-${{ runner.os }}-0.25.0-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
+          key: compact-0.25.0-${{ runner.os }}-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
           restore-keys: |
-            compact-v3-${{ runner.os }}-0.25.0-
+            compact-0.25.0-${{ runner.os }}-
 
-      # 6️⃣ Cache compiled contracts (OPTIMIZATION)
+      # 6️⃣ Cache compiled contracts (with compiler version in key)
       - name: Cache compiled contracts
         uses: actions/cache@v4
         with:
           path: packages/contracts/**/dist
-          key: contracts-${{ runner.os }}-${{ hashFiles('packages/contracts/**/*.compact') }}
+          key: contracts-compact-0.25.0-${{ runner.os }}-${{ hashFiles('packages/contracts/**/*.compact') }}
           restore-keys: |
-            contracts-${{ runner.os }}-
+            contracts-compact-0.25.0-${{ runner.os }}-
 
       # 7️⃣ Restore Turborepo cache
       - name: Cache Turbo
