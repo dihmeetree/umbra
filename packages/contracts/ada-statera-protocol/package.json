@@ -16,7 +16,7 @@
     }
   },
   "scripts": {
-    "compact": "compact compile --skip-zk src/adaStateraProtocol.compact ./src/managed/adaStateraProtocol",
+    "compact": "compact compile src/adaStateraProtocol.compact ./src/managed/adaStateraProtocol",
     "compact-dev": "compact compile src/adaStateraProtocol.compact ./src/managed/adaStateraProtocol",
     "build": "rm -rf dist && tsc --project tsconfig.build.json && cp -R ./src/managed ./dist/managed && cp ./src/adaStateraProtocol.compact dist",
     "prebuild": "rm -rf dist && tsc --project tsconfig.build.json && cp -R ./src/managed ./dist/managed && cp ./src/adaStateraProtocol.compact dist",
