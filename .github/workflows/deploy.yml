@@ -34,7 +34,7 @@ jobs:
 
       - name: Set default Compact compiler
         run: |
-          compact update
+          compact update 0.25.0
 
       - name: Verify Compact installation
         run: |
