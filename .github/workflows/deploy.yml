@@ -110,6 +110,7 @@ jobs:
           echo "✅ Build completed"
           ls -la packages/ui/dist/
           ls -la packages/ui/dist/keys/ || echo "⚠️ Keys folder not found in dist"
+          ls -la packages/ui/dist/zkir/ || echo "⚠️ ZKIR folder not found in dist"
 
       # 1️⃣1️⃣ Verify keys are in dist (optional debug step)
       - name: Verify keys in dist folder
