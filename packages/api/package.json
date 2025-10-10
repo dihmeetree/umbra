@@ -12,7 +12,8 @@
     "lint": "eslint src",
     "prepare-local-env": "RUN_STANDALONE='true' NODE_OPTIONS=--experimental-vm-modules jest -t 'prepare local env' --detectOpenHandles --forceExit",
     "test-api": "DEBUG='testcontainers' NODE_OPTIONS=--experimental-vm-modules jest  --detectOpenHandles --forceExit",
-    "build": "rm -rf dist && tsc --project tsconfig.build.json"
+    "build": "rm -rf dist && tsc --project tsconfig.build.json",
+    "prebuild": "rm -rf dist && tsc --project tsconfig.build.json"
   },
   "dependencies": {
     "@statera/ada-statera-protocol": "workspace:*",

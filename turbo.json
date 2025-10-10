@@ -15,8 +15,19 @@
       "inputs": ["src/**/*.compact"],
       "outputs": ["src/managed/**", "src/gen/**", "gen/**"]
     },
+    "compact-dev": {
+      "dependsOn": ["^build"],
+      "env": ["COMPACT_HOME"],
+      "inputs": ["src/**/*.compact"],
+      "outputs": ["src/managed/**", "src/gen/**", "gen/**"]
+    },
     "build": {
       "dependsOn": ["^build", "compact", "typecheck"],
+      "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "!src/**/*.test.ts", "!tests/**/*.ts", "tsconfig.json", "tsconfig.build.json", ".env"],
+      "outputs": ["dist/**"]
+    },
+    "prebuild": {
+      "dependsOn": ["^prebuild", "compact-dev", "typecheck"],
       "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "!src/**/*.test.ts", "!tests/**/*.ts", "tsconfig.json", "tsconfig.build.json", ".env"],
       "outputs": ["dist/**"]
     },
@@ -46,8 +57,13 @@
     },
     "start": {
       "cache": false,
-      "persistent": true,
+      "persistent": false,
       "dependsOn": ["build"]
+    },
+    "start-dev": {
+      "cache": false,
+      "persistent": false,
+      "dependsOn": ["prebuild"]
     },
     "dev": {
       "cache": false,
