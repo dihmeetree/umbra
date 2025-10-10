@@ -58,9 +58,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.compact
-          key: compact-v2-${{ runner.os }}-0.25.0-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
+          key: compact-v3-${{ runner.os }}-0.25.0-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
           restore-keys: |
-            compact-v2-${{ runner.os }}-0.25.0-
+            compact-v3-${{ runner.os }}-0.25.0-
 
       # 6️⃣ Cache compiled contracts (OPTIMIZATION)
       - name: Cache compiled contracts
