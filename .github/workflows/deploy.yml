@@ -11,7 +11,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
       # 1️⃣ Checkout repository
       - name: Checkout code
@@ -58,9 +58,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.compact
-          key: compact-${{ runner.os }}-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
+          key: compact-v2-${{ runner.os }}-0.25.0-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
           restore-keys: |
-            compact-${{ runner.os }}-
+            compact-v2-${{ runner.os }}-0.25.0-
 
       # 6️⃣ Cache compiled contracts (OPTIMIZATION)
       - name: Cache compiled contracts
