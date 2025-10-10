@@ -39,7 +39,7 @@ jobs:
       - name: Verify Compact installation
         run: |
           compact --version
-          compact default
+          compact list
 
       # 4️⃣ Cache Yarn dependencies
       - name: Get Yarn cache directory
