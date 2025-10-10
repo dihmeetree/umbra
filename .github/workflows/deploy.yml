@@ -63,14 +63,7 @@ jobs:
           restore-keys: |
             compact-0.25.0-${{ runner.os }}-
 
-      # 6️⃣ Cache compiled contracts (with compiler version in key)
-      - name: Cache compiled contracts
-        uses: actions/cache@v4
-        with:
-          path: packages/contracts/**/dist
-          key: contracts-compact-0.25.0-${{ runner.os }}-${{ hashFiles('packages/contracts/**/*.compact') }}
-          restore-keys: |
-            contracts-compact-0.25.0-${{ runner.os }}-
+      # 6️⃣ REMOVED - No more compiled contracts cache
 
       # 7️⃣ Restore Turborepo cache
       - name: Cache Turbo
@@ -88,7 +81,14 @@ jobs:
       - name: Install dependencies
         run: yarn install --immutable
 
-      # 9️⃣ Configure AWS credentials (MOVED UP - before build)
+      # 9️⃣ Clean any existing compiled contracts
+      - name: Clean compiled contracts
+        run: |
+          echo "🧹 Cleaning old compiled contracts..."
+          rm -rf packages/contracts/**/dist
+          echo "✅ Cleaned"
+
+      # 🔟 Configure AWS credentials (MOVED UP - before build)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -96,7 +96,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # 🔟 Download keys from S3 BEFORE building
+      # 1️⃣1️⃣ Download keys from S3 BEFORE building
       - name: Download keys from S3
         run: |
           mkdir -p packages/ui/public/keys
@@ -104,7 +104,7 @@ jobs:
           echo "✅ Keys downloaded to public/keys"
           ls -la packages/ui/public/keys/
 
-      # 1️⃣1️⃣ Build UI with dependencies (including contracts)
+      # 1️⃣2️⃣ Build UI with dependencies (including contracts)
       - name: Build UI (Vite)
         env:
           VITE_CONTRACT_ADDRESS: ${{ secrets.VITE_CONTRACT_ADDRESS }}
@@ -120,7 +120,7 @@ jobs:
           ls -la packages/ui/dist/
           ls -la packages/ui/dist/keys/ || echo "⚠️ Keys folder not found in dist"
 
-      # 1️⃣2️⃣ Verify keys are in dist (optional debug step)
+      # 1️⃣3️⃣ Verify keys are in dist (optional debug step)
       - name: Verify keys in dist folder
         run: |
           if [ -d "packages/ui/dist/keys" ]; then
@@ -135,7 +135,7 @@ jobs:
             ls -la packages/ui/dist/keys/
           fi
 
-      # 1️⃣3️⃣ Upload to AWS S3
+      # 1️⃣4️⃣ Upload to AWS S3
       - name: Deploy to S3
         run: |
           echo "🚀 Deploying to S3..."
