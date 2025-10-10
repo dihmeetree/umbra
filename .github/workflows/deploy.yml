@@ -110,69 +110,33 @@ jobs:
           echo "✅ Build completed"
           ls -la packages/ui/dist/
           ls -la packages/ui/dist/keys/ || echo "⚠️ Keys folder not found in dist"
-      
-      # 1️⃣1️⃣ Verify complete keys & zkir in dist
-      - name: Verify zkir and keys in dist
+
+      # 1️⃣1️⃣ Verify keys are in dist (optional debug step)
+      - name: Verify keys in dist folder
         run: |
-          echo "📁 Verifying build outputs..."
-          
-          # Check zkir
+          echo "📁 Checking zkir folder contents..."
           if [ -d "packages/ui/dist/zkir" ]; then
             echo "✅ zkir folder exists"
-            echo "zkir contents:"
-            ls -lah packages/ui/dist/zkir/ | head -20
-            
-            BZKIR_COUNT=$(find packages/ui/dist/zkir -name "*.bzkir" | wc -l)
-            ZKIR_COUNT=$(find packages/ui/dist/zkir -name "*.zkir" | wc -l)
-            
+            echo "Files in zkir:"
+            ls -lah packages/ui/dist/zkir/
             echo ""
-            echo "Found $ZKIR_COUNT .zkir files"
-            echo "Found $BZKIR_COUNT .bzkir files"
-            
-            if [ $BZKIR_COUNT -eq 0 ]; then
-              echo "❌ ERROR: No .bzkir files found! Copying manually..."
-              cp -r packages/contracts/ada-statera-protocol/dist/managed/adaStateraProtocol/zkir/* packages/ui/dist/zkir/
-            fi
+            echo "Checking for .bzkir files:"
+            find packages/ui/dist/zkir -name "*.bzkir" || echo "❌ No .bzkir files found!"
+            echo ""
+            echo "Checking for .zkir files:"
+            find packages/ui/dist/zkir -name "*.zkir" || echo "❌ No .zkir files found!"
           else
-            echo "❌ zkir folder missing! Creating and copying..."
+            echo "❌ zkir folder does not exist in dist"
+            echo "Copying zkir manually..."
             mkdir -p packages/ui/dist/zkir
             cp -r packages/contracts/ada-statera-protocol/dist/managed/adaStateraProtocol/zkir/* packages/ui/dist/zkir/
+            echo "Manual copy completed:"
+            ls -lah packages/ui/dist/zkir/
           fi
-          
-          # Check keys
-          if [ -d "packages/ui/dist/keys" ]; then
-            echo "✅ keys folder exists"
-            ls -lah packages/ui/dist/keys/ | head -10
-          else
-            echo "⚠️ keys folder missing"
-          fi
-
-      # #  Verify keys are in dist (optional debug step)
-      # - name: Verify keys in dist folder
-      #   run: |
-      #     if [ -d "packages/ui/dist/keys" ]; then
-      #       echo "✅ Keys folder exists in dist"
-      #       echo "Keys found:"
-      #       ls -la packages/ui/dist/keys/
-      #     else
-      #       echo "❌ Keys folder NOT found in dist - copying manually"
-      #       mkdir -p packages/ui/dist/keys
-      #       aws s3 sync s3://contract-zk-artifact/keys/ packages/ui/dist/keys/
-      #       echo "Keys copied:"
-      #       ls -la packages/ui/dist/keys/
-      #     fi
 
       # 1️⃣2️⃣ Upload to AWS S3
       - name: Deploy to S3
         run: |
           echo "🚀 Deploying to S3..."
-          aws s3 sync ./packages/ui/dist s3://${{ secrets.AWS_S3_BUCKET }} \
-            --delete \
-            --exclude "*.map" \
-            --include "*" \
-            --content-type-by-extension zkir=application/octet-stream \
-            --content-type-by-extension bzkir=application/octet-stream
+          aws s3 sync ./packages/ui/dist s3://${{ secrets.AWS_S3_BUCKET }} --delete
           echo "✅ Deployment completed"
-          echo ""
-          echo "Verifying zkir files on S3:"
-          aws s3 ls s3://${{ secrets.AWS_S3_BUCKET }}/zkir/
