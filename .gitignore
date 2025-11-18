@@ -43,3 +43,6 @@ yarn-error.log*
 # Misc
 .DS_Store
 *.pem
+
+# Documentation (embedded git repo)
+docs/
