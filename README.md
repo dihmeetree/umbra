@@ -305,7 +305,7 @@ yarn turbo run build --filter=@statera/cli...
 
 ```bash
 # Check all packages
-yarn check-types
+yarn typecheck
 
 # Check specific package
 cd packages/cli
@@ -503,7 +503,7 @@ We welcome contributions! Please follow these guidelines:
 1. **Fork** the repository
 2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
 3. **Follow** code quality standards:
-   - Run `yarn check-types` before committing
+   - Run `yarn typecheck` before committing
    - Run `yarn lint` and fix any issues
    - Add tests for new features
 4. **Commit** with clear messages following [Conventional Commits](https://www.conventionalcommits.org/)

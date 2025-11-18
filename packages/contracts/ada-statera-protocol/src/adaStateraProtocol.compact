@@ -4,14 +4,14 @@ import CompactStandardLibrary;
 import "./CustomLibrary";
 export {CoinInfo, MintMetadata, Depositor, Staker, DebtPositionStatus, ComplianceToken, KYCTokenData, ValidityRange, ComplianceToken};
 
-/* Describes the status of a user's debt position */
+// Describes the status of a user's debt position
 enum DebtPositionStatus { inactive, active, closed };
 
 export ledger mintCounter: Counter;
 export ledger totalMint: Uint<128>;
 export ledger liquidationThreshold: Uint<8>;
 export ledger LVT: Uint<8>; // LVT --> Max. percentage of debt a user can take based on collateral deposited
-export ledger MCR: Uint<8>; //MCR --> Minimum Collateral Ratio (expressed in percentage)
+export ledger MCR: Uint<8>; // MCR --> Minimum Collateral Ratio (expressed in percentage)
 
 /* Mapping to keep track of sUSD coin input into the stakePool */
 export ledger stakePoolTotal: QualifiedCoinInfo;
@@ -99,7 +99,7 @@ constructor(
     SPECK_per_tDUST = 1000000;
 }
 
-/* INTERACTION FOR ADMIN ONLY*/
+/* INTERACTION FOR ADMIN ONLY */
 export circuit resetProtocolConfig(_liquidationThreshold: Uint<8>, _LVT: Uint<8>, _MCR: Uint<8>): []{
     assert (ownPublicKey().bytes == super_admin || admins.member(ownPublicKey().bytes), "Can not set SUSD token type: Unauthorized");
 
@@ -156,10 +156,10 @@ export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _
     assert (coin.value >= amount_in_speck, "Insufficient funds provided");
     assert (trustedOracles.member(disclosedComplianceToken.tokenData.oraclePk), "Can not create position: Unauthorized KYC provider");
 
-    /* Receives coin */
+    // Receives coin
     receive(disclosedCoin);
 
-    /* Writes coin to collateral reserve pool total */
+    // Writes coin to collateral reserve pool total
     const coinToInsert = !depositors.isEmpty() && reservePoolTotal.value > 0 ?
     mergeCoinImmediate(reservePoolTotal, disclosedCoin) :
     disclosedCoin;
@@ -189,7 +189,7 @@ export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _
                 borrowLimit: borrowLimit
             });
         }else{
-            /* Hash metadata for shielding */
+            // Hash metadata for shielding
             const prev_metadata = getMintMetadata();
             const newMetadata = MintMetadata{
                 ...prev_metadata,
@@ -354,18 +354,19 @@ export circuit repay( coin: CoinInfo, _amountToRepay: Uint<32> ): [] {
    const metadata = getMintMetadata();
    const metadataHash = hashMintMetadata(metadata, depositId);
    
-   //  Asserts to see if user has maliciously uttered private state
+   // Asserts to see if user has maliciously altered private state
    assert (metadataHash == mintPositionToRepay.metadataHash, "Can not withdraw collateral: Invalid private state");
    
    assert (coin.color == sUSDTokenType, "Can not repay minted sUSD: Invalid token type provided");
    assert (_amountToRepay <= metadata.debt, "Can not repay minted sUSD: tokens must be equivalent to the amount of sUSD minted");
    assert (_amountToRepay >= coin.value, "Can not repay minted sUSD: Insufficient tokens provided to cover amount to repay");
    
+   // Receives coin
    receive(disclosedCoin);
 
    const balanceToRepay = metadata.debt - disclosedAmtToRepay; 
    
-    //Generates and send token to a burn address
+    // Generates and send token to a burn address
     const burnAddrs = burnAddress();
     sendImmediate(disclosedCoin, burnAddrs, disclosedAmtToRepay);
     // Updates MintMetadata (private state)
@@ -408,7 +409,7 @@ export circuit depositToStabilityPool(coin: CoinInfo): [] {
     // Receives and write to coin balance
     receive(disclosedCoin);
     
-    /* Writes coin to the stakePoolTotal*/
+    // Writes coin to the stakePoolTotal
     if(stakers.isEmpty()){
         // Writes coin generated within the tx as first stake
         stakePoolTotal.writeCoin(disclosedCoin, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
@@ -520,7 +521,7 @@ export circuit liquidateDebtPosition(
     _collateralAmt: Uint<64>, 
     _depositId: Bytes<32>, 
     _debt: Uint<64>,
-    ):[]{
+):[]{
     // Checks if the loan positon exist
     assert (depositors.member(disclose(_depositId)), "Deposit with the required Id does not exist");
     const collateralDepositToLiquidate = depositors.lookup(disclose(_depositId)); 
