@@ -1,14 +1,13 @@
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Info, Loader2, Wallet, Zap } from "lucide-react";
 import { Badge } from "../ui/badge";
-import useIsChrome from "@/hookes/useChrome";
+import useIsChrome from "@/hooks/useChrome";
 
 const ConnectToWalletScreen = () => {
   const walletUtils = useMidnightWallet();
   const isChromeBrowser = useIsChrome();
-
 
   if (!isChromeBrowser) {
     return (

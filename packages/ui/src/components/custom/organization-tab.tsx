@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TabsContent } from "../ui/tabs";
 import type { AdminActions, AdminPayload } from "./admin-panel";
-import useDeployment from "@/hookes/useDeployment";
+import useDeployment from "@/hooks/useDeployment";
 import toast from "react-hot-toast";
 import { useState } from "react";
 import type { CoinPublicKey } from "@midnight-ntwrk/compact-runtime";
@@ -27,7 +27,10 @@ interface OrganizationTabProps {
   ) => Promise<void>;
 }
 
-const OrganizationTab = ({isSuperAdmin, handleAdminFunctionality}: OrganizationTabProps) => {
+const OrganizationTab = ({
+  isSuperAdmin,
+  handleAdminFunctionality,
+}: OrganizationTabProps) => {
   const [isAdding, setIsAdding] = useState(false);
   const [isTransfering, setIsTransfering] = useState(false);
 

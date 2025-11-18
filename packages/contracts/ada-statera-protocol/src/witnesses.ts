@@ -5,12 +5,18 @@ import {
 import { WitnessContext } from "@midnight-ntwrk/compact-runtime";
 
 export interface StateraPrivateState {
-  readonly secrete_key: Uint8Array;
+  readonly secret_key: Uint8Array;
   readonly mint_metadata: MintMetadata;
 }
 
-export const createPrivateStateraState = (secrete_key: Uint8Array) => ({
-  secrete_key,
+export const createPrivateStateraState = (
+  secret_key: Uint8Array
+): StateraPrivateState => ({
+  secret_key,
+  mint_metadata: {
+    collateral: 0n,
+    debt: 0n,
+  },
 });
 
 export const witnesses = {
@@ -28,12 +34,12 @@ export const witnesses = {
   },
 
   // Returns the user's secrete key stored offchain in their private state
-  secrete_key: ({
+  secret_key: ({
     privateState,
   }: WitnessContext<Ledger, StateraPrivateState>): [
     StateraPrivateState,
     Uint8Array,
-  ] => [privateState, privateState.secrete_key],
+  ] => [privateState, privateState.secret_key],
 
   // Returns the user's mint-metadata stored offchain in their private state
   get_mintmetadata_private_state: ({
@@ -42,7 +48,10 @@ export const witnesses = {
     StateraPrivateState,
     MintMetadata,
   ] => {
-    return [privateState, privateState.mint_metadata];
+    return [
+      privateState,
+      privateState.mint_metadata || { collateral: 0n, debt: 0n },
+    ];
   },
 
   /* Sets mint_metadata in private state*/
@@ -53,7 +62,7 @@ export const witnesses = {
     const newPrivateState = {
       ...privateState,
       mint_metadata: {
-        ...privateState.mint_metadata,
+        ...(privateState.mint_metadata || { collateral: 0n, debt: 0n }),
         ...newMetadata,
       },
     };

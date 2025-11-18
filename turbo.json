@@ -1,12 +1,15 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": [
-    ".prettierrc.json"
-  ],
+  "globalDependencies": [".prettierrc.json"],
   "tasks": {
     "typecheck": {
       "dependsOn": ["^build", "compact"],
-      "inputs": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.mts", "tsconfig.json"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "src/**/*.mts",
+        "tsconfig.json"
+      ],
       "outputs": []
     },
     "compact": {
@@ -23,27 +26,69 @@
     },
     "build": {
       "dependsOn": ["^build", "compact", "typecheck"],
-      "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "!src/**/*.test.ts", "!tests/**/*.ts", "tsconfig.json", "tsconfig.build.json", ".env"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.mts",
+        "src/**/*.tsx",
+        "!src/**/*.test.ts",
+        "!tests/**/*.ts",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        ".env"
+      ],
       "outputs": ["dist/**"]
     },
     "prebuild": {
       "dependsOn": ["^prebuild", "compact-dev", "typecheck"],
-      "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "!src/**/*.test.ts", "!tests/**/*.ts", "tsconfig.json", "tsconfig.build.json", ".env"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.mts",
+        "src/**/*.tsx",
+        "!src/**/*.test.ts",
+        "!tests/**/*.ts",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        ".env"
+      ],
       "outputs": ["dist/**"]
     },
     "build-storybook": {
       "dependsOn": ["^build", "typecheck"],
-      "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "!src/**/*.test.ts", "!tests/**/*.ts", "tsconfig.json", "tsconfig.build.json", ".env", "vite.config.ts", ".storybook/**"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.mts",
+        "src/**/*.tsx",
+        "!src/**/*.test.ts",
+        "!tests/**/*.ts",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        ".env",
+        "vite.config.ts",
+        ".storybook/**"
+      ],
       "outputs": ["storybook-static/**"]
     },
     "lint": {
       "dependsOn": ["compact", "^build", "typecheck"],
-      "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", ".eslintrc.cjs"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.mts",
+        "src/**/*.tsx",
+        ".eslintrc.cjs"
+      ],
       "outputs": []
     },
     "test": {
       "dependsOn": ["^build", "compact", "typecheck"],
-      "inputs": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "jest.config.ts", "tsconfig.json", "tsconfig.test.json", "test-compose.yml"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.mts",
+        "src/**/*.tsx",
+        "jest.config.ts",
+        "tsconfig.json",
+        "tsconfig.test.json",
+        "test-compose.yml"
+      ],
       "outputs": ["reports/**"]
     },
     "check": {
@@ -52,7 +97,12 @@
     },
     "test-e2e": {
       "dependsOn": ["build", "compact"],
-      "inputs": ["src/**/*.ts", "src/**/*.tsx", "e2e/**/*", "playwright.config.*"],
+      "inputs": [
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "e2e/**/*",
+        "playwright.config.*"
+      ],
       "outputs": ["test-results/**", "playwright-report/**"]
     },
     "start": {

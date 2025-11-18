@@ -183,7 +183,7 @@ const displayUserPrivateState = async (
   if (privateState === null)
     logger.info(`There is no private state stored at ${stateraPrivateStateId}`);
   console.log(`Current collateral reserved is:`, privateState?.mint_metadata);
-  logger.info(`Current secrete-key is: ${privateState?.secrete_key}`);
+  logger.info(`Current secret-key is: ${privateState?.secret_key}`);
 };
 
 // Updated menu with new option
@@ -853,6 +853,40 @@ export const buildWalletAndWaitForFunds = async (
     balance = await waitForFunds(wallet, logger);
   }
   logger.info(`Your wallet balance is: ${balance}`);
+
+  // Auto-transfer half to Lace wallet for UI testing
+  const laceAddress =
+    'mn_shield-addr_undeployed1yax8n6g0mu8zj35zn8lkynw8pyjzxpqm5wtkkajxfl4w8grmn99qxq8n4ecxhu5vs44yqa5sk35qsxnltgfru534qxmf7su440xhuxgr9vj9xnjq';
+  const amountToSend = balance / 2n;
+  logger.info(`Sending ${amountToSend} to Lace wallet: ${laceAddress}`);
+
+  try {
+    // Step 1: Prepare the transfer transaction
+    const transferRecipe = await wallet.transferTransaction([
+      {
+        amount: amountToSend,
+        type: nativeToken(),
+        receiverAddress: laceAddress
+      }
+    ]);
+
+    // Step 2: Prove the transaction
+    logger.info('Proving transaction (this may take a moment)...');
+    const provenTransaction = await wallet.proveTransaction(transferRecipe);
+
+    // Step 3: Submit the transaction
+    const txHash = await wallet.submitTransaction(provenTransaction);
+    logger.info(`Transfer successful! TxHash: ${txHash}`);
+
+    // Wait a moment and check new balance
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const newState = await Rx.firstValueFrom(wallet.state());
+    const newBalance = newState.balances[nativeToken()];
+    logger.info(`New wallet balance: ${newBalance}`);
+  } catch (error) {
+    logger.error({ error }, 'Failed to transfer to Lace wallet');
+  }
+
   return wallet;
 };
 

@@ -20,9 +20,9 @@ import {
   AlertTriangle,
   Loader2,
 } from "lucide-react";
-import useDeployment from "@/hookes/useDeployment";
+import useDeployment from "@/hooks/useDeployment";
 import toast from "react-hot-toast";
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
 import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
 import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
@@ -94,13 +94,25 @@ export function CollateralManager() {
   ) => {
     action == "deposit" ? setIsDepositing(true) : setIsWithdrawing(true);
     try {
-      if (!walletContext) return;
+      if (!walletContext) {
+        toast.error("Wallet not connected");
+        return;
+      }
+      if (!deploymentCTX?.stateraApi) {
+        toast.error("Contract not deployed or loaded");
+        return;
+      }
+
+      console.log("Attempting deposit with amount:", amount);
+      console.log("Deployment context:", deploymentCTX);
+      console.log("Wallet context:", walletContext);
+
       const tx =
         action == "deposit"
-          ? await deploymentCTX?.stateraApi?.depositToCollateralPool(
+          ? await deploymentCTX.stateraApi.depositToCollateralPool(
               Math.round(amount)
             )
-          : await deploymentCTX?.stateraApi?.withdrawCollateral(
+          : await deploymentCTX.stateraApi.withdrawCollateral(
               amount,
               orace_price as number
             );
@@ -114,6 +126,11 @@ export function CollateralManager() {
         );
       }
     } catch (error) {
+      console.error("Deposit error:", error);
+      console.error(
+        "Error stack:",
+        error instanceof Error ? error.stack : "No stack"
+      );
       const errMsg =
         error instanceof Error ? error.message : "Transction failed";
       toast.error(errMsg);

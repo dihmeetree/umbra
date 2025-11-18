@@ -1,4 +1,11 @@
-import { BarChart3, Coins, Settings, TrendingUp, Wallet, Zap } from "lucide-react"
+import {
+  BarChart3,
+  Coins,
+  Settings,
+  TrendingUp,
+  Wallet,
+  Zap,
+} from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -10,12 +17,12 @@ import {
   SidebarMenuItem,
   SidebarHeader,
   SidebarFooter,
-} from "@/components/ui/sidebar"
-import useDeployment from "@/hookes/useDeployment"
+} from "@/components/ui/sidebar";
+import useDeployment from "@/hooks/useDeployment";
 
 interface AppSidebarProps {
-  activeSection: string
-  setActiveSection: (section: string) => void
+  activeSection: string;
+  setActiveSection: (section: string) => void;
   // userRole: "user" | "admin"
 }
 
@@ -50,11 +57,16 @@ const menuItems = [
     id: "admin",
     roles: ["admin"],
   },
-]
+];
 
-export function AppSidebar({ activeSection, setActiveSection }: AppSidebarProps) {
+export function AppSidebar({
+  activeSection,
+  setActiveSection,
+}: AppSidebarProps) {
   const deploymentCTX = useDeployment();
-  const filteredItems = menuItems.filter((item) => item.roles.includes(deploymentCTX?.userRole as string))
+  const filteredItems = menuItems.filter((item) =>
+    item.roles.includes(deploymentCTX?.userRole as string)
+  );
 
   return (
     <Sidebar className="border-r border-slate-800/50 bg-slate-900/95 backdrop-blur-xl">
@@ -108,5 +120,5 @@ export function AppSidebar({ activeSection, setActiveSection }: AppSidebarProps)
         </div>
       </SidebarFooter>
     </Sidebar>
-  )
+  );
 }

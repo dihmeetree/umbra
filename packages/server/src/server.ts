@@ -23,7 +23,7 @@ async function startServer() {
     console.log("Initializing wallet and Statera API...");
     await initializeWalletAndAPI();
     console.log("Wallet and API initialized successfully");
-    
+
     app.listen(PORT, () => {
       console.log(`Server Listening at ${PORT}`);
     });

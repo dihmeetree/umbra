@@ -22,10 +22,10 @@ import {
   CheckCircle,
   Loader2,
 } from "lucide-react";
-import useDeployment from "@/hookes/useDeployment";
+import useDeployment from "@/hooks/useDeployment";
 import toast from "react-hot-toast";
 import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
 import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 
@@ -70,7 +70,6 @@ export function MintingInterface() {
     }
   };
 
-  
   const handleMintOrRepaySUSD = async (
     amount: number,
     action: "mint" | "repay"
@@ -111,7 +110,6 @@ export function MintingInterface() {
       action == "mint" ? setIsMinting(false) : setIsRepaying(false);
     }
   };
-
 
   if (!deploymentCTX?.contractState || !deploymentCTX.privateState) {
     return (

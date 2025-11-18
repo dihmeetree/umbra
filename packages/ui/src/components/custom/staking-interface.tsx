@@ -13,12 +13,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { TrendingUp, Shield, Gift, Clock, Loader2, Wallet, AlertTriangle } from "lucide-react";
-import useDeployment from "@/hookes/useDeployment";
+import {
+  TrendingUp,
+  Shield,
+  Gift,
+  Clock,
+  Loader2,
+  Wallet,
+  AlertTriangle,
+} from "lucide-react";
+import useDeployment from "@/hooks/useDeployment";
 import toast from "react-hot-toast";
 import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
 import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { Alert, AlertDescription } from "../ui/alert";
 
@@ -196,8 +204,7 @@ export function StakingInterface() {
                     </ul>
                   </div>
 
-                  {parseInt(stakeAmount) <
-                    minStakeAmount && (
+                  {parseInt(stakeAmount) < minStakeAmount && (
                     <Alert className="border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20">
                       <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
                       <AlertDescription className="text-red-800 dark:text-red-200">
@@ -224,7 +231,10 @@ export function StakingInterface() {
                       )
                     }
                     className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
-                    disabled={ !stakeAmount.length || parseInt(stakeAmount) < minStakeAmount}
+                    disabled={
+                      !stakeAmount.length ||
+                      parseInt(stakeAmount) < minStakeAmount
+                    }
                   >
                     {isStaking ? (
                       <div className="flex items-center gap-2">
@@ -253,8 +263,8 @@ export function StakingInterface() {
                       <Button>sUSD</Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Staked: {stakePosition?.staker.effective_user_balance || 0}{" "}
-                      sUSD
+                      Staked:{" "}
+                      {stakePosition?.staker.effective_user_balance || 0} sUSD
                     </p>
                   </div>
 
@@ -271,15 +281,16 @@ export function StakingInterface() {
                     </p>
                   </div>
 
-                  {stakePosition && parseInt(unstakeAmount) >
-                    stakePosition?.staker.effective_user_balance && (
-                    <Alert className="border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20">
-                      <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
-                      <AlertDescription className="text-red-800 dark:text-red-200">
-                        Min. allowed stake amount is 2 sUSD
-                      </AlertDescription>
-                    </Alert>
-                  )}
+                  {stakePosition &&
+                    parseInt(unstakeAmount) >
+                      stakePosition?.staker.effective_user_balance && (
+                      <Alert className="border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20">
+                        <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                        <AlertDescription className="text-red-800 dark:text-red-200">
+                          Min. allowed stake amount is 2 sUSD
+                        </AlertDescription>
+                      </Alert>
+                    )}
 
                   <Button
                     onClick={() =>

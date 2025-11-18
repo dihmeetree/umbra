@@ -12,10 +12,10 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Shield, Users, Activity, Loader2 } from "lucide-react";
-import useDeployment from "@/hookes/useDeployment";
+import useDeployment from "@/hooks/useDeployment";
 import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
 import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import toast from "react-hot-toast";
 import ContractUpdateTab from "./update-tab";
@@ -231,7 +231,9 @@ export function AdminPanel() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-white">
-              {deploymentUtils.contractState.reservePoolTotal.value / BigInt(1_000_000)} tDUST
+              {deploymentUtils.contractState.reservePoolTotal.value /
+                BigInt(1_000_000)}{" "}
+              tDUST
             </div>
             <p className="text-xs text-muted-foreground text-slate-400">
               <span className="text-green-600">{12}</span> from last month

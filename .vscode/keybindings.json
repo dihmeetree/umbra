@@ -1,0 +1,18 @@
+[
+  {
+    "key": "ctrl+`",
+    "command": "workbench.action.terminal.toggleTerminal"
+  },
+  {
+    "key": "ctrl+k",
+    "command": "workbench.action.terminal.kill"
+  },
+  {
+    "key": "ctrl+n",
+    "command": "workbench.action.terminal.new"
+  },
+  {
+    "key": "ctrl+shift+insert",
+    "command": "workbench.action.closeOtherEditors"
+  }
+]

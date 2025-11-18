@@ -168,12 +168,20 @@ const MidnightWalletProvider = ({
             )
             .then(createBalancedTx);
         },
+        submitTx(tx: BalancedTransaction): Promise<TransactionId> {
+          return walletAPI.wallet.submitTransaction(tx);
+        },
       };
     } else {
       return {
         coinPublicKey: "",
         encryptionPublicKey: "",
         balanceTx: () => {
+          return Promise.reject(
+            new Error("Wallet API not set @walletProvider")
+          );
+        },
+        submitTx: () => {
           return Promise.reject(
             new Error("Wallet API not set @walletProvider")
           );

@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { AdminActions, AdminPayload } from "./admin-panel";
 import { useState } from "react";
-import useDeployment from "@/hookes/useDeployment";
+import useDeployment from "@/hooks/useDeployment";
 import toast from "react-hot-toast";
 
 interface ContractUpdateTabProps {
@@ -228,9 +228,7 @@ const ContractUpdateTab = ({
           </Button>
         </div>
         <div className="flex flex-col gap-3">
-          <h2 className="text-xl text-slate-200 pt-4">
-            Update sUSD coin type
-          </h2>
+          <h2 className="text-xl text-slate-200 pt-4">Update sUSD coin type</h2>
           <Label className="text-slate-300">Sets the coin type for sUSD</Label>
           <Button
             onClick={() => {

@@ -81,12 +81,11 @@ export interface DeployedStateraAPI {
   ) => Promise<FinalizedCallTxData<StateraContract, "transferAdminRole">>;
   addTrustedOracle: (
     oraclePk: string
-  ) => Promise<FinalizedCallTxData<StateraContract, "addTrustedOracle">>; 
+  ) => Promise<FinalizedCallTxData<StateraContract, "addTrustedOracle">>;
   removeTrustedOracle: (
     oraclePk: string
-  ) => Promise<FinalizedCallTxData<StateraContract, "removeTrustedOraclePk">> 
+  ) => Promise<FinalizedCallTxData<StateraContract, "removeTrustedOraclePk">>;
 }
-
 
 export class StateraAPI implements DeployedStateraAPI {
   deployedContractAddress: string;
@@ -115,7 +114,7 @@ export class StateraAPI implements DeployedStateraAPI {
             map((contractState) => ledger(contractState.data)),
             tap((ledgerState) =>
               logger?.trace({
-                ledgerStaeChanged: {
+                ledgerStateChanged: {
                   ledgerState: {
                     ...ledgerState,
                   },
@@ -141,13 +140,15 @@ export class StateraAPI implements DeployedStateraAPI {
           stakers: utils.createDerivedStakersArray(ledgerState.stakers),
           noOfDepositors: ledgerState.depositors.size(),
           mintMetadata: privateState?.mint_metadata,
-          secrete_key: privateState?.secrete_key,
+          secret_key: privateState?.secret_key,
           admins: utils.createDerivedAdminArray(ledgerState.admins),
           LVT: ledgerState.LVT,
           MCR: ledgerState.MCR,
           liquidationCount: ledgerState.liquidationCount,
           validCollateralType: ledgerState.validCollateralAssetType,
-          trustedOracles: utils.createDerivedOraclesArray(ledgerState.trustedOracles)
+          trustedOracles: utils.createDerivedOraclesArray(
+            ledgerState.trustedOracles
+          ),
         };
       }
     );
@@ -182,7 +183,14 @@ export class StateraAPI implements DeployedStateraAPI {
       },
     });
 
-    return new StateraAPI(providers, deployedContract, logger);
+    const api = new StateraAPI(providers, deployedContract, logger);
+
+    // Note: Skipping automatic initialization of oracle and sUSD token type
+    // These can be called manually after deployment if needed:
+    // - await api.addTrustedOracle(oraclePk)
+    // - await api.setSUSDColor()
+
+    return api;
   }
 
   static async joinStateraContract(
@@ -378,9 +386,10 @@ export class StateraAPI implements DeployedStateraAPI {
   async removeTrustedOracle(
     oraclePk: string
   ): Promise<FinalizedCallTxData<StateraContract, "removeTrustedOraclePk">> {
-    const txData = await this.allReadyDeployedContract.callTx.removeTrustedOraclePk(
-      utils.hexStringToUint8Array(oraclePk)
-    );
+    const txData =
+      await this.allReadyDeployedContract.callTx.removeTrustedOraclePk(
+        utils.hexStringToUint8Array(oraclePk)
+      );
 
     this.logger?.trace({
       transactionAdded: {
@@ -597,8 +606,8 @@ export class StateraAPI implements DeployedStateraAPI {
     );
     return (
       existingPrivateState ?? {
-        secrete_key: createPrivateStateraState(utils.randomNonceBytes(32))
-          .secrete_key,
+        secret_key: createPrivateStateraState(utils.randomNonceBytes(32))
+          .secret_key,
         mint_metadata: {
           collateral: BigInt(0),
           debt: BigInt(0),

@@ -6,8 +6,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import useDeployment from "@/hookes/useDeployment";
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import useDeployment from "@/hooks/useDeployment";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import ClientSideLiquidationBot from "@/lib/client-side-liquidation-bot";
 import { encodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
 import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
@@ -61,7 +61,6 @@ export function Overview() {
       try {
         await deploymentCtx?.onJoinContract();
         setIsLoading(false);
-
       } catch (error) {
         setIsLoading(false);
         const errMsg =
@@ -78,25 +77,33 @@ export function Overview() {
       setBoardState(value)
     );
 
-    // Intialize client-side liquidation monitoring bot
-    const bot = new ClientSideLiquidationBot(
-      import.meta.env.VITE_SERVER_SIDE_BOT_CONNECTION_URL,
-      deploymentCtx?.privateState?.mint_metadata as MintMetadata,
-      Number(deploymentCtx?.contractState?.liquidationThreshold),
-      encodeCoinPublicKey(
-        parseCoinPublicKeyToHex(
-          walletCtx?.state.coinPublicKey as string,
-          getZswapNetworkId()
+    // Only initialize bot if mint_metadata exists
+    let bot: ClientSideLiquidationBot | null = null;
+    if (
+      deploymentCtx?.privateState?.mint_metadata &&
+      deploymentCtx?.contractState?.liquidationThreshold &&
+      walletCtx?.state.coinPublicKey
+    ) {
+      // Intialize client-side liquidation monitoring bot
+      bot = new ClientSideLiquidationBot(
+        import.meta.env.VITE_SERVER_SIDE_BOT_CONNECTION_URL,
+        deploymentCtx.privateState.mint_metadata,
+        Number(deploymentCtx.contractState.liquidationThreshold),
+        encodeCoinPublicKey(
+          parseCoinPublicKeyToHex(
+            walletCtx.state.coinPublicKey,
+            getZswapNetworkId()
+          )
         )
-      )
-    );
-  
-    //Start monitoring
-    bot.startMonitoring();
+      );
+
+      //Start monitoring
+      bot.startMonitoring();
+    }
 
     return () => {
-      subscritption?.unsubscribe()
-      bot.stopMonitoring()
+      subscritption?.unsubscribe();
+      bot?.stopMonitoring();
     };
   }, [deploymentCtx?.stateraApi]);
 

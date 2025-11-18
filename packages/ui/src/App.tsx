@@ -1,6 +1,6 @@
 import ConnectToWalletScreen from "./components/custom/ConnectToWalletScreen";
 import Dashboard from "./components/custom/dashboard";
-import useMidnightWallet from "./hookes/useMidnightWallet";
+import useMidnightWallet from "./hooks/useMidnightWallet";
 import { DeployedContractProvider } from "./providers/DeployedContractProvider";
 
 function App() {

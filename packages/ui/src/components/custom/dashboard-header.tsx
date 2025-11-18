@@ -8,18 +8,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import {
-  Wallet,
-  ChevronDown,
-  Activity,
-  Bell,
-  Loader2,
-} from "lucide-react";
-import useMidnightWallet from "@/hookes/useMidnightWallet";
+import { Wallet, ChevronDown, Activity, Bell, Loader2 } from "lucide-react";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
 import toast from "react-hot-toast";
 import { Badge } from "../ui/badge";
-import useDeployment from "@/hookes/useDeployment";
-
+import useDeployment from "@/hooks/useDeployment";
 
 export function DashboardHeader() {
   const walletUtils = useMidnightWallet();
@@ -55,7 +48,9 @@ export function DashboardHeader() {
           </Button>
 
           <Badge
-            variant={deploymentCTX?.userRole === "admin" ? "default" : "secondary"}
+            variant={
+              deploymentCTX?.userRole === "admin" ? "default" : "secondary"
+            }
             className={
               deploymentCTX?.userRole === "admin"
                 ? "bg-gradient-to-r from-cyan-500 to-blue-500 text-white"
@@ -93,8 +88,11 @@ export function DashboardHeader() {
                 try {
                   await walletUtils?.connectFn();
                 } catch (error) {
-                  const errMsg = error instanceof Error ? error.message : "Connection failed, is lace wallet installed?";
-                  toast.error(errMsg)
+                  const errMsg =
+                    error instanceof Error
+                      ? error.message
+                      : "Connection failed, is lace wallet installed?";
+                  toast.error(errMsg);
                 }
               }}
               className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"

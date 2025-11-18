@@ -64,15 +64,20 @@ export class StateraAPI implements DeployedStateraAPI {
       }
     );
 
-    logger?.trace("Found Contract...", {
-      contractJoined: {
-        finalizedDeployTxData: existingContract.deployTxData.public,
+    logger?.trace(
+      {
+        contractJoined: {
+          finalizedDeployTxData: existingContract.deployTxData.public,
+        },
       },
-    });
+      "Found Contract..."
+    );
     return new StateraAPI(providers, existingContract, logger);
   }
 
-  async liquidatePosition(position: LiquidationPayload): Promise<FinalizedCallTxData<StateraContract, "liquidateDebtPosition">> {
+  async liquidatePosition(
+    position: LiquidationPayload
+  ): Promise<FinalizedCallTxData<StateraContract, "liquidateDebtPosition">> {
     // Construct tx with dynamic coin data
     const txData =
       await this.allReadyDeployedContract.callTx.liquidateDebtPosition(
@@ -90,7 +95,7 @@ export class StateraAPI implements DeployedStateraAPI {
           blockHeight: txData.public.blockHeight,
         },
       },
-    }); 
+    });
     return txData;
   }
 
@@ -103,8 +108,8 @@ export class StateraAPI implements DeployedStateraAPI {
     );
     return (
       existingPrivateState ?? {
-        secrete_key: createPrivateStateraState(utils.randomNonceBytes(32))
-          .secrete_key,
+        secret_key: createPrivateStateraState(utils.randomNonceBytes(32))
+          .secret_key,
         mint_metadata: {
           collateral: BigInt(0),
           debt: BigInt(0),

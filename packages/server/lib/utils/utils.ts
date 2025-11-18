@@ -6,7 +6,7 @@ export const randomNonceBytes = (
 ): Uint8Array => {
   const newBytes = new Uint8Array(length);
   crypto.getRandomValues(newBytes);
-  logger?.info("Random nonce bytes", newBytes);
+  logger?.info({ nonceBytes: Array.from(newBytes) }, "Random nonce bytes");
   return newBytes;
 };
 

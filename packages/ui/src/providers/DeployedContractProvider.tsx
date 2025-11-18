@@ -1,12 +1,8 @@
-import useMidnightWallet from "@/hookes/useMidnightWallet";
-import {
-  decodeCoinPublicKey,
-} from "@midnight-ntwrk/compact-runtime";
+import useMidnightWallet from "@/hooks/useMidnightWallet";
+import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
 import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
 import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import type {
-  StateraPrivateState,
-} from "@statera/ada-statera-protocol";
+import type { StateraPrivateState } from "@statera/ada-statera-protocol";
 import {
   StateraAPI,
   type DeployedStateraAPI,
@@ -163,7 +159,7 @@ export const DeployedContractProvider = ({
     error,
     stateraApi,
     onJoinContract,
-    clearError,   
+    clearError,
     contractState,
     privateState,
     userRole,
