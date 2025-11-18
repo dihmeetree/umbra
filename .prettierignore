@@ -1,0 +1,37 @@
+# Dependencies
+node_modules
+managed
+
+# Build outputs
+dist
+build
+.next
+out
+.turbo
+.vite
+
+# Documentation (embedded git repo)
+docs/
+
+# Logs
+logs
+*.log
+
+# Database
+midnight-level-db
+
+# Environment files
+.env
+.env.*
+
+# Misc
+.DS_Store
+coverage
+.vercel
+.pnp.js
+
+# Generated files
+*.min.js
+*.bundle.js
+yarn.lock
+package-lock.json
