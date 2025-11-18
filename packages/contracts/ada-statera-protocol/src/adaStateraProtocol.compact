@@ -68,7 +68,7 @@ export struct Staker {
     entry_scale_factor: Uint<32>;   
 }
 
-/* Returns user local secrete key used for private ID generation */
+/* Returns user local secret key used for private ID generation */
 witness secret_key(): Bytes<32>;
 
 /* Sets mint-metadata private state using deposit ID after minting, repayment or withdrawal */
@@ -85,18 +85,18 @@ constructor(
     initialLVT: Uint<8>,
     initialMCR: Uint<8>,
     _validCollateralAssetType: Bytes<32>
-    ) {
-        super_admin = ownPublicKey().bytes;
-        totalMint = 0;
-        // Liquidatin rate in percentage set at 80%
-        liquidationThreshold = disclose(initLiquidationThreshold);
-        nonce = disclose(intialNonce);
-        LVT = disclose(initialLVT);
-        percentageDivisor = 100;
-        cumulative_scaling_factor = 1;
-        MCR = disclose(initialMCR);
-        validCollateralAssetType = disclose(_validCollateralAssetType);
-        SPECK_per_tDUST = 1000000;
+) {
+    super_admin = ownPublicKey().bytes;
+    totalMint = 0;
+    // Liquidatin rate in percentage set at 80%
+    liquidationThreshold = disclose(initLiquidationThreshold);
+    nonce = disclose(intialNonce);
+    LVT = disclose(initialLVT);
+    percentageDivisor = 100;
+    cumulative_scaling_factor = 1;
+    MCR = disclose(initialMCR);
+    validCollateralAssetType = disclose(_validCollateralAssetType);
+    SPECK_per_tDUST = 1000000;
 }
 
 /* INTERACTION FOR ADMIN ONLY*/
@@ -169,10 +169,10 @@ export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _
     const depositorsId = generateUserId(disclose(secret_key()));
 
     if(depositors.member(depositId)){
-        const currenDepositPosition = depositors.lookup(depositId);
+        const currentDepositPosition = depositors.lookup(depositId);
 
         // If position is closed, reinitialize it like a new position
-        if(currenDepositPosition.position == DebtPositionStatus.closed){
+        if(currentDepositPosition.position == DebtPositionStatus.closed){
             const metadata = MintMetadata{
                 collateral: disclosed_amount as Uint<64>,
                 debt: 0
@@ -182,7 +182,7 @@ export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _
             const borrowLimit = DivisionFunction((LVT * disclosed_amount as Uint<64>) as Uint<64>, percentageDivisor) as Uint<32>;
 
             depositors.insert(depositId, Depositor{
-                ...currenDepositPosition,
+                ...currentDepositPosition,
                 position: DebtPositionStatus.inactive,
                 metadataHash: metadataHash,
                 coinType: disclose(coin.color),
@@ -201,9 +201,9 @@ export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _
             const borrowLimit = DivisionFunction((LVT * newMetadata.collateral) as Uint<64>, percentageDivisor) as Uint<32>;
 
             depositors.insert(depositId, Depositor{
-                ...currenDepositPosition,
+                ...currentDepositPosition,
                 borrowLimit: borrowLimit,
-                position: prev_metadata.collateral == 0 ? DebtPositionStatus.inactive : currenDepositPosition.position,
+                position: prev_metadata.collateral == 0 ? DebtPositionStatus.inactive : currentDepositPosition.position,
                 metadataHash: newMetadataHash
             });
         }
@@ -407,6 +407,7 @@ export circuit depositToStabilityPool(coin: CoinInfo): [] {
 
     // Receives and write to coin balance
     receive(disclosedCoin);
+    
     /* Writes coin to the stakePoolTotal*/
     if(stakers.isEmpty()){
         // Writes coin generated within the tx as first stake
@@ -545,6 +546,7 @@ export circuit liquidateDebtPosition(
         collateral: 0,
         debt: 0
     });
+    
     // Updates deposit state in the mapping
     depositors.insert(disclose(_depositId), Depositor {
         ...collateralDepositToLiquidate,    

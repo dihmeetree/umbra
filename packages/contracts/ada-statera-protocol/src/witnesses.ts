@@ -33,7 +33,7 @@ export const witnesses = {
     return [privateState, [quotient, remainder]]
   },
 
-  // Returns the user's secrete key stored offchain in their private state
+  // Returns the user's secret key stored offchain in their private state
   secret_key: ({
     privateState
   }: WitnessContext<Ledger, StateraPrivateState>): [
