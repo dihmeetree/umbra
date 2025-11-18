@@ -27,7 +27,7 @@
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │  Collateral Pool        Stability Pool      Governance  │
-│  (tDUST → sUSD)        (Staker Rewards)    (Admins)     │
+│  (tDUST → sUSD)        (Staker Rewards)      (Admins)   │
 │       │                      │                  │       │
 │       ├──► Depositors        ├──► Stakers       │       │
 │       │    • Mint sUSD       │    • Earn ADA    │       │

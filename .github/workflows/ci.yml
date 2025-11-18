@@ -1,0 +1,131 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2️⃣ Setup Node.js 22 and Corepack
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable Corepack (for Yarn 4)
+        run: corepack enable
+
+      # 3️⃣ Install Compact compiler
+      - name: Install Compact compiler
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.compact/bin" >> $GITHUB_PATH
+
+      - name: Set Compact compiler to 0.25.0
+        run: |
+          compact update 0.25.0
+
+      - name: Verify Compact installation
+        run: |
+          compact --version
+          compact list
+
+      # 4️⃣ Cache Yarn dependencies
+      - name: Get Yarn cache directory
+        id: yarn-cache-dir-path
+        run: echo "dir=$(yarn config get cacheFolder)" >> $GITHUB_OUTPUT
+
+      - name: Cache Yarn dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+          key: yarn-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      # 5️⃣ Cache Compact compiler (with version in key)
+      - name: Cache Compact compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.compact
+          key: compact-0.25.0-${{ runner.os }}-${{ hashFiles('**/compact-lock.json', '**/compact.json') }}
+          restore-keys: |
+            compact-0.25.0-${{ runner.os }}-
+
+      # 6️⃣ Restore Turborepo cache - UPDATED WITH COMPILER VERSION
+      - name: Cache Turbo
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-compact-0.25.0-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-${{ hashFiles('**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.compact') }}
+          restore-keys: |
+            turbo-compact-0.25.0-${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}-
+            turbo-compact-0.25.0-${{ runner.os }}-
+
+      # 7️⃣ Install dependencies (workspace-aware)
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      # 8️⃣ Build all packages
+      - name: Build all packages
+        run: |
+          yarn turbo run build
+          echo "✅ All packages built successfully"
+
+      # 9️⃣ Type check all packages
+      - name: Type check
+        run: |
+          yarn check-types
+          echo "✅ Type checking passed"
+
+      # 🔟 Lint all packages
+      - name: Lint
+        run: |
+          yarn lint
+          echo "✅ Linting passed"
+
+      # 1️⃣1️⃣ Verify contract artifacts
+      - name: Verify contract artifacts
+        run: |
+          echo "📁 Verifying contract build artifacts..."
+
+          if [ -d "packages/contracts/ada-statera-protocol/dist/managed/adaStateraProtocol/zkir" ]; then
+            echo "✅ ZK artifacts directory exists"
+            BZKIR_COUNT=$(find packages/contracts/ada-statera-protocol/dist/managed/adaStateraProtocol/zkir -name "*.bzkir" 2>/dev/null | wc -l)
+            echo "Found $BZKIR_COUNT .bzkir files"
+
+            if [ $BZKIR_COUNT -eq 0 ]; then
+              echo "⚠️  Warning: No .bzkir files generated"
+            else
+              echo "✅ ZK circuit artifacts verified"
+            fi
+          else
+            echo "❌ ZK artifacts directory not found!"
+            exit 1
+          fi
+
+      # 1️⃣2️⃣ Build summary
+      - name: Build summary
+        run: |
+          echo "✅ CI Pipeline completed successfully"
+          echo ""
+          echo "📦 Build artifacts:"
+          ls -lh packages/contracts/ada-statera-protocol/dist/ || true
+          ls -lh packages/api/dist/ || true
+          ls -lh packages/cli/dist/ || true
+          ls -lh packages/ui/dist/ || true
