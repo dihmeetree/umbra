@@ -1,143 +1,143 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState } from 'react'
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Separator } from "@/components/ui/separator";
+  CardTitle
+} from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
+import { Separator } from '@/components/ui/separator'
 import {
   ArrowDownCircle,
   ArrowUpCircle,
   Wallet,
   AlertTriangle,
-  Loader2,
-} from "lucide-react";
-import useDeployment from "@/hooks/useDeployment";
-import toast from "react-hot-toast";
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { DebtPositionStatus } from "@statera/ada-statera-protocol";
-import { Alert, AlertDescription } from "../ui/alert";
+  Loader2
+} from 'lucide-react'
+import useDeployment from '@/hooks/useDeployment'
+import toast from 'react-hot-toast'
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import { decodeCoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import { parseCoinPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
+import { getZswapNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
+import { DebtPositionStatus } from '@statera/ada-statera-protocol'
+import { Alert, AlertDescription } from '../ui/alert'
 
 export function CollateralManager() {
-  const [depositAmount, setDepositAmount] = useState("");
-  const deploymentCTX = useDeployment();
-  const [withdrawAmount, setWithdrawAmount] = useState("");
-  const walletContext = useMidnightWallet();
-  const [isDepositing, setIsDepositing] = useState<boolean>(false);
-  const [isWithdrawing, setIsWithdrawing] = useState<boolean>(false);
-  const minDeposit = 1;
+  const [depositAmount, setDepositAmount] = useState('')
+  const deploymentCTX = useDeployment()
+  const [withdrawAmount, setWithdrawAmount] = useState('')
+  const walletContext = useMidnightWallet()
+  const [isDepositing, setIsDepositing] = useState<boolean>(false)
+  const [isWithdrawing, setIsWithdrawing] = useState<boolean>(false)
+  const minDeposit = 1
 
   const collateralTypes = [
     {
-      name: "tDUST",
-      balance: "12.5",
-      value: "$25,000",
-      ratio: "150%",
-      icon: "Ξ",
-      color: "from-purple-500 to-blue-500",
+      name: 'tDUST',
+      balance: '12.5',
+      value: '$25,000',
+      ratio: '150%',
+      icon: 'Ξ',
+      color: 'from-purple-500 to-blue-500'
     },
     {
-      name: "WBTC",
-      balance: "0.75",
-      value: "$30,000",
-      ratio: "160%",
-      icon: "₿",
-      color: "from-orange-500 to-yellow-500",
+      name: 'WBTC',
+      balance: '0.75',
+      value: '$30,000',
+      ratio: '160%',
+      icon: '₿',
+      color: 'from-orange-500 to-yellow-500'
     },
     {
-      name: "USDC",
-      balance: "5,000",
-      value: "$5,000",
-      ratio: "110%",
-      icon: "$",
-      color: "from-green-500 to-emerald-500",
-    },
-  ];
+      name: 'USDC',
+      balance: '5,000',
+      value: '$5,000',
+      ratio: '110%',
+      icon: '$',
+      color: 'from-green-500 to-emerald-500'
+    }
+  ]
 
   const depositPosition = useCallback(() => {
     if (
       !deploymentCTX?.privateState ||
       !deploymentCTX?.contractState?.collateralDepositors
     )
-      return;
+      return
     const walletAddressHex = parseCoinPublicKeyToHex(
       walletContext?.state.coinPublicKey as string,
       getZswapNetworkId()
-    );
+    )
     const vault = deploymentCTX.contractState.collateralDepositors.find(
       (vault) => decodeCoinPublicKey(vault.id) == walletAddressHex
-    );
-    console.log("vault", vault);
-    if (!vault) return;
-    return vault;
+    )
+    console.log('vault', vault)
+    if (!vault) return
+    return vault
   }, [
     deploymentCTX?.privateState,
     walletContext?.state,
-    deploymentCTX?.contractState?.collateralDepositors,
-  ])();
+    deploymentCTX?.contractState?.collateralDepositors
+  ])()
 
   const handleCreateOrWithdrawFromPosition = async (
     amount: number,
-    action: "deposit" | "withdraw",
+    action: 'deposit' | 'withdraw',
     orace_price?: number
   ) => {
-    action == "deposit" ? setIsDepositing(true) : setIsWithdrawing(true);
+    action == 'deposit' ? setIsDepositing(true) : setIsWithdrawing(true)
     try {
       if (!walletContext) {
-        toast.error("Wallet not connected");
-        return;
+        toast.error('Wallet not connected')
+        return
       }
       if (!deploymentCTX?.stateraApi) {
-        toast.error("Contract not deployed or loaded");
-        return;
+        toast.error('Contract not deployed or loaded')
+        return
       }
 
-      console.log("Attempting deposit with amount:", amount);
-      console.log("Deployment context:", deploymentCTX);
-      console.log("Wallet context:", walletContext);
+      console.log('Attempting deposit with amount:', amount)
+      console.log('Deployment context:', deploymentCTX)
+      console.log('Wallet context:', walletContext)
 
       const tx =
-        action == "deposit"
+        action == 'deposit'
           ? await deploymentCTX.stateraApi.depositToCollateralPool(
               Math.round(amount)
             )
           : await deploymentCTX.stateraApi.withdrawCollateral(
               amount,
               orace_price as number
-            );
-      action == "deposit" ? setIsDepositing(false) : setIsWithdrawing(false);
+            )
+      action == 'deposit' ? setIsDepositing(false) : setIsWithdrawing(false)
 
-      if (tx?.public.status === "SucceedEntirely") {
-        toast.success("Created vault successfully");
+      if (tx?.public.status === 'SucceedEntirely') {
+        toast.success('Created vault successfully')
       } else {
         toast.error(
-          action == "deposit" ? "Failed to create vault" : "Failed to withdraw"
-        );
+          action == 'deposit' ? 'Failed to create vault' : 'Failed to withdraw'
+        )
       }
     } catch (error) {
-      console.error("Deposit error:", error);
+      console.error('Deposit error:', error)
       console.error(
-        "Error stack:",
-        error instanceof Error ? error.stack : "No stack"
-      );
+        'Error stack:',
+        error instanceof Error ? error.stack : 'No stack'
+      )
       const errMsg =
-        error instanceof Error ? error.message : "Transction failed";
-      toast.error(errMsg);
+        error instanceof Error ? error.message : 'Transction failed'
+      toast.error(errMsg)
     } finally {
-      action == "deposit" ? setIsDepositing(false) : setIsWithdrawing(false);
+      action == 'deposit' ? setIsDepositing(false) : setIsWithdrawing(false)
     }
-  };
+  }
 
   if (!deploymentCTX?.contractState || !deploymentCTX.privateState) {
     return (
@@ -145,7 +145,7 @@ export function CollateralManager() {
         <Loader2 className="animate-spin w-24 h-24 text-blue-500" />
         <p className="text-lg text-slate-400 py-4">Just a moment</p>
       </div>
-    );
+    )
   }
 
   return (
@@ -221,7 +221,7 @@ export function CollateralManager() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setDepositAmount("1")}
+                        onClick={() => setDepositAmount('1')}
                         className="bg-slate-700/30 border-slate-600 text-slate-300 hover:text-white"
                       >
                         25%
@@ -229,7 +229,7 @@ export function CollateralManager() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setDepositAmount("5")}
+                        onClick={() => setDepositAmount('5')}
                         className="bg-slate-700/30 border-slate-600 text-slate-300 hover:text-white"
                       >
                         50%
@@ -237,7 +237,7 @@ export function CollateralManager() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setDepositAmount("7")}
+                        onClick={() => setDepositAmount('7')}
                         className="bg-slate-700/30 border-slate-600 text-slate-300 hover:text-white"
                       >
                         75%
@@ -245,7 +245,7 @@ export function CollateralManager() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => setDepositAmount("10")}
+                        onClick={() => setDepositAmount('10')}
                         className="bg-slate-700/30 border-slate-600 text-slate-300 hover:text-white"
                       >
                         Max
@@ -267,7 +267,7 @@ export function CollateralManager() {
                       <div className="flex justify-between text-sm">
                         <span className="text-slate-300">Deposit Amount</span>
                         <span className="text-white font-medium">
-                          {depositAmount || "0"} tDUST
+                          {depositAmount || '0'} tDUST
                         </span>
                       </div>
                     </div>
@@ -278,7 +278,7 @@ export function CollateralManager() {
                       onClick={() =>
                         handleCreateOrWithdrawFromPosition(
                           Number(depositAmount),
-                          "deposit"
+                          'deposit'
                         )
                       }
                     >
@@ -318,8 +318,8 @@ export function CollateralManager() {
                       </Button>
                     </div>
                     <p className="text-xs text-slate-400">
-                      Available to withdraw:{" "}
-                      {deploymentCTX?.privateState?.mint_metadata.collateral}{" "}
+                      Available to withdraw:{' '}
+                      {deploymentCTX?.privateState?.mint_metadata.collateral}{' '}
                       tDUST (~$
                       {deploymentCTX?.privateState?.mint_metadata.collateral})
                     </p>
@@ -330,8 +330,8 @@ export function CollateralManager() {
                     <Alert className="border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20">
                       <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
                       <AlertDescription className="text-red-800 dark:text-red-200">
-                        Can not withdraw more than available collateral:{" "}
-                        {deploymentCTX?.privateState?.mint_metadata.collateral}{" "}
+                        Can not withdraw more than available collateral:{' '}
+                        {deploymentCTX?.privateState?.mint_metadata.collateral}{' '}
                         tDUST
                       </AlertDescription>
                     </Alert>
@@ -359,7 +359,7 @@ export function CollateralManager() {
                     onClick={() =>
                       handleCreateOrWithdrawFromPosition(
                         parseInt(withdrawAmount),
-                        "withdraw",
+                        'withdraw',
                         1
                       )
                     }
@@ -394,11 +394,11 @@ export function CollateralManager() {
                   <Badge variant="secondary">
                     {depositPosition.depositor.position ==
                     DebtPositionStatus.inactive
-                      ? "Inactive"
+                      ? 'Inactive'
                       : depositPosition.depositor.position ==
                           DebtPositionStatus.active
-                        ? "Active"
-                        : "Closed"}
+                        ? 'Active'
+                        : 'Closed'}
                   </Badge>
                 </CardTitle>
               </CardHeader>
@@ -519,5 +519,5 @@ export function CollateralManager() {
         </div>
       </div>
     </div>
-  );
+  )
 }

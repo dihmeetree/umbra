@@ -1,10 +1,10 @@
-import type { Logger } from "pino";
+import type { Logger } from 'pino'
 
 type attempFnType = (
   retry: number,
   currentDelay: number,
   isRetry: boolean
-) => void;
+) => void
 
 export const enableRetry = <T>(
   fnOpertion: () => Promise<T>,
@@ -24,29 +24,26 @@ export const enableRetry = <T>(
       fnOpertion()
         .then((result) => {
           if (isRetry) {
-            logger.info(`[${fnName}] succeeded after retries`);
+            logger.info(`[${fnName}] succeeded after retries`)
           }
-          resolve(result);
+          resolve(result)
         })
         .catch((error) => {
-          logger.error(`[${fnName}] failed: ${error.message}`);
+          logger.error(`[${fnName}] failed: ${error.message}`)
 
           if (retries <= 0) {
-            logger.error(`[${fnName}] failed: ${error.message}`);
-            reject(error);
+            logger.error(`[${fnName}] failed: ${error.message}`)
+            reject(error)
           } else {
-            logger.info(`[${fnName}] failed: Retrying in ${currentDelay}ms`);
+            logger.info(`[${fnName}] failed: Retrying in ${currentDelay}ms`)
             setTimeout(() => {
-              const nextDelay = Math.min(
-                currentDelay * backOffFactor,
-                maxDelay
-              );
-              attempt(retry - 1, nextDelay, true);
-            }, currentDelay);
+              const nextDelay = Math.min(currentDelay * backOffFactor, maxDelay)
+              attempt(retry - 1, nextDelay, true)
+            }, currentDelay)
           }
-        });
-    };
+        })
+    }
 
-    attempt(retries, delay, false);
-  });
-};
+    attempt(retries, delay, false)
+  })
+}

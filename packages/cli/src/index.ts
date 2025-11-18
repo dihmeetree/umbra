@@ -456,13 +456,13 @@ const circuit_main_loop = async (
         }
 
         case "18": {
-          const addrss = await rli.question("Enter oracle public key to remove: ");
+          const addrss = await rli.question(
+            "Enter oracle public key to remove: "
+          );
           await stateraApi.removeTrustedOracle(addrss);
 
           // Wait for wallet to sync after withdrawal
-          logger.info(
-            "Waiting for wallet to sync after removing oracle pk..."
-          );
+          logger.info("Waiting for wallet to sync after removing oracle pk...");
           await waitForWalletSyncAfterOperation(wallet, logger);
           await displayComprehensiveWalletState(wallet, currentState, logger);
           break;
@@ -856,7 +856,7 @@ export const buildWalletAndWaitForFunds = async (
 
   // Auto-transfer half to Lace wallet for UI testing
   const laceAddress =
-    'mn_shield-addr_undeployed1yax8n6g0mu8zj35zn8lkynw8pyjzxpqm5wtkkajxfl4w8grmn99qxq8n4ecxhu5vs44yqa5sk35qsxnltgfru534qxmf7su440xhuxgr9vj9xnjq';
+    "mn_shield-addr_undeployed1yax8n6g0mu8zj35zn8lkynw8pyjzxpqm5wtkkajxfl4w8grmn99qxq8n4ecxhu5vs44yqa5sk35qsxnltgfru534qxmf7su440xhuxgr9vj9xnjq";
   const amountToSend = balance / 2n;
   logger.info(`Sending ${amountToSend} to Lace wallet: ${laceAddress}`);
 
@@ -866,12 +866,12 @@ export const buildWalletAndWaitForFunds = async (
       {
         amount: amountToSend,
         type: nativeToken(),
-        receiverAddress: laceAddress
-      }
+        receiverAddress: laceAddress,
+      },
     ]);
 
     // Step 2: Prove the transaction
-    logger.info('Proving transaction (this may take a moment)...');
+    logger.info("Proving transaction (this may take a moment)...");
     const provenTransaction = await wallet.proveTransaction(transferRecipe);
 
     // Step 3: Submit the transaction
@@ -884,7 +884,7 @@ export const buildWalletAndWaitForFunds = async (
     const newBalance = newState.balances[nativeToken()];
     logger.info(`New wallet balance: ${newBalance}`);
   } catch (error) {
-    logger.error({ error }, 'Failed to transfer to Lace wallet');
+    logger.error({ error }, "Failed to transfer to Lace wallet");
   }
 
   return wallet;

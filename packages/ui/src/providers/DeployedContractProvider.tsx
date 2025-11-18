@@ -1,157 +1,157 @@
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import type { StateraPrivateState } from "@statera/ada-statera-protocol";
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import { decodeCoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import { getZswapNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
+import { parseCoinPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
+import type { StateraPrivateState } from '@statera/ada-statera-protocol'
 import {
   StateraAPI,
   type DeployedStateraAPI,
-  type DerivedStateraContractState,
-} from "@statera/statera-api";
-import type { Logger } from "pino";
+  type DerivedStateraContractState
+} from '@statera/statera-api'
+import type { Logger } from 'pino'
 import {
   createContext,
   useCallback,
   useEffect,
   useState,
-  type PropsWithChildren,
-} from "react";
-import toast from "react-hot-toast";
+  type PropsWithChildren
+} from 'react'
+import toast from 'react-hot-toast'
 
 export interface DeploymentProvider {
-  readonly userRole: "admin" | "user";
-  readonly privateState: StateraPrivateState | null;
-  readonly isJoining: boolean;
-  readonly error: string | null;
-  readonly hasJoined: boolean;
-  readonly stateraApi: DeployedStateraAPI | undefined;
-  readonly contractState: DerivedStateraContractState | undefined;
-  onJoinContract: () => Promise<void>;
-  clearError: () => void;
+  readonly userRole: 'admin' | 'user'
+  readonly privateState: StateraPrivateState | null
+  readonly isJoining: boolean
+  readonly error: string | null
+  readonly hasJoined: boolean
+  readonly stateraApi: DeployedStateraAPI | undefined
+  readonly contractState: DerivedStateraContractState | undefined
+  onJoinContract: () => Promise<void>
+  clearError: () => void
 }
 
 export const DeployedContractContext = createContext<DeploymentProvider | null>(
   null
-);
+)
 
 interface DeployedContractProviderProps extends PropsWithChildren {
-  logger?: Logger;
-  contractAddress?: string;
+  logger?: Logger
+  contractAddress?: string
 }
 
 export const DeployedContractProvider = ({
   children,
   logger,
-  contractAddress = import.meta.env.VITE_CONTRACT_ADDRESS,
+  contractAddress = import.meta.env.VITE_CONTRACT_ADDRESS
 }: DeployedContractProviderProps) => {
   const [stateraApi, setStateraApi] = useState<DeployedStateraAPI | undefined>(
     undefined
-  );
-  const [isJoining, setIsJoining] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+  )
+  const [isJoining, setIsJoining] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
   const [contractState, setContractState] = useState<
     DerivedStateraContractState | undefined
-  >(undefined);
-  const [hasJoined, setHasJoined] = useState<boolean>(false);
+  >(undefined)
+  const [hasJoined, setHasJoined] = useState<boolean>(false)
   const [privateState, setPrivateState] = useState<StateraPrivateState | null>(
     null
-  );
-  const [userRole, setUserRole] = useState<"admin" | "user">("user");
+  )
+  const [userRole, setUserRole] = useState<'admin' | 'user'>('user')
 
   // Use the custom hook instead of useContext directly
-  const walletContext = useMidnightWallet();
+  const walletContext = useMidnightWallet()
 
   const onJoinContract = async () => {
     // Prevent multiple simultaneous joins
-    if (isJoining || hasJoined) return;
+    if (isJoining || hasJoined) return
 
     // Validate requirements
     if (!walletContext?.hasConnected) {
-      setError("Wallet must be connected before joining contract");
-      return;
+      setError('Wallet must be connected before joining contract')
+      return
     }
 
     if (!contractAddress) {
-      setError("Contract address not configured");
-      toast.error("Contract address not configured");
-      return;
+      setError('Contract address not configured')
+      toast.error('Contract address not configured')
+      return
     }
 
-    setIsJoining(true);
-    setError(null);
+    setIsJoining(true)
+    setError(null)
 
     try {
       const deployedAPI = await StateraAPI.joinStateraContract(
         walletContext,
         contractAddress,
         logger
-      );
+      )
 
-      setStateraApi(deployedAPI);
-      toast.success("Onboarded successfully");
-      setHasJoined(true);
-      logger?.info("Successfully joined contract", { contractAddress });
+      setStateraApi(deployedAPI)
+      toast.success('Onboarded successfully')
+      setHasJoined(true)
+      logger?.info('Successfully joined contract', { contractAddress })
     } catch (error) {
       const errMsg =
         error instanceof Error
           ? error.message
-          : `Failed to join contract at ${contractAddress}`;
-      setError(errMsg);
-      toast.error(errMsg);
-      logger?.error("Failed to join contract", {
+          : `Failed to join contract at ${contractAddress}`
+      setError(errMsg)
+      toast.error(errMsg)
+      logger?.error('Failed to join contract', {
         error: errMsg,
-        contractAddress,
-      });
+        contractAddress
+      })
     } finally {
-      setIsJoining(false);
+      setIsJoining(false)
     }
-  };
+  }
 
   const clearError = useCallback(() => {
-    setError(null);
-  }, []);
+    setError(null)
+  }, [])
 
   useEffect(() => {
-    if (!stateraApi) return;
+    if (!stateraApi) return
 
-    const stateSubscription = stateraApi.state.subscribe(setContractState);
+    const stateSubscription = stateraApi.state.subscribe(setContractState)
 
-    return () => stateSubscription.unsubscribe();
-  }, [stateraApi]);
+    return () => stateSubscription.unsubscribe()
+  }, [stateraApi])
 
   useEffect(() => {
-    if (!stateraApi && !walletContext) return;
-    (async function fetchPrivateState() {
+    if (!stateraApi && !walletContext) return
+    ;(async function fetchPrivateState() {
       const userPrivateState = await walletContext?.privateStateProvider.get(
-        "stateraPrivateState"
-      );
+        'stateraPrivateState'
+      )
 
       if (userPrivateState) {
-        setPrivateState(userPrivateState);
-      } else return;
-    })();
-  }, [walletContext?.privateStateProvider, contractState]);
+        setPrivateState(userPrivateState)
+      } else return
+    })()
+  }, [walletContext?.privateStateProvider, contractState])
 
   useEffect(() => {
-    if (!contractState) return;
+    if (!contractState) return
 
     const walletAddressHex = parseCoinPublicKeyToHex(
       walletContext?.state.coinPublicKey as string,
       getZswapNetworkId()
-    );
+    )
 
     const role =
       decodeCoinPublicKey(contractState.super_admin) == walletAddressHex ||
       contractState.admins.findIndex(
         (admin) => decodeCoinPublicKey(admin) == walletAddressHex
       ) != -1
-        ? "admin"
-        : "user";
+        ? 'admin'
+        : 'user'
 
-    console.log("USER ROLE:", role);
+    console.log('USER ROLE:', role)
 
-    setUserRole(role);
-  }, [stateraApi, contractState]);
+    setUserRole(role)
+  }, [stateraApi, contractState])
 
   const contextValue: DeploymentProvider = {
     isJoining,
@@ -162,12 +162,12 @@ export const DeployedContractProvider = ({
     clearError,
     contractState,
     privateState,
-    userRole,
-  };
+    userRole
+  }
 
   return (
     <DeployedContractContext.Provider value={contextValue}>
       {children}
     </DeployedContractContext.Provider>
-  );
-};
+  )
+}

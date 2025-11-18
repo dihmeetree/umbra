@@ -1,18 +1,18 @@
-import { useState } from "react";
+import { useState } from 'react'
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Separator } from "@/components/ui/separator";
+  CardTitle
+} from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
+import { Separator } from '@/components/ui/separator'
 import {
   TrendingUp,
   Shield,
@@ -20,28 +20,28 @@ import {
   Clock,
   Loader2,
   Wallet,
-  AlertTriangle,
-} from "lucide-react";
-import useDeployment from "@/hooks/useDeployment";
-import toast from "react-hot-toast";
-import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { Alert, AlertDescription } from "../ui/alert";
+  AlertTriangle
+} from 'lucide-react'
+import useDeployment from '@/hooks/useDeployment'
+import toast from 'react-hot-toast'
+import { decodeCoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import { parseCoinPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import { getZswapNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
+import { Alert, AlertDescription } from '../ui/alert'
 
-type StakersActions = "stake" | "unstake" | "check" | "withdraw";
+type StakersActions = 'stake' | 'unstake' | 'check' | 'withdraw'
 
 export function StakingInterface() {
-  const [stakeAmount, setStakeAmount] = useState("");
-  const [unstakeAmount, setUnstakeAmount] = useState("");
-  const [isStaking, setIsStaking] = useState(false);
-  const [isUnstaking, setIsUnstaking] = useState(false);
-  const [withdrawingReward, setWithdrawingReward] = useState(false);
-  const [checking, setChecking] = useState(false);
-  const deploymentCTX = useDeployment();
-  const walletCtx = useMidnightWallet();
-  const minStakeAmount = 2;
+  const [stakeAmount, setStakeAmount] = useState('')
+  const [unstakeAmount, setUnstakeAmount] = useState('')
+  const [isStaking, setIsStaking] = useState(false)
+  const [isUnstaking, setIsUnstaking] = useState(false)
+  const [withdrawingReward, setWithdrawingReward] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const deploymentCTX = useDeployment()
+  const walletCtx = useMidnightWallet()
+  const minStakeAmount = 2
 
   const stakePosition =
     walletCtx &&
@@ -52,54 +52,52 @@ export function StakingInterface() {
           walletCtx.state.coinPublicKey as string,
           getZswapNetworkId()
         )
-    );
+    )
 
   const handleStakeInteraction = async (
     action: StakersActions,
     stateSetter: React.Dispatch<React.SetStateAction<boolean>>,
     amt?: number
   ) => {
-    if (!deploymentCTX?.stateraApi) return;
-    let txResult;
-    stateSetter(true);
+    if (!deploymentCTX?.stateraApi) return
+    let txResult
+    stateSetter(true)
     try {
       switch (action) {
-        case "stake":
+        case 'stake':
           txResult = await deploymentCTX?.stateraApi.depositToStakePool(
             amt as number
-          );
-          break;
-        case "unstake":
-          txResult = await deploymentCTX.stateraApi.withdrawStake(
-            amt as number
-          );
-          break;
-        case "check":
-          txResult = await deploymentCTX.stateraApi.checkStakeReward();
-          break;
-        case "withdraw":
+          )
+          break
+        case 'unstake':
+          txResult = await deploymentCTX.stateraApi.withdrawStake(amt as number)
+          break
+        case 'check':
+          txResult = await deploymentCTX.stateraApi.checkStakeReward()
+          break
+        case 'withdraw':
           txResult = await deploymentCTX.stateraApi.withdrawStakeReward(
             amt as number
-          );
-          break;
+          )
+          break
         default:
-          break;
+          break
       }
-      txResult?.public.status === "SucceedEntirely"
+      txResult?.public.status === 'SucceedEntirely'
         ? toast.success(`${action.toLocaleUpperCase()} Transaction successfull`)
-        : toast.error(`${action.toLocaleUpperCase()} Transaction failed`);
-      stateSetter(false);
+        : toast.error(`${action.toLocaleUpperCase()} Transaction failed`)
+      stateSetter(false)
     } catch (error) {
       const errMsg =
         error instanceof Error
           ? error.message
-          : `${action.toLocaleUpperCase()} Transaction Failed`;
-      toast.error(errMsg);
-      stateSetter(false);
+          : `${action.toLocaleUpperCase()} Transaction Failed`
+      toast.error(errMsg)
+      stateSetter(false)
     } finally {
-      stateSetter(false);
+      stateSetter(false)
     }
-  };
+  }
 
   if (!deploymentCTX?.contractState) {
     return (
@@ -107,7 +105,7 @@ export function StakingInterface() {
         <Loader2 className="animate-spin w-24 h-24 text-blue-500" />
         <p className="text-lg text-slate-400 py-4">Just a moment</p>
       </div>
-    );
+    )
   }
 
   return (
@@ -163,28 +161,28 @@ export function StakingInterface() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setStakeAmount("3")}
+                      onClick={() => setStakeAmount('3')}
                     >
                       25%
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setStakeAmount("5")}
+                      onClick={() => setStakeAmount('5')}
                     >
                       50%
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setStakeAmount("7")}
+                      onClick={() => setStakeAmount('7')}
                     >
                       75%
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setStakeAmount("10")}
+                      onClick={() => setStakeAmount('10')}
                     >
                       Max
                     </Button>
@@ -218,14 +216,14 @@ export function StakingInterface() {
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
                       <span>Stake Amount</span>
-                      <span>{stakeAmount || "0"} sUSD</span>
+                      <span>{stakeAmount || '0'} sUSD</span>
                     </div>
                   </div>
 
                   <Button
                     onClick={() =>
                       handleStakeInteraction(
-                        "stake",
+                        'stake',
                         setIsStaking,
                         parseInt(stakeAmount)
                       )
@@ -263,7 +261,7 @@ export function StakingInterface() {
                       <Button>sUSD</Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Staked:{" "}
+                      Staked:{' '}
                       {stakePosition?.staker.effective_user_balance || 0} sUSD
                     </p>
                   </div>
@@ -295,7 +293,7 @@ export function StakingInterface() {
                   <Button
                     onClick={() =>
                       handleStakeInteraction(
-                        "unstake",
+                        'unstake',
                         setIsUnstaking,
                         parseInt(unstakeAmount)
                       )
@@ -357,7 +355,7 @@ export function StakingInterface() {
                 </div>
 
                 <Button
-                  onClick={() => handleStakeInteraction("check", setChecking)}
+                  onClick={() => handleStakeInteraction('check', setChecking)}
                   className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
                 >
                   {checking ? (
@@ -376,7 +374,7 @@ export function StakingInterface() {
                   <Button
                     onClick={() =>
                       handleStakeInteraction(
-                        "withdraw",
+                        'withdraw',
                         setWithdrawingReward,
                         parseInt(stakeAmount)
                       )
@@ -391,7 +389,7 @@ export function StakingInterface() {
                         Claiming Reward...
                       </div>
                     ) : (
-                      "Claim Rewards"
+                      'Claim Rewards'
                     )}
                   </Button>
                 )}
@@ -448,5 +446,5 @@ export function StakingInterface() {
         </div>
       </div>
     </div>
-  );
+  )
 }

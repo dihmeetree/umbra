@@ -1,41 +1,41 @@
-import { useState } from "react";
+import { useState } from 'react'
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Separator } from "@/components/ui/separator";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+  CardTitle
+} from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
+import { Separator } from '@/components/ui/separator'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   Coins,
   ArrowRightLeft,
   TrendingUp,
   AlertTriangle,
   CheckCircle,
-  Loader2,
-} from "lucide-react";
-import useDeployment from "@/hooks/useDeployment";
-import toast from "react-hot-toast";
-import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+  Loader2
+} from 'lucide-react'
+import useDeployment from '@/hooks/useDeployment'
+import toast from 'react-hot-toast'
+import { decodeCoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import { parseCoinPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
+import { getZswapNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
 
 export function MintingInterface() {
-  const [mintAmount, setMintAmount] = useState("");
-  const [isMinting, setIsMinting] = useState<boolean>(false);
-  const [repayAmount, setRepayAmount] = useState("");
-  const [isRepaying, setIsRepaying] = useState<boolean>(false);
-  const deploymentCTX = useDeployment();
-  const wallet = useMidnightWallet();
+  const [mintAmount, setMintAmount] = useState('')
+  const [isMinting, setIsMinting] = useState<boolean>(false)
+  const [repayAmount, setRepayAmount] = useState('')
+  const [isRepaying, setIsRepaying] = useState<boolean>(false)
+  const deploymentCTX = useDeployment()
+  const wallet = useMidnightWallet()
   const mintPosition =
     wallet &&
     deploymentCTX?.contractState?.collateralDepositors.find(
@@ -45,71 +45,71 @@ export function MintingInterface() {
           wallet?.state.coinPublicKey as string,
           getZswapNetworkId()
         )
-    );
+    )
 
-  const minHFator = 1;
+  const minHFator = 1
 
-  const calculateHealthFactor = (amount: string, action: "mint" | "repay") => {
-    if (!amount) return mintPosition?.depositor.hFactor;
-    const numAmount = Number.parseFloat(amount);
-    if (action === "mint") {
+  const calculateHealthFactor = (amount: string, action: 'mint' | 'repay') => {
+    if (!amount) return mintPosition?.depositor.hFactor
+    const numAmount = Number.parseFloat(amount)
+    if (action === 'mint') {
       return Math.round(
         (Number(deploymentCTX?.privateState?.mint_metadata.collateral) *
           Number(deploymentCTX?.contractState?.liquidationThreshold)) /
           (numAmount * 100)
-      );
+      )
     } else {
       const balance =
         Number(deploymentCTX?.privateState?.mint_metadata.debt) -
-        parseInt(amount);
+        parseInt(amount)
       return Math.round(
         (Number(deploymentCTX?.privateState?.mint_metadata.collateral) *
           Number(deploymentCTX?.contractState?.liquidationThreshold)) /
           (balance * 100)
-      );
+      )
     }
-  };
+  }
 
   const handleMintOrRepaySUSD = async (
     amount: number,
-    action: "mint" | "repay"
+    action: 'mint' | 'repay'
   ) => {
-    action == "mint" ? setIsMinting(true) : setIsRepaying(true);
+    action == 'mint' ? setIsMinting(true) : setIsRepaying(true)
     try {
       if (
-        action == "mint" &&
+        action == 'mint' &&
         amount > Number(mintPosition?.depositor.borrowLimit)
       ) {
         // handle case where amount is greater than debt
-        toast.error("Mint greater than borrow limit is not allowed");
-        return;
+        toast.error('Mint greater than borrow limit is not allowed')
+        return
       }
 
       const result =
-        action == "mint"
+        action == 'mint'
           ? await deploymentCTX?.stateraApi?.mint_sUSD(amount)
-          : await deploymentCTX?.stateraApi?.repay(amount);
-      action == "mint" ? setIsMinting(false) : setIsRepaying(false);
-      if (result?.public.status === "SucceedEntirely") {
+          : await deploymentCTX?.stateraApi?.repay(amount)
+      action == 'mint' ? setIsMinting(false) : setIsRepaying(false)
+      if (result?.public.status === 'SucceedEntirely') {
         toast.success(
-          action == "mint"
+          action == 'mint'
             ? `Minted ${amount} sUSD successfully`
             : `Repayment successful`
-        );
+        )
       } else {
-        toast.error("Failed to Mint sUSD. Try again");
+        toast.error('Failed to Mint sUSD. Try again')
       }
     } catch (error) {
-      setIsMinting(false);
+      setIsMinting(false)
       const errorMessage =
         error instanceof Error
           ? error.message
-          : "Could not send mint request: Check your internet connection";
-      toast.error(errorMessage);
+          : 'Could not send mint request: Check your internet connection'
+      toast.error(errorMessage)
     } finally {
-      action == "mint" ? setIsMinting(false) : setIsRepaying(false);
+      action == 'mint' ? setIsMinting(false) : setIsRepaying(false)
     }
-  };
+  }
 
   if (!deploymentCTX?.contractState || !deploymentCTX.privateState) {
     return (
@@ -117,7 +117,7 @@ export function MintingInterface() {
         <Loader2 className="animate-spin w-24 h-24 text-blue-500" />
         <p className="text-lg text-slate-400 py-4">Just a moment</p>
       </div>
-    );
+    )
   }
 
   return (
@@ -166,7 +166,7 @@ export function MintingInterface() {
                       <Button variant="outline">sUSD</Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Maximum mintable: {mintPosition?.depositor.borrowLimit}{" "}
+                      Maximum mintable: {mintPosition?.depositor.borrowLimit}{' '}
                       sUSD
                     </p>
                   </div>
@@ -240,14 +240,14 @@ export function MintingInterface() {
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
                       <span>Mint Amount</span>
-                      <span>{mintAmount || "0"} sUSD</span>
+                      <span>{mintAmount || '0'} sUSD</span>
                     </div>
                     <div className="flex justify-between text-sm">
                       <span>Minting Fee (0.0%)</span>
                       <span>
                         {mintAmount
                           ? (Number.parseFloat(mintAmount) * 0.0).toFixed(2)
-                          : "0"}{" "}
+                          : '0'}{' '}
                         sUSD
                       </span>
                     </div>
@@ -257,11 +257,11 @@ export function MintingInterface() {
                     className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
                     disabled={
                       !mintAmount ||
-                      (calculateHealthFactor(mintAmount, "mint") as number) <
+                      (calculateHealthFactor(mintAmount, 'mint') as number) <
                         minHFator
                     }
                     onClick={() =>
-                      handleMintOrRepaySUSD(parseInt(mintAmount), "mint")
+                      handleMintOrRepaySUSD(parseInt(mintAmount), 'mint')
                     }
                   >
                     {isMinting ? (
@@ -292,7 +292,7 @@ export function MintingInterface() {
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Loan to repay: $
-                      {deploymentCTX?.privateState?.mint_metadata.debt || 0}{" "}
+                      {deploymentCTX?.privateState?.mint_metadata.debt || 0}{' '}
                       sUSD
                     </p>
                   </div>
@@ -315,12 +315,12 @@ export function MintingInterface() {
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
                       <span>Repay Amount</span>
-                      <span>{repayAmount || "0"} sUSD</span>
+                      <span>{repayAmount || '0'} sUSD</span>
                     </div>
                     <div className="flex justify-between text-sm">
                       <span>New Health Factor</span>
                       <span className="text-green-600">
-                        {calculateHealthFactor(repayAmount, "repay")}%
+                        {calculateHealthFactor(repayAmount, 'repay')}%
                       </span>
                     </div>
                   </div>
@@ -329,7 +329,7 @@ export function MintingInterface() {
                     className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
                     disabled={!repayAmount}
                     onClick={() =>
-                      handleMintOrRepaySUSD(parseInt(repayAmount), "repay")
+                      handleMintOrRepaySUSD(parseInt(repayAmount), 'repay')
                     }
                   >
                     {isRepaying ? (
@@ -468,5 +468,5 @@ export function MintingInterface() {
         </div>
       </div>
     </div>
-  );
+  )
 }

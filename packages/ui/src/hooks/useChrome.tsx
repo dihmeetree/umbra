@@ -1,14 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react'
 
 function useIsChrome() {
-  const [isChrome, setIsChrome] = useState(false);
+  const [isChrome, setIsChrome] = useState(false)
 
   useEffect(() => {
-    const checkChrome = /Chrome/.test(navigator.userAgent) && /Google Inc/.test(navigator.vendor);
-    setIsChrome(checkChrome);
-  }, []);
+    const checkChrome =
+      /Chrome/.test(navigator.userAgent) && /Google Inc/.test(navigator.vendor)
+    setIsChrome(checkChrome)
+  }, [])
 
-  return isChrome;
+  return isChrome
 }
 
-export default useIsChrome;
+export default useIsChrome

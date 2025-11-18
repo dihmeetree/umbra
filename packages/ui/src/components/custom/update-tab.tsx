@@ -1,52 +1,50 @@
-import { TabsContent } from "../ui/tabs";
-import { Label } from "@radix-ui/react-label";
-import { Input } from "../ui/input";
-import { Button } from "../ui/button";
+import { TabsContent } from '../ui/tabs'
+import { Label } from '@radix-ui/react-label'
+import { Input } from '../ui/input'
+import { Button } from '../ui/button'
 import {
   CoinsIcon,
   Delete,
   Loader2,
   PlusSquareIcon,
-  Settings,
-} from "lucide-react";
-import type { AdminActions, AdminPayload } from "./admin-panel";
-import { useState } from "react";
-import useDeployment from "@/hooks/useDeployment";
-import toast from "react-hot-toast";
+  Settings
+} from 'lucide-react'
+import type { AdminActions, AdminPayload } from './admin-panel'
+import { useState } from 'react'
+import useDeployment from '@/hooks/useDeployment'
+import toast from 'react-hot-toast'
 
 interface ContractUpdateTabProps {
   handleAdminFunctionality: (
     action: AdminActions,
     stateSetter: React.Dispatch<React.SetStateAction<boolean>>,
     payload?: AdminPayload
-  ) => Promise<void>;
+  ) => Promise<void>
 }
 
 const ContractUpdateTab = ({
-  handleAdminFunctionality,
+  handleAdminFunctionality
 }: ContractUpdateTabProps) => {
-  const [newCollateralRatio, setNewCollateralRatio] = useState("");
-  const [liquidationThreshold, setLiquidationThreshold] = useState("");
-  const [LVT, setLVT] = useState("");
-  const [isUpdating, setIsUpdating] = useState(false);
-  const [isAdding, setIsAdding] = useState(false);
-  const [isRemoving, setIsRemoving] = useState(false);
-  const [oraclePk, setOraclePk] = useState("");
-  const [isSetting, setIsSetting] = useState(false);
+  const [newCollateralRatio, setNewCollateralRatio] = useState('')
+  const [liquidationThreshold, setLiquidationThreshold] = useState('')
+  const [LVT, setLVT] = useState('')
+  const [isUpdating, setIsUpdating] = useState(false)
+  const [isAdding, setIsAdding] = useState(false)
+  const [isRemoving, setIsRemoving] = useState(false)
+  const [oraclePk, setOraclePk] = useState('')
+  const [isSetting, setIsSetting] = useState(false)
 
-  const deploymentUtils = useDeployment();
+  const deploymentUtils = useDeployment()
 
   if (!deploymentUtils?.contractState) {
-    toast.error("Failed to retrieve onchain state");
-    return null; // Return null instead of undefined
+    toast.error('Failed to retrieve onchain state')
+    return null // Return null instead of undefined
   }
 
   // Helper function to validate numeric input
   const isValidNumericInput = (value: string): boolean => {
-    return (
-      value.trim().length > 0 && !isNaN(Number(value)) && Number(value) > 0
-    );
-  };
+    return value.trim().length > 0 && !isNaN(Number(value)) && Number(value) > 0
+  }
 
   // Check if all fields are valid
   const areAllFieldsValid = () => {
@@ -54,45 +52,45 @@ const ContractUpdateTab = ({
       isValidNumericInput(newCollateralRatio) &&
       isValidNumericInput(liquidationThreshold) &&
       isValidNumericInput(LVT)
-    );
-  };
+    )
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+    e.preventDefault()
 
     // Validate all fields before submission
     if (!areAllFieldsValid()) {
-      toast.error("All fields are required and must be valid positive numbers");
-      return;
+      toast.error('All fields are required and must be valid positive numbers')
+      return
     }
 
     // Additional validation for reasonable values
-    const mcrValue = Number(newCollateralRatio);
-    const ltValue = Number(liquidationThreshold);
-    const lvtValue = Number(LVT);
+    const mcrValue = Number(newCollateralRatio)
+    const ltValue = Number(liquidationThreshold)
+    const lvtValue = Number(LVT)
 
     if (mcrValue < 100 || mcrValue > 500) {
-      toast.error("MCR should be between 100% and 500%");
-      return;
+      toast.error('MCR should be between 100% and 500%')
+      return
     }
 
     if (ltValue < 80 || ltValue > 200) {
-      toast.error("Liquidation Threshold should be between 100% and 200%");
-      return;
+      toast.error('Liquidation Threshold should be between 100% and 200%')
+      return
     }
 
     if (lvtValue <= 0) {
-      toast.error("LVT must be a positive number");
-      return;
+      toast.error('LVT must be a positive number')
+      return
     }
 
     // If validation passes, proceed with the update
-    handleAdminFunctionality("update", setIsUpdating, {
+    handleAdminFunctionality('update', setIsUpdating, {
       MCR: mcrValue,
       liquidation_threshold: ltValue,
-      LVT: lvtValue,
-    });
-  };
+      LVT: lvtValue
+    })
+  }
 
   return (
     <TabsContent value="parameters" className="space-y-4">
@@ -191,7 +189,7 @@ const ContractUpdateTab = ({
           <Button
             disabled={!oraclePk.length}
             onClick={() =>
-              handleAdminFunctionality("add_oracle", setIsAdding, oraclePk)
+              handleAdminFunctionality('add_oracle', setIsAdding, oraclePk)
             }
             className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
           >
@@ -210,7 +208,7 @@ const ContractUpdateTab = ({
           <Button
             disabled={!oraclePk.length}
             onClick={() =>
-              handleAdminFunctionality("remove_oracle", setIsRemoving, oraclePk)
+              handleAdminFunctionality('remove_oracle', setIsRemoving, oraclePk)
             }
             className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
           >
@@ -232,7 +230,7 @@ const ContractUpdateTab = ({
           <Label className="text-slate-300">Sets the coin type for sUSD</Label>
           <Button
             onClick={() => {
-              handleAdminFunctionality("setSUSDType", setIsSetting);
+              handleAdminFunctionality('setSUSDType', setIsSetting)
             }}
             variant="destructive"
             size="sm"
@@ -253,7 +251,7 @@ const ContractUpdateTab = ({
         </div>
       </div>
     </TabsContent>
-  );
-};
+  )
+}
 
-export default ContractUpdateTab;
+export default ContractUpdateTab

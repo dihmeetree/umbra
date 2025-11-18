@@ -1,12 +1,12 @@
 import {
   Ledger,
-  MintMetadata,
-} from "./managed/adaStateraProtocol/contract/index.cjs";
-import { WitnessContext } from "@midnight-ntwrk/compact-runtime";
+  MintMetadata
+} from './managed/adaStateraProtocol/contract/index.cjs'
+import { WitnessContext } from '@midnight-ntwrk/compact-runtime'
 
 export interface StateraPrivateState {
-  readonly secret_key: Uint8Array;
-  readonly mint_metadata: MintMetadata;
+  readonly secret_key: Uint8Array
+  readonly mint_metadata: MintMetadata
 }
 
 export const createPrivateStateraState = (
@@ -15,9 +15,9 @@ export const createPrivateStateraState = (
   secret_key,
   mint_metadata: {
     collateral: 0n,
-    debt: 0n,
-  },
-});
+    debt: 0n
+  }
+})
 
 export const witnesses = {
   division: (
@@ -25,33 +25,33 @@ export const witnesses = {
     dividend: bigint,
     divisor: bigint
   ): [StateraPrivateState, [bigint, bigint]] => {
-    if (divisor == 0n) throw "Invaid arithemetic operation";
+    if (divisor == 0n) throw 'Invaid arithemetic operation'
 
-    const quotient = BigInt(Math.round(Number(dividend / divisor)));
-    const remainder = dividend % divisor;
+    const quotient = BigInt(Math.round(Number(dividend / divisor)))
+    const remainder = dividend % divisor
 
-    return [privateState, [quotient, remainder]];
+    return [privateState, [quotient, remainder]]
   },
 
   // Returns the user's secrete key stored offchain in their private state
   secret_key: ({
-    privateState,
+    privateState
   }: WitnessContext<Ledger, StateraPrivateState>): [
     StateraPrivateState,
-    Uint8Array,
+    Uint8Array
   ] => [privateState, privateState.secret_key],
 
   // Returns the user's mint-metadata stored offchain in their private state
   get_mintmetadata_private_state: ({
-    privateState,
+    privateState
   }: WitnessContext<Ledger, StateraPrivateState>): [
     StateraPrivateState,
-    MintMetadata,
+    MintMetadata
   ] => {
     return [
       privateState,
-      privateState.mint_metadata || { collateral: 0n, debt: 0n },
-    ];
+      privateState.mint_metadata || { collateral: 0n, debt: 0n }
+    ]
   },
 
   /* Sets mint_metadata in private state*/
@@ -63,10 +63,10 @@ export const witnesses = {
       ...privateState,
       mint_metadata: {
         ...(privateState.mint_metadata || { collateral: 0n, debt: 0n }),
-        ...newMetadata,
-      },
-    };
+        ...newMetadata
+      }
+    }
 
-    return [newPrivateState, []];
-  },
-};
+    return [newPrivateState, []]
+  }
+}

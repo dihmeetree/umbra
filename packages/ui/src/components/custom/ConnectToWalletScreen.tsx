@@ -1,13 +1,13 @@
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import { Button } from "../ui/button";
-import { Card } from "../ui/card";
-import { Info, Loader2, Wallet, Zap } from "lucide-react";
-import { Badge } from "../ui/badge";
-import useIsChrome from "@/hooks/useChrome";
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import { Button } from '../ui/button'
+import { Card } from '../ui/card'
+import { Info, Loader2, Wallet, Zap } from 'lucide-react'
+import { Badge } from '../ui/badge'
+import useIsChrome from '@/hooks/useChrome'
 
 const ConnectToWalletScreen = () => {
-  const walletUtils = useMidnightWallet();
-  const isChromeBrowser = useIsChrome();
+  const walletUtils = useMidnightWallet()
+  const isChromeBrowser = useIsChrome()
 
   if (!isChromeBrowser) {
     return (
@@ -37,7 +37,7 @@ const ConnectToWalletScreen = () => {
           </div>
           <Button
             onClick={() => {
-              window.open("https://www.google.com/chrome/", "_blank");
+              window.open('https://www.google.com/chrome/', '_blank')
             }}
             className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
           >
@@ -45,7 +45,7 @@ const ConnectToWalletScreen = () => {
           </Button>
         </Card>
       </div>
-    );
+    )
   }
 
   return (
@@ -64,7 +64,7 @@ const ConnectToWalletScreen = () => {
         </p>
         <Button
           onClick={async () => {
-            await walletUtils?.connectFn();
+            await walletUtils?.connectFn()
           }}
           className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
         >
@@ -82,7 +82,7 @@ const ConnectToWalletScreen = () => {
         </Button>
       </Card>
     </div>
-  );
-};
+  )
+}
 
-export default ConnectToWalletScreen;
+export default ConnectToWalletScreen

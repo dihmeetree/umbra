@@ -3,48 +3,48 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import useDeployment from "@/hooks/useDeployment";
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import ClientSideLiquidationBot from "@/lib/client-side-liquidation-bot";
-import { encodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import type { MintMetadata } from "@statera/ada-statera-protocol";
-import { TrendingUp, DollarSign, Activity, Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
-import toast from "react-hot-toast";
-import { distinctUntilChanged, map, tap } from "rxjs";
+  CardTitle
+} from '@/components/ui/card'
+import { Progress } from '@/components/ui/progress'
+import useDeployment from '@/hooks/useDeployment'
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import ClientSideLiquidationBot from '@/lib/client-side-liquidation-bot'
+import { encodeCoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import { getZswapNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
+import { parseCoinPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
+import type { MintMetadata } from '@statera/ada-statera-protocol'
+import { TrendingUp, DollarSign, Activity, Loader2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import toast from 'react-hot-toast'
+import { distinctUntilChanged, map, tap } from 'rxjs'
 
 type OverviewBoarState = {
-  collateralTVL: bigint;
-  stakePoolTotal: bigint;
-  totalMint: bigint;
-  liquidationThreshold: bigint;
-};
+  collateralTVL: bigint
+  stakePoolTotal: bigint
+  totalMint: bigint
+  liquidationThreshold: bigint
+}
 
 export function Overview() {
-  const deploymentCtx = useDeployment();
-  const walletCtx = useMidnightWallet();
+  const deploymentCtx = useDeployment()
+  const walletCtx = useMidnightWallet()
 
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(false)
   const [boardState, setBoardState] = useState<OverviewBoarState | undefined>(
     undefined
-  );
-  const deploymentStateProvider = deploymentCtx?.stateraApi?.state;
+  )
+  const deploymentStateProvider = deploymentCtx?.stateraApi?.state
   const boardOverview$ = deploymentStateProvider?.pipe(
     map((state) => ({
       collateralTVL: state.reservePoolTotal.value,
       stakePoolTotal: state.stakePoolTotal,
       totalMint: state.totalMint,
-      liquidationThreshold: state.liquidationThreshold,
+      liquidationThreshold: state.liquidationThreshold
     })),
     tap((state) => {
       console.log({
-        boardState: state,
-      });
+        boardState: state
+      })
     }),
     distinctUntilChanged(
       (prev, curr) =>
@@ -53,32 +53,32 @@ export function Overview() {
         prev.stakePoolTotal === curr.stakePoolTotal &&
         prev.totalMint === curr.totalMint
     )
-  );
+  )
 
   useEffect(() => {
-    (async () => {
-      setIsLoading(true);
+    ;(async () => {
+      setIsLoading(true)
       try {
-        await deploymentCtx?.onJoinContract();
-        setIsLoading(false);
+        await deploymentCtx?.onJoinContract()
+        setIsLoading(false)
       } catch (error) {
-        setIsLoading(false);
+        setIsLoading(false)
         const errMsg =
-          error instanceof Error ? error.message : "Failed to join contract";
-        toast.error(errMsg);
+          error instanceof Error ? error.message : 'Failed to join contract'
+        toast.error(errMsg)
       }
-    })();
-  }, []);
+    })()
+  }, [])
 
   useEffect(() => {
-    if (!deploymentStateProvider) return;
+    if (!deploymentStateProvider) return
 
     const subscritption = boardOverview$?.subscribe((value) =>
       setBoardState(value)
-    );
+    )
 
     // Only initialize bot if mint_metadata exists
-    let bot: ClientSideLiquidationBot | null = null;
+    let bot: ClientSideLiquidationBot | null = null
     if (
       deploymentCtx?.privateState?.mint_metadata &&
       deploymentCtx?.contractState?.liquidationThreshold &&
@@ -95,17 +95,17 @@ export function Overview() {
             getZswapNetworkId()
           )
         )
-      );
+      )
 
       //Start monitoring
-      bot.startMonitoring();
+      bot.startMonitoring()
     }
 
     return () => {
-      subscritption?.unsubscribe();
-      bot?.stopMonitoring();
-    };
-  }, [deploymentCtx?.stateraApi]);
+      subscritption?.unsubscribe()
+      bot?.stopMonitoring()
+    }
+  }, [deploymentCtx?.stateraApi])
 
   if (isLoading) {
     return (
@@ -113,7 +113,7 @@ export function Overview() {
         <Loader2 className="animate-spin w-24 h-24 text-blue-500" />
         <p className="text-lg text-slate-400 py-4">Just a moment</p>
       </div>
-    );
+    )
   }
 
   return (
@@ -145,7 +145,7 @@ export function Overview() {
             </div>
             <div className="flex items-center gap-1 text-xs">
               <TrendingUp className="h-3 w-3 text-green-400" />
-              <span className={"text-green-400"}>{12}</span>
+              <span className={'text-green-400'}>{12}</span>
               <span className="text-slate-500">from last month</span>
             </div>
           </CardContent>
@@ -169,7 +169,7 @@ export function Overview() {
             </div>
             <div className="flex items-center gap-1 text-xs">
               <TrendingUp className="h-3 w-3 text-green-400" />
-              <span className={"text-green-400"}>{12}</span>
+              <span className={'text-green-400'}>{12}</span>
               <span className="text-slate-500">from last month</span>
             </div>
           </CardContent>
@@ -193,7 +193,7 @@ export function Overview() {
             </div>
             <div className="flex items-center gap-1 text-xs">
               <TrendingUp className="h-3 w-3 text-green-400" />
-              <span className={"text-green-400"}>{12}</span>
+              <span className={'text-green-400'}>{12}</span>
               <span className="text-slate-500">from last month</span>
             </div>
           </CardContent>
@@ -266,12 +266,12 @@ export function Overview() {
                       <div
                         className={`w-2 h-2 rounded-full ${
                           index == 0
-                            ? "bg-green-400"
+                            ? 'bg-green-400'
                             : index == 1
-                              ? "bg-blue-400"
+                              ? 'bg-blue-400'
                               : index == 2
-                                ? "bg-purple-400"
-                                : "bg-red-400"
+                                ? 'bg-purple-400'
+                                : 'bg-red-400'
                         }`}
                       />
                     </div>
@@ -301,5 +301,5 @@ export function Overview() {
         </Card>
       </div>
     </div>
-  );
+  )
 }

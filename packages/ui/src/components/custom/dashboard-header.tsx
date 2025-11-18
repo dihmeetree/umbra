@@ -1,22 +1,22 @@
-"use client";
+'use client'
 
-import { Button } from "@/components/ui/button";
+import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Wallet, ChevronDown, Activity, Bell, Loader2 } from "lucide-react";
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import toast from "react-hot-toast";
-import { Badge } from "../ui/badge";
-import useDeployment from "@/hooks/useDeployment";
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
+import { SidebarTrigger } from '@/components/ui/sidebar'
+import { Wallet, ChevronDown, Activity, Bell, Loader2 } from 'lucide-react'
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import toast from 'react-hot-toast'
+import { Badge } from '../ui/badge'
+import useDeployment from '@/hooks/useDeployment'
 
 export function DashboardHeader() {
-  const walletUtils = useMidnightWallet();
-  const deploymentCTX = useDeployment();
+  const walletUtils = useMidnightWallet()
+  const deploymentCTX = useDeployment()
 
   return (
     <header className="border-b sticky z-[50] top-0 border-slate-800/50 bg-slate-900/80 backdrop-blur-xl">
@@ -49,15 +49,15 @@ export function DashboardHeader() {
 
           <Badge
             variant={
-              deploymentCTX?.userRole === "admin" ? "default" : "secondary"
+              deploymentCTX?.userRole === 'admin' ? 'default' : 'secondary'
             }
             className={
-              deploymentCTX?.userRole === "admin"
-                ? "bg-gradient-to-r from-cyan-500 to-blue-500 text-white"
-                : "bg-slate-700 text-slate-300"
+              deploymentCTX?.userRole === 'admin'
+                ? 'bg-gradient-to-r from-cyan-500 to-blue-500 text-white'
+                : 'bg-slate-700 text-slate-300'
             }
           >
-            {deploymentCTX?.userRole === "admin" ? "Admin" : "User"}
+            {deploymentCTX?.userRole === 'admin' ? 'Admin' : 'User'}
           </Badge>
 
           {walletUtils?.hasConnected ? (
@@ -86,13 +86,13 @@ export function DashboardHeader() {
             <Button
               onClick={async () => {
                 try {
-                  await walletUtils?.connectFn();
+                  await walletUtils?.connectFn()
                 } catch (error) {
                   const errMsg =
                     error instanceof Error
                       ? error.message
-                      : "Connection failed, is lace wallet installed?";
-                  toast.error(errMsg);
+                      : 'Connection failed, is lace wallet installed?'
+                  toast.error(errMsg)
                 }
               }}
               className="gap-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white border-0 shadow-lg shadow-cyan-500/25"
@@ -113,5 +113,5 @@ export function DashboardHeader() {
         </div>
       </div>
     </header>
-  );
+  )
 }

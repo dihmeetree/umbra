@@ -3,73 +3,73 @@ import {
   Witnesses,
   StateraPrivateState,
   Depositor,
-  Staker,
-} from "@statera/ada-statera-protocol";
-import { MidnightProviders } from "@midnight-ntwrk/midnight-js-types";
-import { type FoundContract } from "@midnight-ntwrk/midnight-js-contracts";
+  Staker
+} from '@statera/ada-statera-protocol'
+import { MidnightProviders } from '@midnight-ntwrk/midnight-js-types'
+import { type FoundContract } from '@midnight-ntwrk/midnight-js-contracts'
 
-export const stateraPrivateStateId = "stateraPrivateState";
-export type StateraPrivateStateId = typeof stateraPrivateStateId;
+export const stateraPrivateStateId = 'stateraPrivateState'
+export type StateraPrivateStateId = typeof stateraPrivateStateId
 export type StateraContract = Contract<
   StateraPrivateState,
   Witnesses<StateraPrivateState>
->;
+>
 export type TokenCircuitKeys = Exclude<
-  keyof StateraContract["impureCircuits"],
+  keyof StateraContract['impureCircuits'],
   number | symbol
->;
+>
 export type StateraContractProviders = MidnightProviders<
   TokenCircuitKeys,
   StateraPrivateStateId,
   StateraPrivateState
->;
-export type DeployedStateraOnchainContract = FoundContract<StateraContract>;
+>
+export type DeployedStateraOnchainContract = FoundContract<StateraContract>
 export type DerivedStateraContractState = {
-  readonly mintCounter: bigint;
-  readonly totalMint: bigint;
-  readonly super_admin: Uint8Array;
-  readonly nonce: Uint8Array;
-  readonly sUSDTokenType: Uint8Array;
-  readonly stakePoolTotal: bigint;
+  readonly mintCounter: bigint
+  readonly totalMint: bigint
+  readonly super_admin: Uint8Array
+  readonly nonce: Uint8Array
+  readonly sUSDTokenType: Uint8Array
+  readonly stakePoolTotal: bigint
   readonly reservePoolTotal: {
-    nonce: Uint8Array;
-    color: Uint8Array;
-    value: bigint;
-    mt_index: bigint;
-  };
-  readonly liquidationThreshold: bigint;
-  readonly collateralDepositors: DerivedDepositor[];
-  readonly stakers: DerivedStaker[];
-  readonly noOfDepositors: bigint;
-  readonly admins: Uint8Array[];
-  readonly LVT: bigint;
-  readonly MCR: bigint;
-  readonly liquidationCount: bigint;
-  readonly validCollateralType: Uint8Array;
-  readonly trustedOracles: DerivedTrustedOracle[];
-};
+    nonce: Uint8Array
+    color: Uint8Array
+    value: bigint
+    mt_index: bigint
+  }
+  readonly liquidationThreshold: bigint
+  readonly collateralDepositors: DerivedDepositor[]
+  readonly stakers: DerivedStaker[]
+  readonly noOfDepositors: bigint
+  readonly admins: Uint8Array[]
+  readonly LVT: bigint
+  readonly MCR: bigint
+  readonly liquidationCount: bigint
+  readonly validCollateralType: Uint8Array
+  readonly trustedOracles: DerivedTrustedOracle[]
+}
 
 export type DerivedDepositor = {
-  id: Uint8Array;
-  depositor: Depositor;
-};
+  id: Uint8Array
+  depositor: Depositor
+}
 
 export type DerivedStaker = {
-  id: Uint8Array;
-  staker: Staker;
-};
+  id: Uint8Array
+  staker: Staker
+}
 
 export type DerivedTrustedOracle = {
-  id: bigint;
-  oraclePk: string;
-};
+  id: bigint
+  oraclePk: string
+}
 
 export type DerivedReservedPoolTotal = {
-  id: string;
+  id: string
   pool_balance: {
-    nonce: Uint8Array;
-    color: Uint8Array;
-    value: bigint;
-    mt_index: bigint;
-  };
-};
+    nonce: Uint8Array
+    color: Uint8Array
+    value: bigint
+    mt_index: bigint
+  }
+}

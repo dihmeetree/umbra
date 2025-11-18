@@ -1,21 +1,21 @@
-import type { UnprovenTransaction } from "@midnight-ntwrk/ledger";
-import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
+import type { UnprovenTransaction } from '@midnight-ntwrk/ledger'
+import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider'
 import type {
   ProofProvider,
-  ProveTxConfig,
-} from "@midnight-ntwrk/midnight-js-types";
-import type { UnbalancedTransaction } from "@midnight-ntwrk/midnight-js-types";
+  ProveTxConfig
+} from '@midnight-ntwrk/midnight-js-types'
+import type { UnbalancedTransaction } from '@midnight-ntwrk/midnight-js-types'
 
 export const proofClient = <K extends string>(
   url: string
 ): ProofProvider<K> => {
-  const httpClientProvider = httpClientProofProvider(url.trim());
+  const httpClientProvider = httpClientProofProvider(url.trim())
 
   return {
     proveTx: (tx: UnprovenTransaction, profConfig?: ProveTxConfig<K>) =>
-      httpClientProvider.proveTx(tx, profConfig),
-  };
-};
+      httpClientProvider.proveTx(tx, profConfig)
+  }
+}
 
 export const noProofClient = <K extends string>(): ProofProvider<K> => {
   return {
@@ -25,7 +25,7 @@ export const noProofClient = <K extends string>(): ProofProvider<K> => {
     ): Promise<UnbalancedTransaction> {
       return Promise.reject(
         new Error(`Proof server not available: ${proveTxConfig}, ${tx}`)
-      );
-    },
-  };
-};
+      )
+    }
+  }
+}

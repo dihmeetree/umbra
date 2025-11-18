@@ -1,34 +1,33 @@
-import { useState } from "react";
-import { Overview } from "./overview";
-import { CollateralManager } from "./collateral-manager";
-import { MintingInterface } from "./minting-interface";
-import { StakingInterface } from "./staking-interface";
-import { SidebarProvider } from "../ui/sidebar";
-import { AppSidebar } from "./app-sidebar";
-import { DashboardHeader } from "./dashboard-header";
-import { Toaster } from "react-hot-toast";
-import { AdminPanel } from "./admin-panel";
-
+import { useState } from 'react'
+import { Overview } from './overview'
+import { CollateralManager } from './collateral-manager'
+import { MintingInterface } from './minting-interface'
+import { StakingInterface } from './staking-interface'
+import { SidebarProvider } from '../ui/sidebar'
+import { AppSidebar } from './app-sidebar'
+import { DashboardHeader } from './dashboard-header'
+import { Toaster } from 'react-hot-toast'
+import { AdminPanel } from './admin-panel'
 
 const Dashboard = () => {
-  const [activeSection, setActiveSection] = useState("overview");
+  const [activeSection, setActiveSection] = useState('overview')
 
   const renderActiveSection = () => {
     switch (activeSection) {
-      case "overview":
-        return <Overview />;
-      case "collateral":
-        return <CollateralManager />;
-      case "mint":
-        return <MintingInterface />;
-      case "stake":
-        return <StakingInterface />;
-      case "admin":
-        return <AdminPanel />;  
+      case 'overview':
+        return <Overview />
+      case 'collateral':
+        return <CollateralManager />
+      case 'mint':
+        return <MintingInterface />
+      case 'stake':
+        return <StakingInterface />
+      case 'admin':
+        return <AdminPanel />
       default:
-        return <Overview />;
+        return <Overview />
     }
-  };
+  }
 
   return (
     <div className="min-h-screen text-white bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -46,7 +45,7 @@ const Dashboard = () => {
       </SidebarProvider>
       <Toaster />
     </div>
-  );
-};
+  )
+}
 
-export default Dashboard;
+export default Dashboard

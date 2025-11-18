@@ -4,41 +4,41 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { TabsContent } from "../ui/tabs";
-import type { AdminActions, AdminPayload } from "./admin-panel";
-import useDeployment from "@/hooks/useDeployment";
-import toast from "react-hot-toast";
-import { useState } from "react";
-import type { CoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import { Loader2, Settings, Settings2, Shield, ShieldUser } from "lucide-react";
-import { utils } from "@statera/statera-api";
-import { Separator } from "@radix-ui/react-separator";
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { TabsContent } from '../ui/tabs'
+import type { AdminActions, AdminPayload } from './admin-panel'
+import useDeployment from '@/hooks/useDeployment'
+import toast from 'react-hot-toast'
+import { useState } from 'react'
+import type { CoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import { Loader2, Settings, Settings2, Shield, ShieldUser } from 'lucide-react'
+import { utils } from '@statera/statera-api'
+import { Separator } from '@radix-ui/react-separator'
 
 interface OrganizationTabProps {
-  isSuperAdmin: boolean;
+  isSuperAdmin: boolean
   handleAdminFunctionality: (
     action: AdminActions,
     stateSetter: React.Dispatch<React.SetStateAction<boolean>>,
     payload?: AdminPayload
-  ) => Promise<void>;
+  ) => Promise<void>
 }
 
 const OrganizationTab = ({
   isSuperAdmin,
-  handleAdminFunctionality,
+  handleAdminFunctionality
 }: OrganizationTabProps) => {
-  const [isAdding, setIsAdding] = useState(false);
-  const [isTransfering, setIsTransfering] = useState(false);
+  const [isAdding, setIsAdding] = useState(false)
+  const [isTransfering, setIsTransfering] = useState(false)
 
-  const [newAdmin, setNewAdmin] = useState<CoinPublicKey | "">("");
-  const deploymentUtils = useDeployment();
+  const [newAdmin, setNewAdmin] = useState<CoinPublicKey | ''>('')
+  const deploymentUtils = useDeployment()
   if (!deploymentUtils?.contractState) {
-    toast.error("Failed to retrieve onchian state");
-    return;
+    toast.error('Failed to retrieve onchian state')
+    return
   }
   return (
     <TabsContent value="organization" className="space-y-4">
@@ -48,7 +48,7 @@ const OrganizationTab = ({
             <div className="flex items-center gap-2">
               {isSuperAdmin ? <ShieldUser /> : <Shield />}
               <p className="text-base text-slate-300">
-                {isSuperAdmin ? "Super Admin" : "Admin"}
+                {isSuperAdmin ? 'Super Admin' : 'Admin'}
               </p>
             </div>
             <p className="text-sm text-muted-foreground text-slate-400">
@@ -70,7 +70,7 @@ const OrganizationTab = ({
                     <Button
                       onClick={() =>
                         handleAdminFunctionality(
-                          "transfer",
+                          'transfer',
                           setIsTransfering,
                           utils.uint8arraytostring(admin)
                         )
@@ -120,9 +120,9 @@ const OrganizationTab = ({
               disabled={!newAdmin.length}
               onClick={() => {
                 if (newAdmin.length < 77)
-                  toast.error("Invalid coin public key provided");
+                  toast.error('Invalid coin public key provided')
 
-                handleAdminFunctionality("add", setIsAdding, newAdmin.trim());
+                handleAdminFunctionality('add', setIsAdding, newAdmin.trim())
               }}
               variant="destructive"
               size="sm"
@@ -144,7 +144,7 @@ const OrganizationTab = ({
         </div>
       )}
     </TabsContent>
-  );
-};
+  )
+}
 
-export default OrganizationTab;
+export default OrganizationTab

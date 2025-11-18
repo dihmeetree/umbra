@@ -58,20 +58,17 @@
 1. **No Fallback to Simpler Solutions**: When facing implementation challenges, solve them properly rather than reverting to simpler, less optimal approaches.
 
 2. **Maximum Performance**: Write code for optimal performance. This includes:
-
    - Using efficient algorithms and data structures
    - Minimizing allocations and copies
    - Leveraging concurrency where appropriate
    - Avoiding unnecessary iterations
 
 3. **Security First**: All code must be written with security in mind:
-
    - Proper input validation
    - Protection against timing attacks
    - Secure cryptographic practices
 
 4. **Documentation and Comments**: All code must be properly documented:
-
    - Every exported function, type, constant, and variable must have comprehensive documentation comments
    - Complex algorithms or business logic must be explained with comments
    - Use Go doc comments (comments directly preceding declarations) for exported APIs
@@ -82,7 +79,6 @@
    - Package comments should appear in a doc.go file or before the package declaration
 
 5. **No Placeholders**: Never use placeholder implementations or comments like:
-
    - "In a production system..."
    - "TODO: implement properly"
    - "This is a simplified version..."
@@ -108,13 +104,11 @@
 ### **Required Practices:**
 
 1. **Integration Mandatory**: When adding new functionality:
-
    - **MUST** be properly integrated into existing code flows
    - **MUST** have active callers or be part of public APIs that are used
    - **MUST** be covered by tests that demonstrate actual usage
 
 2. **Verification Steps**: Before adding any new code:
-
    - Identify exactly where and how it will be used
    - Implement the caller/integration point first
    - Verify the new code is actually exercised by existing functionality
@@ -175,7 +169,6 @@ Before creating any commit, you MUST:
    ```
 
 3. **Verify all changes are intentional**:
-
    - Review `git status` to see all modified files
    - Review `git diff` to understand all changes being committed
    - Ensure no temporary files, debug code, or sensitive information is included

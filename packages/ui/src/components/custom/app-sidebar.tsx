@@ -4,8 +4,8 @@ import {
   Settings,
   TrendingUp,
   Wallet,
-  Zap,
-} from "lucide-react";
+  Zap
+} from 'lucide-react'
 import {
   Sidebar,
   SidebarContent,
@@ -16,57 +16,57 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarHeader,
-  SidebarFooter,
-} from "@/components/ui/sidebar";
-import useDeployment from "@/hooks/useDeployment";
+  SidebarFooter
+} from '@/components/ui/sidebar'
+import useDeployment from '@/hooks/useDeployment'
 
 interface AppSidebarProps {
-  activeSection: string;
-  setActiveSection: (section: string) => void;
+  activeSection: string
+  setActiveSection: (section: string) => void
   // userRole: "user" | "admin"
 }
 
 const menuItems = [
   {
-    title: "Overview",
+    title: 'Overview',
     icon: BarChart3,
-    id: "overview",
-    roles: ["user", "admin"],
+    id: 'overview',
+    roles: ['user', 'admin']
   },
   {
-    title: "Collateral",
+    title: 'Collateral',
     icon: Wallet,
-    id: "collateral",
-    roles: ["user", "admin"],
+    id: 'collateral',
+    roles: ['user', 'admin']
   },
   {
-    title: "Mint Stablecoin",
+    title: 'Mint Stablecoin',
     icon: Coins,
-    id: "mint",
-    roles: ["user", "admin"],
+    id: 'mint',
+    roles: ['user', 'admin']
   },
   {
-    title: "Stake & Earn",
+    title: 'Stake & Earn',
     icon: TrendingUp,
-    id: "stake",
-    roles: ["user", "admin"],
+    id: 'stake',
+    roles: ['user', 'admin']
   },
   {
-    title: "Admin Panel",
+    title: 'Admin Panel',
     icon: Settings,
-    id: "admin",
-    roles: ["admin"],
-  },
-];
+    id: 'admin',
+    roles: ['admin']
+  }
+]
 
 export function AppSidebar({
   activeSection,
-  setActiveSection,
+  setActiveSection
 }: AppSidebarProps) {
-  const deploymentCTX = useDeployment();
+  const deploymentCTX = useDeployment()
   const filteredItems = menuItems.filter((item) =>
     item.roles.includes(deploymentCTX?.userRole as string)
-  );
+  )
 
   return (
     <Sidebar className="border-r border-slate-800/50 bg-slate-900/95 backdrop-blur-xl">
@@ -96,8 +96,8 @@ export function AppSidebar({
                     onClick={() => setActiveSection(item.id)}
                     className={`w-full justify-start px-3 py-2.5 rounded-lg transition-all duration-200 ${
                       activeSection === item.id
-                        ? "bg-gradient-to-r from-cyan-600/20 to-blue-600/20 text-white border border-cyan-500/30 shadow-lg shadow-cyan-500/10"
-                        : "text-slate-300 hover:text-white hover:bg-slate-800/50"
+                        ? 'bg-gradient-to-r from-cyan-600/20 to-blue-600/20 text-white border border-cyan-500/30 shadow-lg shadow-cyan-500/10'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
                     }`}
                   >
                     <item.icon className="w-5 h-5 mr-3" />
@@ -120,5 +120,5 @@ export function AppSidebar({
         </div>
       </SidebarFooter>
     </Sidebar>
-  );
+  )
 }

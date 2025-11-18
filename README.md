@@ -374,7 +374,7 @@ const api = await StateraAPI.joinStateraContract(
   providers,
   contractAddress, // "0200..."
   logger
-);
+)
 ```
 
 ## Protocol Operations
@@ -383,32 +383,32 @@ const api = await StateraAPI.joinStateraContract(
 
 ```typescript
 // 1. Deposit collateral
-await api.depositToCollateralPool(100); // 100 tDUST
+await api.depositToCollateralPool(100) // 100 tDUST
 
 // 2. Mint sUSD (borrow)
-await api.mint_sUSD(40); // Mint 40 sUSD (50% LTV)
+await api.mint_sUSD(40) // Mint 40 sUSD (50% LTV)
 
 // 3. Repay debt
-await api.repay(20); // Repay 20 sUSD
+await api.repay(20) // Repay 20 sUSD
 
 // 4. Withdraw collateral
-await api.withdrawCollateral(50, 1); // Withdraw 50 tDUST, oracle price = 1
+await api.withdrawCollateral(50, 1) // Withdraw 50 tDUST, oracle price = 1
 ```
 
 ### For Stakers
 
 ```typescript
 // 1. Deposit to stability pool
-await api.depositToStakePool(100); // 100 sUSD
+await api.depositToStakePool(100) // 100 sUSD
 
 // 2. Check rewards
-const rewardTx = await api.checkStakeReward();
+const rewardTx = await api.checkStakeReward()
 
 // 3. Withdraw rewards (liquidation ADA)
-await api.withdrawStakeReward(10); // 10 tDUST
+await api.withdrawStakeReward(10) // 10 tDUST
 
 // 4. Withdraw principal
-await api.withdrawStake(50); // 50 sUSD
+await api.withdrawStake(50) // 50 sUSD
 ```
 
 ### For Admins
@@ -419,13 +419,13 @@ await api.reset(
   90, // liquidationThreshold (90%)
   80, // LVT (80%)
   120 // MCR (120%)
-);
+)
 
 // Add new admin
-await api.addAdmin("zpktest1...");
+await api.addAdmin('zpktest1...')
 
 // Add trusted KYC oracle
-await api.addTrustedOracle("0x123...");
+await api.addTrustedOracle('0x123...')
 ```
 
 ## Witness Functions

@@ -1,6 +1,6 @@
-import { createLogger } from '../logger-utils.js';
-import { run } from '../index.js';
-import { TestnetLocalConfig } from '../config.js';
+import { createLogger } from "../logger-utils.js";
+import { run } from "../index.js";
+import { TestnetLocalConfig } from "../config.js";
 
 const config = new TestnetLocalConfig();
 config.setNetworkId();

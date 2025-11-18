@@ -1,52 +1,52 @@
-"use client";
+'use client'
 
-import React from "react";
+import React from 'react'
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  CardTitle
+} from '@/components/ui/card'
 
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
-import { Shield, Users, Activity, Loader2 } from "lucide-react";
-import useDeployment from "@/hooks/useDeployment";
-import { decodeCoinPublicKey } from "@midnight-ntwrk/compact-runtime";
-import { parseCoinPublicKeyToHex } from "@midnight-ntwrk/midnight-js-utils";
-import useMidnightWallet from "@/hooks/useMidnightWallet";
-import { getZswapNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import toast from "react-hot-toast";
-import ContractUpdateTab from "./update-tab";
-import OrganizationTab from "./organization-tab";
-import { DebtPositionStatus } from "@statera/ada-statera-protocol";
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Badge } from '@/components/ui/badge'
+import { Shield, Users, Activity, Loader2 } from 'lucide-react'
+import useDeployment from '@/hooks/useDeployment'
+import { decodeCoinPublicKey } from '@midnight-ntwrk/compact-runtime'
+import { parseCoinPublicKeyToHex } from '@midnight-ntwrk/midnight-js-utils'
+import useMidnightWallet from '@/hooks/useMidnightWallet'
+import { getZswapNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
+import toast from 'react-hot-toast'
+import ContractUpdateTab from './update-tab'
+import OrganizationTab from './organization-tab'
+import { DebtPositionStatus } from '@statera/ada-statera-protocol'
 
 export type AdminActions =
-  | "setSUSDType"
-  | "add"
-  | "update"
-  | "transfer"
-  | "add_oracle"
-  | "remove_oracle";
+  | 'setSUSDType'
+  | 'add'
+  | 'update'
+  | 'transfer'
+  | 'add_oracle'
+  | 'remove_oracle'
 export type UpdatePayload = {
-  MCR: number;
-  liquidation_threshold: number;
-  LVT: number;
-};
+  MCR: number
+  liquidation_threshold: number
+  LVT: number
+}
 
-export type AdminPayload = UpdatePayload | string;
+export type AdminPayload = UpdatePayload | string
 
 export function AdminPanel() {
-  const deploymentUtils = useDeployment();
-  const walletUtils = useMidnightWallet();
+  const deploymentUtils = useDeployment()
+  const walletUtils = useMidnightWallet()
 
   const recentActions = [
-    { action: "Collateral ratio updated", user: "Admin", time: "2 hours ago" },
-    { action: "Emergency mode disabled", user: "Admin", time: "1 day ago" },
-    { action: "New collateral type added", user: "Admin", time: "3 days ago" },
-    { action: "Fee structure updated", user: "Admin", time: "1 week ago" },
-  ];
+    { action: 'Collateral ratio updated', user: 'Admin', time: '2 hours ago' },
+    { action: 'Emergency mode disabled', user: 'Admin', time: '1 day ago' },
+    { action: 'New collateral type added', user: 'Admin', time: '3 days ago' },
+    { action: 'Fee structure updated', user: 'Admin', time: '1 week ago' }
+  ]
 
   if (!deploymentUtils?.contractState) {
     return (
@@ -54,7 +54,7 @@ export function AdminPanel() {
         <Loader2 className="animate-spin w-10 h-10 text-blue-500" />
         <p className="text-slate-300">Retrieving contract state</p>
       </div>
-    );
+    )
   }
 
   const isSuperAdmin =
@@ -63,95 +63,95 @@ export function AdminPanel() {
       parseCoinPublicKeyToHex(
         walletUtils?.state.coinPublicKey as string,
         getZswapNetworkId()
-      );
+      )
 
   const handleAdminFunctionality = async (
     action: AdminActions,
     stateSetter: React.Dispatch<React.SetStateAction<boolean>>,
     payload?: AdminPayload
   ) => {
-    if (!deploymentUtils.stateraApi) return;
-    let txResult;
-    stateSetter(true);
+    if (!deploymentUtils.stateraApi) return
+    let txResult
+    stateSetter(true)
     try {
       switch (action) {
-        case "setSUSDType": {
-          txResult = await deploymentUtils.stateraApi.setSUSDColor();
-          break;
+        case 'setSUSDType': {
+          txResult = await deploymentUtils.stateraApi.setSUSDColor()
+          break
         }
 
-        case "add": {
-          if (typeof payload === "string") {
+        case 'add': {
+          if (typeof payload === 'string') {
             txResult = await deploymentUtils.stateraApi.addAdmin(
               parseCoinPublicKeyToHex(payload, getZswapNetworkId())
-            );
+            )
           } else {
-            throw new Error("Invalid payload for add action: expected string");
+            throw new Error('Invalid payload for add action: expected string')
           }
-          break;
+          break
         }
 
-        case "remove_oracle": {
-          if (typeof payload === "string") {
+        case 'remove_oracle': {
+          if (typeof payload === 'string') {
             txResult =
-              await deploymentUtils.stateraApi.addTrustedOracle(payload);
+              await deploymentUtils.stateraApi.addTrustedOracle(payload)
           } else {
-            throw new Error("Invalid payload for add action: expected string");
+            throw new Error('Invalid payload for add action: expected string')
           }
-          break;
+          break
         }
 
-        case "add_oracle": {
-          if (typeof payload === "string") {
+        case 'add_oracle': {
+          if (typeof payload === 'string') {
             txResult =
-              await deploymentUtils.stateraApi.removeTrustedOracle(payload);
+              await deploymentUtils.stateraApi.removeTrustedOracle(payload)
           } else {
-            throw new Error("Invalid payload for add action: expected string");
+            throw new Error('Invalid payload for add action: expected string')
           }
-          break;
+          break
         }
 
-        case "transfer": {
-          if (typeof payload === "string") {
+        case 'transfer': {
+          if (typeof payload === 'string') {
             txResult = await deploymentUtils.stateraApi.transferSuperAdminRole(
               parseCoinPublicKeyToHex(payload, getZswapNetworkId())
-            );
+            )
           } else {
-            throw new Error("Invalid payload for add action: expected string");
+            throw new Error('Invalid payload for add action: expected string')
           }
-          break;
+          break
         }
 
-        case "update": {
-          if (payload && typeof payload === "object" && "MCR" in payload) {
+        case 'update': {
+          if (payload && typeof payload === 'object' && 'MCR' in payload) {
             txResult = await deploymentUtils.stateraApi.reset(
               payload.liquidation_threshold,
               payload.LVT,
               payload.MCR
-            );
+            )
           } else {
             throw new Error(
-              "Invalid payload for update action: expected UpdatePayload"
-            );
+              'Invalid payload for update action: expected UpdatePayload'
+            )
           }
-          break;
+          break
         }
       }
 
-      txResult?.public.status === "SucceedEntirely"
+      txResult?.public.status === 'SucceedEntirely'
         ? toast.success(`${action.toLocaleUpperCase()} Transaction successfull`)
-        : toast.error(`${action.toLocaleUpperCase()} Transaction failed`);
-      stateSetter(false);
+        : toast.error(`${action.toLocaleUpperCase()} Transaction failed`)
+      stateSetter(false)
     } catch (error) {
-      console.log(`${action}`, error);
+      console.log(`${action}`, error)
       const errMsg =
-        error instanceof Error ? error.message : "Transaction failed";
-      toast.error(errMsg);
-      stateSetter(false);
+        error instanceof Error ? error.message : 'Transaction failed'
+      toast.error(errMsg)
+      stateSetter(false)
     } finally {
-      stateSetter(false);
+      stateSetter(false)
     }
-  };
+  }
 
   return (
     <div className="space-y-6">
@@ -232,7 +232,7 @@ export function AdminPanel() {
           <CardContent>
             <div className="text-2xl font-bold text-white">
               {deploymentUtils.contractState.reservePoolTotal.value /
-                BigInt(1_000_000)}{" "}
+                BigInt(1_000_000)}{' '}
               tDUST
             </div>
             <p className="text-xs text-muted-foreground text-slate-400">
@@ -383,5 +383,5 @@ export function AdminPanel() {
         </div>
       </div>
     </div>
-  );
+  )
 }

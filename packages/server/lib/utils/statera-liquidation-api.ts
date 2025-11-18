@@ -3,33 +3,33 @@ import {
   LiquidationPayload,
   StateraContract,
   StateraContractProviders,
-  stateraPrivateStateId,
-} from "./common-types.js";
-import { ContractAddress } from "@midnight-ntwrk/compact-runtime";
+  stateraPrivateStateId
+} from './common-types.js'
+import { ContractAddress } from '@midnight-ntwrk/compact-runtime'
 import {
   FinalizedCallTxData,
-  findDeployedContract,
-} from "@midnight-ntwrk/midnight-js-contracts";
+  findDeployedContract
+} from '@midnight-ntwrk/midnight-js-contracts'
 import {
   Contract,
   StateraPrivateState,
   witnesses,
-  createPrivateStateraState,
-} from "@statera/ada-statera-protocol";
-import { type Logger } from "pino";
-import * as utils from "./utils.js";
+  createPrivateStateraState
+} from '@statera/ada-statera-protocol'
+import { type Logger } from 'pino'
+import * as utils from './utils.js'
 
-const StateraContractInstance: StateraContract = new Contract(witnesses);
+const StateraContractInstance: StateraContract = new Contract(witnesses)
 
 export interface DeployedStateraAPI {
-  readonly deployedContractAddress: ContractAddress;
+  readonly deployedContractAddress: ContractAddress
   liquidatePosition: (
     position: LiquidationPayload
-  ) => Promise<FinalizedCallTxData<StateraContract, "liquidateDebtPosition">>;
+  ) => Promise<FinalizedCallTxData<StateraContract, 'liquidateDebtPosition'>>
 }
 
 export class StateraAPI implements DeployedStateraAPI {
-  deployedContractAddress: string;
+  deployedContractAddress: string
 
   /**
    * @param allReadyDeployedContract
@@ -41,7 +41,7 @@ export class StateraAPI implements DeployedStateraAPI {
     private logger?: Logger
   ) {
     this.deployedContractAddress =
-      allReadyDeployedContract.deployTxData.public.contractAddress;
+      allReadyDeployedContract.deployTxData.public.contractAddress
   }
 
   static async joinStateraContract(
@@ -51,52 +51,52 @@ export class StateraAPI implements DeployedStateraAPI {
   ): Promise<StateraAPI> {
     logger?.info({
       joinContract: {
-        contractAddress,
-      },
-    });
+        contractAddress
+      }
+    })
     const existingContract = await findDeployedContract<StateraContract>(
       providers,
       {
         contract: StateraContractInstance,
         contractAddress: contractAddress,
         privateStateId: stateraPrivateStateId,
-        initialPrivateState: await StateraAPI.getPrivateState(providers),
+        initialPrivateState: await StateraAPI.getPrivateState(providers)
       }
-    );
+    )
 
     logger?.trace(
       {
         contractJoined: {
-          finalizedDeployTxData: existingContract.deployTxData.public,
-        },
+          finalizedDeployTxData: existingContract.deployTxData.public
+        }
       },
-      "Found Contract..."
-    );
-    return new StateraAPI(providers, existingContract, logger);
+      'Found Contract...'
+    )
+    return new StateraAPI(providers, existingContract, logger)
   }
 
   async liquidatePosition(
     position: LiquidationPayload
-  ): Promise<FinalizedCallTxData<StateraContract, "liquidateDebtPosition">> {
+  ): Promise<FinalizedCallTxData<StateraContract, 'liquidateDebtPosition'>> {
     // Construct tx with dynamic coin data
     const txData =
       await this.allReadyDeployedContract.callTx.liquidateDebtPosition(
         BigInt(position.collateral_amount),
         utils.hexStringToUint8Array(position.id),
         BigInt(position.debt)
-      );
+      )
 
     this.logger?.trace({
       transactionAdded: {
-        circuit: "liquidateCollateralPosition",
+        circuit: 'liquidateCollateralPosition',
         txHash: txData.public.txHash,
         blockDetails: {
           blockHash: txData.public.blockHash,
-          blockHeight: txData.public.blockHeight,
-        },
-      },
-    });
-    return txData;
+          blockHeight: txData.public.blockHeight
+        }
+      }
+    })
+    return txData
   }
 
   // Used to get the private state from the wallets privateState Provider
@@ -105,20 +105,20 @@ export class StateraAPI implements DeployedStateraAPI {
   ): Promise<StateraPrivateState> {
     const existingPrivateState = await providers.privateStateProvider.get(
       stateraPrivateStateId
-    );
+    )
     return (
       existingPrivateState ?? {
         secret_key: createPrivateStateraState(utils.randomNonceBytes(32))
           .secret_key,
         mint_metadata: {
           collateral: BigInt(0),
-          debt: BigInt(0),
-        },
+          debt: BigInt(0)
+        }
       }
-    );
+    )
   }
 }
 
-export * as utils from "./utils.js";
+export * as utils from './utils.js'
 
-export * from "./common-types.js";
+export * from './common-types.js'

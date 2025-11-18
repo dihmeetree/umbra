@@ -1,40 +1,40 @@
-import mongoose from "mongoose";
+import mongoose from 'mongoose'
 
 enum OnchainEvent {
-  Deposit = "Deposit",
-  Collateral_Withdrawal = "Collateral_Withdrawal",
-  Mint = "Mint",
-  Stake = "Stake",
-  Unstake = "Unstake",
-  Repay = "Repay",
-  Claim = "Claim",
-  Liquidation = "Liquidation",
+  Deposit = 'Deposit',
+  Collateral_Withdrawal = 'Collateral_Withdrawal',
+  Mint = 'Mint',
+  Stake = 'Stake',
+  Unstake = 'Unstake',
+  Repay = 'Repay',
+  Claim = 'Claim',
+  Liquidation = 'Liquidation'
 }
 
 const TxBroadcastSchema = new mongoose.Schema(
   {
     user: {
       type: String,
-      require: true,
+      require: true
     },
     onchain_event: {
       type: OnchainEvent,
-      require: true,
+      require: true
     },
     amount: {
       type: Number,
-      require: false,
+      require: false
     },
     coin_type: {
       type: String,
-      require: false,
+      require: false
     }
   },
   {
-    timestamps: true,
+    timestamps: true
   }
-);
+)
 
-const TxBroadcast = mongoose.model("TxBroadcast", TxBroadcastSchema);
+const TxBroadcast = mongoose.model('TxBroadcast', TxBroadcastSchema)
 
-export default TxBroadcast;
+export default TxBroadcast
