@@ -90,7 +90,7 @@ jobs:
       # 9️⃣ Type check all packages
       - name: Type check
         run: |
-          yarn check-types
+          yarn typecheck
           echo "✅ Type checking passed"
 
       # 🔟 Lint all packages

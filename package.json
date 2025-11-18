@@ -8,8 +8,8 @@
     "prebuild": "turbo run prebuild",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
-    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "check-types": "turbo run check-types",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,cjs,json,md}\"",
+    "typecheck": "turbo run typecheck",
     "compact": "turbo run compact",
     "contract": "turbo run start --filter=contract"
   },

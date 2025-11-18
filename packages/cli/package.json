@@ -13,6 +13,7 @@
     "prepack": "yarn build",
     "test": "yarn test-e2e",
     "test-e2e": "NODE_OPTIONS=--experimental-vm-modules jest  --detectOpenHandles --forceExit",
+    "typecheck": "tsc --noEmit",
     "build": "rm -rf dist && tsc --project tsconfig.build.json",
     "prebuild": "rm -rf dist && tsc --project tsconfig.build.json",
     "lint": "eslint src"

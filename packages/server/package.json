@@ -3,7 +3,8 @@
   "packageManager": "yarn@4.9.2",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts"
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@statera/ada-statera-protocol": "workspace:*",
