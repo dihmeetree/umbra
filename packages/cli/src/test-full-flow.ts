@@ -23,6 +23,11 @@ async function testFullFlow() {
   const config = new StandaloneConfig()
   const logger = await createLogger(config.logDir)
 
+  // Oracle PK for price verification (in production, comes from oracle service)
+  const oraclePk =
+    process.env.ORACLE_PK ||
+    '0000000000000000000000000000000000000000000000000000000000000000'
+
   logger.info('=== Starting Full Flow Test ===')
   logger.info(
     'This will test: deposit → withdraw → deposit → mint → repay → withdraw'
@@ -85,7 +90,7 @@ async function testFullFlow() {
 
     // Step 6: Withdraw all
     logger.info('Step 4: Withdrawing all collateral (100 tDUST)...')
-    const withdraw1 = await stateraApi.withdrawCollateral(100, 1) // oracle price = 1
+    const withdraw1 = await stateraApi.withdrawCollateral(100, 1, oraclePk) // oracle price = 1
     logger.info(
       { txHash: withdraw1.public.txHash },
       '✅ Withdrawal successful - position should be CLOSED'
@@ -120,7 +125,7 @@ async function testFullFlow() {
 
     // Step 10: Partial withdrawal
     logger.info('Step 8: Partial withdrawal (25 tDUST)...')
-    const withdraw2 = await stateraApi.withdrawCollateral(25, 1)
+    const withdraw2 = await stateraApi.withdrawCollateral(25, 1, oraclePk)
     logger.info(
       { txHash: withdraw2.public.txHash },
       '✅ Partial withdrawal successful - position still INACTIVE'
@@ -130,7 +135,7 @@ async function testFullFlow() {
     logger.info(
       'Step 9: Final withdrawal of remaining collateral (25 tDUST)...'
     )
-    const withdraw3 = await stateraApi.withdrawCollateral(25, 1)
+    const withdraw3 = await stateraApi.withdrawCollateral(25, 1, oraclePk)
     logger.info(
       { txHash: withdraw3.public.txHash },
       '✅ Final withdrawal successful - position now CLOSED'

@@ -122,19 +122,10 @@ const displayLedgerState = async (
       `There is no token mint contract deployed at ${contractAddress}`
     );
   } else {
-    logger.info(
-      `Current collateral pool amount is: ${ledgerState.reservePoolTotal}`
-    );
-    logger.info(`Current total value minted is: ${ledgerState.totalMint}`);
-    logger.info(`Current nonce is: ${ledgerState.nonce}`);
-    logger.info(`Current depositor is: ${ledgerState.reservePoolTotal}`);
-    logger.info(`Current mint count is: ${ledgerState.mintCounter}`);
-    logger.info(`Current stake pool is: ${ledgerState.stakePoolTotal}`);
     logger.info(`Current stablecoin color is: ${ledgerState.sUSDTokenType}`);
-    logger.info(`Current stakers is: ${ledgerState.stakers}`);
-    logger.info(
-      `Current no of depositors is: ${ledgerState.reservePoolTotal.value}`
-    );
+    logger.info(`Depositor commitments count: ${ledgerState.depositorCommitments.firstFree()}`);
+    logger.info(`Staker commitments count: ${ledgerState.stakerCommitments.firstFree()}`);
+    logger.info(`Depositor nullifiers count: ${ledgerState.depositorNullifiers.size()}`);
     logger.info(
       `Current liquidation threshold is: ${ledgerState.liquidationThreshold}`
     );
@@ -145,22 +136,15 @@ const displayDerivedLedgerState = async (
   currentState: DerivedStateraContractState,
   logger: Logger
 ): Promise<void> => {
-  logger.info(
-    `Current admin is: ${utils.uint8arraytostring(currentState.super_admin)}`
-  );
-  console.log(
-    `Current collateral pool amount is:`,
-    currentState.reservePoolTotal.value
-  );
-  console.log(`Current trusted oracles:`, currentState);
-  console.log(`Current total value minted is:`, currentState.totalMint);
-  console.log(`Current nonce is:`, currentState.nonce);
-  console.log(`Current depositor is:`, currentState.collateralDepositors);
-  console.log(`Current mint count is:`, currentState.mintCounter);
-  console.log(`Current stake pool is:`, currentState.stakePoolTotal);
+  // Commitment/Nullifier pattern: display tree statistics instead of individual entries
   console.log(`Current stablecoin color is:`, currentState.sUSDTokenType);
-  console.log(`Current stakers is:`, currentState.stakers);
-  console.log(`Current no of depositors is:`, currentState.noOfDepositors);
+  console.log(`Depositor commitments count:`, currentState.depositorCommitmentsCount);
+  console.log(`Staker commitments count:`, currentState.stakerCommitmentsCount);
+  console.log(`Depositor nullifiers count (spent):`, currentState.depositorNullifiersCount);
+  console.log(`Staker nullifiers count (spent):`, currentState.stakerNullifiersCount);
+  console.log(`Depositor commitments root:`, currentState.depositorCommitmentsRoot.field);
+  console.log(`Staker commitments root:`, currentState.stakerCommitmentsRoot.field);
+  console.log(`Current trusted oracles:`, currentState.trustedOracles);
   console.log(
     `Current liquidation threshold is:`,
     currentState.liquidationThreshold
@@ -347,6 +331,9 @@ const circuit_main_loop = async (
           break;
         }
         case "10": {
+          const oraclePk =
+            process.env.ORACLE_PK ||
+            "0000000000000000000000000000000000000000000000000000000000000000";
           await stateraApi.withdrawCollateral(
             Number(
               await rli.question(
@@ -357,7 +344,8 @@ const circuit_main_loop = async (
               await rli.question(
                 "What is the current oracl price per collateral asset:"
               )
-            )
+            ),
+            oraclePk
           );
 
           // Wait for wallet to sync after withdrawal

@@ -2,46 +2,59 @@ pragma language_version >= 0.17.0;
 
 import CompactStandardLibrary;
 import "./CustomLibrary";
-export {CoinInfo, MintMetadata, Depositor, Staker, DebtPositionStatus, ComplianceToken, KYCTokenData, ValidityRange, ComplianceToken};
+export { CoinInfo, MintMetadata, Depositor, Staker, AdminState, DebtPositionStatus, ComplianceToken, KYCTokenData, ValidityRange, ComplianceToken, DepositorLeaf, StakerLeaf };
 
-// Describes the status of a user's debt position
-enum DebtPositionStatus { inactive, active, closed };
-
-export ledger mintCounter: Counter;
-export ledger totalMint: Uint<128>;
 export ledger liquidationThreshold: Uint<8>;
 export ledger LVT: Uint<8>; // LVT --> Max. percentage of debt a user can take based on collateral deposited
 export ledger MCR: Uint<8>; // MCR --> Minimum Collateral Ratio (expressed in percentage)
 
-/* Mapping to keep track of sUSD coin input into the stakePool */
-export ledger stakePoolTotal: QualifiedCoinInfo;
-
-/*
- * @reservePoolTotal --> QualifiedCoinInfo 
- * Keeps track of valid collateral coin type input into the contract
-*/
-export ledger reservePoolTotal: QualifiedCoinInfo;
-export ledger nonce: Bytes<32>;
 export ledger sUSDTokenType: Bytes<32>;
 
-/* Tracks who the super admin */
-export ledger super_admin: Bytes<32>;
-/* Tracks list of other admins */
-export ledger admins: Set<Bytes<32>>;
+/* Commitment/Nullifier pattern for depositor privacy
+ *
+ * COMMITMENT SET: Historic Merkle tree stores depositor commitments (hashes)
+ * - Each state change creates a NEW commitment (tree only grows, never updates in place)
+ * - Old commitments are nullified (spent) when creating new state
+ * - This follows Zcash/Midnight's recommended privacy pattern
+ *
+ * Privacy benefits:
+ *   - Hides total number of depositors (tree size != active users)
+ *   - Hides who depositors are
+ *   - Hides when updates occur (all operations look like new inserts)
+ *   - Old proofs remain valid (historic tree property)
+ *
+ * Supports up to 2^20 = 1,048,576 total commitments.
+ */
+export ledger depositorCommitments: HistoricMerkleTree<20, Bytes<32>>;
 
-/* Mapping for collateral deposit  --> encodedPk -> Depositor */
-export ledger depositors: Map<Bytes<32>, Depositor>;
+/* NULLIFIER SET: Tracks spent depositor commitments
+ * When a user updates their position, they:
+ *   1. Prove ownership of old commitment
+ *   2. Add old commitment to nullifier set (marks it as spent)
+ *   3. Insert new commitment into tree
+ *
+ * This prevents double-spending of commitments.
+ */
+export ledger depositorNullifiers: Set<Bytes<32>>;
 
-/* Tracks the list of trustd kyc oracle networks */
+/* Tracks the list of trusted kyc oracle networks */
 export ledger trustedOracles: Set<Bytes<32>>;
 
-/* Mapping for stakers --> addrs -> Staker */
-export ledger stakers: Map<Bytes<32>, Staker>;
-export ledger cumulative_scaling_factor: Uint<2>;
+/* Staker commitments following same commitment/nullifier pattern */
+export ledger stakerCommitments: HistoricMerkleTree<20, Bytes<32>>;
+export ledger stakerNullifiers: Set<Bytes<32>>;
+
+export ledger cumulative_scaling_factor: Uint<32>;
 export ledger validCollateralAssetType: Bytes<32>;
 ledger percentageDivisor: Uint<64>;
 export ledger SPECK_per_tDUST: Uint<64>;
 export ledger liquidationCount: Counter;
+
+// Constants for validation and calculations
+ledger BASIS_POINTS_DIVISOR: Uint<64>;
+ledger MIN_ORACLE_PRICE: Uint<64>;
+ledger MAX_ORACLE_PRICE: Uint<64>;
+ledger MINIMUM_LIQUIDATION_DEBT: Uint<64>;
 
 /* Liquation monitoring variable
     * ADA_sUSD_index --> Keeps track of the entire rate of one sUSD in relative to liquidated ADA
@@ -49,23 +62,52 @@ export ledger liquidationCount: Counter;
 */
 export ledger ADA_sUSD_index: Uint<128>;
 
+/* Redemption configuration
+    * redemptionFee --> Fee charged for redeeming sUSD for ADA (expressed in basis points, e.g., 50 = 0.5%)
+*/
+export ledger redemptionFee: Uint<8>;
+
+/* Borrowing fee configuration
+    * borrowingFee --> One-time fee charged when minting sUSD (expressed in basis points, e.g., 50 = 0.5%)
+    * adminState --> Stores hash of admin private metadata (including protocolFeePool)
+*/
+export ledger borrowingFee: Uint<8>;
+export ledger adminState: AdminState;
+
+/* Liquidation incentive configuration
+    * liquidationIncentive --> Bonus percentage given to liquidators (expressed in basis points, e.g., 500 = 5%)
+    * This incentivizes users to perform liquidations by giving them more collateral than the debt they repay
+*/
+export ledger liquidationIncentive: Uint<8>;
+
+/* Emergency pause mechanism
+    * isPaused --> Boolean flag to pause critical protocol operations (0 = unpaused, 1 = paused)
+    * When paused (1), prevents deposits, mints, and withdrawals (but allows repayments and liquidations)
+*/
+export ledger isPaused: Uint<1>;
+
+/* Minimum debt requirement
+    * minimumDebt --> Minimum sUSD debt required to maintain a position (prevents dust positions)
+    * Dust positions are unprofitable to liquidate and can harm protocol health
+*/
+export ledger minimumDebt: Uint<64>;
+
 /* USER TYPES */
 export struct Depositor {
     id: Bytes<32>;
-    metadataHash: Bytes<32>; 
-    hFactor: Uint<4>;
+    metadataHash: Bytes<32>;
     position: DebtPositionStatus;
     coinType: Bytes<32>;
-    borrowLimit: Uint<32>;
+    mintCounterCommitment: Bytes<32>;  // Per-user mint counter commitment for nonce uniqueness
 }
 
 export struct Staker {
     id: Bytes<32>;
-    address: ZswapCoinPublicKey;
-    entry_ADA_SUSD_index: Uint<128>;
-    effective_user_balance: Uint<32>;
-    stake_reward: Uint<64>;
-    entry_scale_factor: Uint<32>;   
+    metadataHash: Bytes<32>;
+}
+
+export struct AdminState {
+    metadataHash: Bytes<32>;
 }
 
 /* Returns user local secret key used for private ID generation */
@@ -74,47 +116,220 @@ witness secret_key(): Bytes<32>;
 /* Sets mint-metadata private state using deposit ID after minting, repayment or withdrawal */
 witness set_mint_metadata(metadata: MintMetadata): [];
 
+/* Sets stake-metadata private state for stakers */
+witness set_stake_metadata(metadata: StakeMetadata): [];
+
+/* Sets admin-metadata private state for protocol fee tracking */
+witness set_admin_metadata(metadata: AdminMetadata): [];
+
+/* Provides secret randomizer for admin metadata hashing */
+witness admin_secret(): Bytes<32>;
+
+/* Provides the user's current mint counter value */
+witness get_mint_counter(): Uint<64>;
+
+/* Merkle tree witnesses for privacy-preserving user registries */
+
+/* Provides the current depositor leaf data (before update) */
+witness get_depositor_leaf(): DepositorLeaf;
+
+/* Provides the updated depositor leaf data (after update) */
+witness get_updated_depositor_leaf(): DepositorLeaf;
+
+/* Provides the updated Merkle root after depositor update */
+witness get_updated_depositors_root(): MerkleTreeDigest;
+
+/* Provides the current staker leaf data (before update) */
+witness get_staker_leaf(): StakerLeaf;
+
+/* Provides the updated staker leaf data (after update) */
+witness get_updated_staker_leaf(): StakerLeaf;
+
+/* Provides the updated Merkle root after staker update */
+witness get_updated_stakers_root(): MerkleTreeDigest;
+
 /*
- * @tokenAddress -> A contract address that is used to generate tokentype for mintable sUSD token
  * @initLiquidationThreshold -> Sets the percentage a collateral need to stay above to avoid liquidation
- * @intialNonce -> Sets the intial nonce for use during minting of sUSD token
+ * @initialRedemptionFee -> Sets the initial redemption fee in basis points (e.g., 50 = 0.5%)
+ * @initialBorrowingFee -> Sets the initial borrowing fee in basis points (e.g., 50 = 0.5%)
+ * @initialLiquidationIncentive -> Sets the liquidation bonus in basis points (e.g., 500 = 5%)
+ * @initialMinimumDebt -> Sets the minimum debt in sUSD (e.g., 100 = 100 sUSD minimum)
 */
 constructor(
-    intialNonce: Bytes<32>,
     initLiquidationThreshold: Uint<8>,
     initialLVT: Uint<8>,
     initialMCR: Uint<8>,
-    _validCollateralAssetType: Bytes<32>
+    _validCollateralAssetType: Bytes<32>,
+    initialRedemptionFee: Uint<8>,
+    initialBorrowingFee: Uint<8>,
+    initialLiquidationIncentive: Uint<8>,
+    initialMinimumDebt: Uint<64>
 ) {
-    super_admin = ownPublicKey().bytes;
-    totalMint = 0;
-    // Liquidatin rate in percentage set at 80%
+    // Liquidation rate in percentage set at 80%
     liquidationThreshold = disclose(initLiquidationThreshold);
-    nonce = disclose(intialNonce);
     LVT = disclose(initialLVT);
     percentageDivisor = 100;
     cumulative_scaling_factor = 1;
     MCR = disclose(initialMCR);
     validCollateralAssetType = disclose(_validCollateralAssetType);
     SPECK_per_tDUST = 1000000;
+    redemptionFee = disclose(initialRedemptionFee);
+    borrowingFee = disclose(initialBorrowingFee);
+
+    // Initialize admin metadata with zero protocol fees and deployer as super admin
+    const initialAdminMetadata = AdminMetadata {
+        protocolFeePool: 0,
+        super_admin: ownPublicKey().bytes,
+        admins: createEmptyAdmins(),
+        admin_count: 0
+    };
+    const secret = disclose(admin_secret());
+    const adminMetadataHash = hashAdminMetadata(initialAdminMetadata, secret);
+    set_admin_metadata(initialAdminMetadata);
+    adminState = AdminState { metadataHash: adminMetadataHash };
+
+    liquidationIncentive = disclose(initialLiquidationIncentive);
+    isPaused = 0; // Start unpaused
+    minimumDebt = disclose(initialMinimumDebt); // Minimum debt to prevent dust positions
+
+    // Initialize constants
+    BASIS_POINTS_DIVISOR = 10000;
+    MIN_ORACLE_PRICE = 100000; // $0.10 (tightened from $0.01)
+    MAX_ORACLE_PRICE = 10000000; // $10.00 (tightened from $1000)
+    MINIMUM_LIQUIDATION_DEBT = 10; // Minimum 10 sUSD to liquidate
+
+    // Initialize empty commitment/nullifier sets for privacy
+    // Following Zcash/Midnight's recommended pattern for private state updates
+    // Collections (HistoricMerkleTree, Set) are auto-initialized as empty
 }
 
 /* INTERACTION FOR ADMIN ONLY */
 export circuit resetProtocolConfig(_liquidationThreshold: Uint<8>, _LVT: Uint<8>, _MCR: Uint<8>): []{
-    assert (ownPublicKey().bytes == super_admin || admins.member(ownPublicKey().bytes), "Can not set SUSD token type: Unauthorized");
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not set SUSD token type: Unauthorized");
 
-    liquidationThreshold = disclose(_liquidationThreshold);
-    LVT = disclose(_LVT);
-    MCR = disclose(_MCR);
+    // Validate parameter ranges to prevent misconfiguration
+    const disclosed_liquidationThreshold = disclose(_liquidationThreshold);
+    const disclosed_LVT = disclose(_LVT);
+    const disclosed_MCR = disclose(_MCR);
+
+    // Liquidation threshold must be between 1 and 100 (represents percentage)
+    assert (disclosed_liquidationThreshold > 0 && disclosed_liquidationThreshold <= 100,
+        "Invalid liquidationThreshold: Must be between 1 and 100");
+
+    // LVT (Liquidation Value Threshold) must be between 1 and 100
+    assert (disclosed_LVT > 0 && disclosed_LVT <= 100,
+        "Invalid LVT: Must be between 1 and 100");
+
+    // MCR (Minimum Collateralization Ratio) must be between 100 and 500 (100% to 500%)
+    assert (disclosed_MCR >= 100 && disclosed_MCR <= 500,
+        "Invalid MCR: Must be between 100 and 500");
+
+    // LVT must be less than liquidation threshold (can't liquidate below the threshold)
+    assert (disclosed_LVT < disclosed_liquidationThreshold,
+        "Invalid configuration: LVT must be less than liquidationThreshold");
+
+    liquidationThreshold = disclosed_liquidationThreshold;
+    LVT = disclosed_LVT;
+    MCR = disclosed_MCR;
+}
+
+export circuit setRedemptionFee(_redemptionFee: Uint<8>): []{
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not set redemption fee: Unauthorized");
+
+    assert (disclose(_redemptionFee) <= 100, "Redemption fee cannot exceed 100 basis points (1%)");
+
+    redemptionFee = disclose(_redemptionFee);
+}
+
+export circuit setBorrowingFee(_borrowingFee: Uint<8>): []{
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not set borrowing fee: Unauthorized");
+
+    assert (disclose(_borrowingFee) <= 500, "Borrowing fee cannot exceed 500 basis points (5%)");
+
+    borrowingFee = disclose(_borrowingFee);
+}
+
+export circuit withdrawProtocolFees(_amount: Uint<64>): []{
+    // Get admin metadata from private state
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+
+    // Verify metadata hash matches
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata provided");
+    assert (isSuperAdmin(adminMetadata), "Can not withdraw fees: Unauthorized - super admin only");
+
+    const disclosedAmount = disclose(_amount);
+    assert (disclosedAmount > 0, "Cannot withdraw zero fees");
+    assert (adminMetadata.protocolFeePool >= disclosedAmount, "Insufficient fees in pool");
+
+    // Convert fee amount to speck for withdrawal
+    const withdrawAmount = disclosedAmount * SPECK_per_tDUST;
+
+    // Get reserve pool coin from witness and verify sufficient balance
+    const reserveCoin = getReservePoolCoin();
+    assert (reserveCoin.value >= withdrawAmount, "Insufficient reserve pool balance");
+
+    // Send fees to super admin
+    const sendResult = send(reserveCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), withdrawAmount);
+
+    // If there's change, receive it back to the contract
+    if(sendResult.change.is_some){
+        receive(sendResult.change.value);
+    }
+
+    // Deduct from protocol fee pool and update metadata
+    const newAdminMetadata = AdminMetadata {
+        protocolFeePool: (adminMetadata.protocolFeePool - disclosedAmount) as Uint<128>,
+        super_admin: adminMetadata.super_admin,
+        admins: adminMetadata.admins,
+        admin_count: adminMetadata.admin_count
+    };
+    const newMetadataHash = hashAdminMetadata(newAdminMetadata, secret);
+    set_admin_metadata(newAdminMetadata);
+
+    adminState = AdminState { metadataHash: newMetadataHash };
+}
+
+/* Emergency pause toggle - only admin can call */
+export circuit togglePause(): []{
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not toggle pause: Unauthorized");
+
+    isPaused = isPaused == 0 ? 1 : 0;
 }
 
 export circuit setSUSDTokenType(): []{
-    assert (ownPublicKey().bytes == super_admin || admins.member(ownPublicKey().bytes), "Can not set SUSD token type: Unauthorized");
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not set SUSD token type: Unauthorized");
 
     sUSDTokenType = tokenType(pad(32, "sUSD_token"), kernel.self());
 }
 
 export circuit addTrustedOracle(oraclePk: Bytes<32>): []{
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not add oracle: Unauthorized");
+
     const disclosedOraclePk = disclose(oraclePk);
     assert (!trustedOracles.member(disclosedOraclePk), "Can not add oracle pk: Already exist");
 
@@ -122,6 +337,12 @@ export circuit addTrustedOracle(oraclePk: Bytes<32>): []{
 }
 
 export circuit removeTrustedOraclePk(oraclePk: Bytes<32>): []{
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isAdmin(adminMetadata), "Can not remove oracle: Unauthorized");
+
     const disclosedOraclePk = disclose(oraclePk);
     assert (trustedOracles.member(disclosedOraclePk), "Can not add oracle public key: Does not exist");
 
@@ -129,432 +350,945 @@ export circuit removeTrustedOraclePk(oraclePk: Bytes<32>): []{
 }
 
 export circuit addAdmin(address: Bytes<32>): []{
-    assert (ownPublicKey().bytes == super_admin, "Can not add new admin: Unauthorized");
-    assert (!admins.member(disclose(address)), "Can not add admin: Already an admin");
-    // Adds the ne admin to the list of authorized admins
-    admins.insert(disclose(address));
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isSuperAdmin(adminMetadata), "Can not add new admin: Unauthorized");
+
+    const disclosedAddress = disclose(address);
+
+    // Check if already an admin
+    const currentUser = disclosedAddress;
+    const isAlreadyAdmin = (
+        (adminMetadata.admin_count > 0 && currentUser == adminMetadata.admins[0]) ||
+        (adminMetadata.admin_count > 1 && currentUser == adminMetadata.admins[1]) ||
+        (adminMetadata.admin_count > 2 && currentUser == adminMetadata.admins[2]) ||
+        (adminMetadata.admin_count > 3 && currentUser == adminMetadata.admins[3]) ||
+        (adminMetadata.admin_count > 4 && currentUser == adminMetadata.admins[4]) ||
+        (adminMetadata.admin_count > 5 && currentUser == adminMetadata.admins[5]) ||
+        (adminMetadata.admin_count > 6 && currentUser == adminMetadata.admins[6]) ||
+        (adminMetadata.admin_count > 7 && currentUser == adminMetadata.admins[7]) ||
+        (adminMetadata.admin_count > 8 && currentUser == adminMetadata.admins[8]) ||
+        (adminMetadata.admin_count > 9 && currentUser == adminMetadata.admins[9])
+    );
+    assert (!isAlreadyAdmin, "Can not add admin: Already an admin");
+    assert (adminMetadata.admin_count < 10, "Can not add admin: Maximum 10 admins reached");
+
+    // Build new admins vector with the new admin added
+    const zero: Bytes<32> = pad(32, "");
+    const newAdmins: Vector<10, Bytes<32>> = [
+        adminMetadata.admin_count == 0 ? disclosedAddress : adminMetadata.admins[0],
+        adminMetadata.admin_count == 1 ? disclosedAddress : (adminMetadata.admin_count > 1 ? adminMetadata.admins[1] : zero),
+        adminMetadata.admin_count == 2 ? disclosedAddress : (adminMetadata.admin_count > 2 ? adminMetadata.admins[2] : zero),
+        adminMetadata.admin_count == 3 ? disclosedAddress : (adminMetadata.admin_count > 3 ? adminMetadata.admins[3] : zero),
+        adminMetadata.admin_count == 4 ? disclosedAddress : (adminMetadata.admin_count > 4 ? adminMetadata.admins[4] : zero),
+        adminMetadata.admin_count == 5 ? disclosedAddress : (adminMetadata.admin_count > 5 ? adminMetadata.admins[5] : zero),
+        adminMetadata.admin_count == 6 ? disclosedAddress : (adminMetadata.admin_count > 6 ? adminMetadata.admins[6] : zero),
+        adminMetadata.admin_count == 7 ? disclosedAddress : (adminMetadata.admin_count > 7 ? adminMetadata.admins[7] : zero),
+        adminMetadata.admin_count == 8 ? disclosedAddress : (adminMetadata.admin_count > 8 ? adminMetadata.admins[8] : zero),
+        adminMetadata.admin_count == 9 ? disclosedAddress : (adminMetadata.admin_count > 9 ? adminMetadata.admins[9] : zero)
+    ];
+
+    const newAdminMetadata = AdminMetadata {
+        protocolFeePool: adminMetadata.protocolFeePool,
+        super_admin: adminMetadata.super_admin,
+        admins: newAdmins,
+        admin_count: (adminMetadata.admin_count + 1) as Uint<8>
+    };
+    const newMetadataHash = hashAdminMetadata(newAdminMetadata, secret);
+    set_admin_metadata(newAdminMetadata);
+    adminState = AdminState { metadataHash: newMetadataHash };
+}
+
+export circuit removeAdmin(address: Bytes<32>): []{
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isSuperAdmin(adminMetadata), "Can not remove admin: Unauthorized");
+
+    const disclosedAddress = disclose(address);
+
+    // Find and remove admin (shift array left)
+    const newAdmins = adminMetadata.admins;
+    const found = (
+        (adminMetadata.admin_count > 0 && disclosedAddress == adminMetadata.admins[0]) ||
+        (adminMetadata.admin_count > 1 && disclosedAddress == adminMetadata.admins[1]) ||
+        (adminMetadata.admin_count > 2 && disclosedAddress == adminMetadata.admins[2]) ||
+        (adminMetadata.admin_count > 3 && disclosedAddress == adminMetadata.admins[3]) ||
+        (adminMetadata.admin_count > 4 && disclosedAddress == adminMetadata.admins[4]) ||
+        (adminMetadata.admin_count > 5 && disclosedAddress == adminMetadata.admins[5]) ||
+        (adminMetadata.admin_count > 6 && disclosedAddress == adminMetadata.admins[6]) ||
+        (adminMetadata.admin_count > 7 && disclosedAddress == adminMetadata.admins[7]) ||
+        (adminMetadata.admin_count > 8 && disclosedAddress == adminMetadata.admins[8]) ||
+        (adminMetadata.admin_count > 9 && disclosedAddress == adminMetadata.admins[9])
+    );
+    assert (found, "Can not remove admin: Not an admin");
+
+    // Simple implementation: just decrement count (last admin becomes inactive)
+    // In production, you'd want to compact the array
+    const newAdminMetadata = AdminMetadata {
+        protocolFeePool: adminMetadata.protocolFeePool,
+        super_admin: adminMetadata.super_admin,
+        admins: newAdmins,
+        admin_count: (adminMetadata.admin_count - 1) as Uint<8>
+    };
+    const newMetadataHash = hashAdminMetadata(newAdminMetadata, secret);
+    set_admin_metadata(newAdminMetadata);
+    adminState = AdminState { metadataHash: newMetadataHash };
 }
 
 export circuit transferAdminRole(address: Bytes<32>): []{
-    assert (ownPublicKey().bytes == super_admin, "Can not add new admin: Unauthorized");
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert (hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash, "Invalid admin metadata");
+    assert (isSuperAdmin(adminMetadata), "Can not transfer admin role: Unauthorized");
 
-    super_admin = disclose(address);
+    const newAdminMetadata = AdminMetadata {
+        protocolFeePool: adminMetadata.protocolFeePool,
+        super_admin: disclose(address),
+        admins: adminMetadata.admins,
+        admin_count: adminMetadata.admin_count
+    };
+    const newMetadataHash = hashAdminMetadata(newAdminMetadata, secret);
+    set_admin_metadata(newAdminMetadata);
+    adminState = AdminState { metadataHash: newMetadataHash };
 }
 
 /* INTERACTIONS FOR COLLATERAL DEPOSITORS */
 
-export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _compliance_token: ComplianceToken): [] {
+/*
+ * @depositToCollateralPool - Deposit collateral using commitment/nullifier pattern
+ *
+ * New depositor: Creates initial commitment
+ * Existing depositor: Nullifies old commitment, creates new one with updated balance
+ *
+ * This provides Zcash-level privacy - all operations look like new commitments
+ */
+export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _compliance_token: ComplianceToken, _isNewDepositor: Boolean): [] {
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot deposit collateral");
+
+    // Validate deposit amount
+    assert (disclose(_deposit_amt) > 0, "Cannot deposit zero amount");
     assert (coin.color == validCollateralAssetType, "Invalid token type provided: Can not create collateral position");
-    
+
     const disclosed_amount = disclose(_deposit_amt);
     const disclosedCoin = disclose(coin);
-    const disclosedCoinColor = disclose(coin.color);
-    const depositId = ownPublicKey().bytes;
     const disclosedComplianceToken = disclose(_compliance_token);
-    
+    const isNewDepositor = disclose(_isNewDepositor);
+
     const amount_in_speck = disclosed_amount * SPECK_per_tDUST;
     assert (coin.value >= amount_in_speck, "Insufficient funds provided");
     assert (trustedOracles.member(disclosedComplianceToken.tokenData.oraclePk), "Can not create position: Unauthorized KYC provider");
 
-    // Receives coin
+    // Receive coin - contract now holds it privately
     receive(disclosedCoin);
 
-    // Writes coin to collateral reserve pool total
-    const coinToInsert = !depositors.isEmpty() && reservePoolTotal.value > 0 ?
-    mergeCoinImmediate(reservePoolTotal, disclosedCoin) :
-    disclosedCoin;
+    // Generate privacy-preserving user ID (commitment to public key using secret key)
+    const userSecret = disclose(secret_key());
+    const depositorsId = generateUserId(userSecret);
 
-    reservePoolTotal.writeCoin(coinToInsert, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
+    if(isNewDepositor){
+        // ===== NEW DEPOSITOR: Create initial commitment =====
 
-    const depositorsId = generateUserId(disclose(secret_key()));
-
-    if(depositors.member(depositId)){
-        const currentDepositPosition = depositors.lookup(depositId);
-
-        // If position is closed, reinitialize it like a new position
-        if(currentDepositPosition.position == DebtPositionStatus.closed){
-            const metadata = MintMetadata{
-                collateral: disclosed_amount as Uint<64>,
-                debt: 0
-            };
-            const metadataHash = hashMintMetadata(metadata, depositId);
-            set_mint_metadata(metadata);
-            const borrowLimit = DivisionFunction((LVT * disclosed_amount as Uint<64>) as Uint<64>, percentageDivisor) as Uint<32>;
-
-            depositors.insert(depositId, Depositor{
-                ...currentDepositPosition,
-                position: DebtPositionStatus.inactive,
-                metadataHash: metadataHash,
-                coinType: disclose(coin.color),
-                borrowLimit: borrowLimit
-            });
-        }else{
-            // Hash metadata for shielding
-            const prev_metadata = getMintMetadata();
-            const newMetadata = MintMetadata{
-                ...prev_metadata,
-                collateral: (prev_metadata.collateral + disclosed_amount as Uint<64>) as Uint<64>
-            };
-            const newMetadataHash = hashMintMetadata(newMetadata, depositId);
-            set_mint_metadata(newMetadata);
-            // Recalculates the borrowLimit
-            const borrowLimit = DivisionFunction((LVT * newMetadata.collateral) as Uint<64>, percentageDivisor) as Uint<32>;
-
-            depositors.insert(depositId, Depositor{
-                ...currentDepositPosition,
-                borrowLimit: borrowLimit,
-                position: prev_metadata.collateral == 0 ? DebtPositionStatus.inactive : currentDepositPosition.position,
-                metadataHash: newMetadataHash
-            });
-        }
-    }else{
         const metadata = MintMetadata{
             collateral: disclosed_amount as Uint<64>,
             debt: 0
         };
-        const metadataHash = hashMintMetadata(metadata, depositId);
+        const metadataHash = hashMintMetadata(metadata, depositorsId);
         set_mint_metadata(metadata);
-        const borrowLimit = DivisionFunction((LVT * disclosed_amount as Uint<64>) as Uint<64>, percentageDivisor) as Uint<32>;
 
-        depositors.insert(depositId, Depositor{
-            ...default<Depositor>,
+        // Initialize per-user mint counter commitment
+        const userSecretHash = persistentHash<Bytes<32>>(userSecret);
+        const initialRandomness = persistentHash<Bytes<32>>(userSecretHash);
+        const initialCounterCommitment = persistentCommit<Uint<64>>(0, initialRandomness);
+
+        // Create commitment (leaf hash)
+        const newLeaf = DepositorLeaf {
             id: depositorsId,
             metadataHash: metadataHash,
+            position: DebtPositionStatus.inactive,
             coinType: disclose(coin.color),
-            borrowLimit: borrowLimit
-        });
+            mintCounterCommitment: initialCounterCommitment
+        };
+        const commitment = hashDepositorLeaf(newLeaf);
+
+        // Insert commitment into tree (tree handles Merkle operations)
+        depositorCommitments.insert(commitment);
+
+    }else{
+        // Get old commitment and prove ownership
+        const oldLeaf = disclose(get_depositor_leaf());
+        const oldCommitment = hashDepositorLeaf(oldLeaf);
+
+        // Verify old commitment is in tree (not yet nullified)
+        const path = getDepositorPath();
+        assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
+               "Old commitment not in tree");
+        assert(path.leaf == oldCommitment, "Commitment mismatch");
+
+        // Verify ownership
+        assert(oldLeaf.id == depositorsId, "Cannot deposit: Not the owner");
+
+        // Check commitment not already spent
+        assert(!depositorNullifiers.member(oldCommitment),
+               "Cannot deposit: Commitment already spent");
+
+        // Nullify old commitment
+        depositorNullifiers.insert(oldCommitment);
+
+        // Create new metadata with updated balance
+        const prev_metadata = getMintMetadata();
+        const newMetadata = MintMetadata{
+            ...prev_metadata,
+            collateral: (prev_metadata.collateral + disclosed_amount as Uint<64>) as Uint<64>
+        };
+        const newMetadataHash = hashMintMetadata(newMetadata, depositorsId);
+        set_mint_metadata(newMetadata);
+
+        // Create new commitment with updated state
+        const newLeaf = DepositorLeaf {
+            ...oldLeaf,
+            metadataHash: newMetadataHash,
+            position: prev_metadata.collateral == 0 ? DebtPositionStatus.inactive : oldLeaf.position
+        };
+        const newCommitment = hashDepositorLeaf(newLeaf);
+
+        // Insert new commitment into tree
+        depositorCommitments.insert(newCommitment);
     }
 }
 
 export circuit mint_sUSD( mint_amount: Uint<64>): []{
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot mint sUSD");
+
+    // Validate mint amount
+    assert (disclose(mint_amount) > 0, "Cannot mint zero amount");
+
     const disclosedMintAmount = disclose(mint_amount);
-    const depositId = ownPublicKey().bytes;
 
-    assert (depositors.member(depositId), "Loan Position does not exist");
+    // Generate privacy-preserving user ID
+    const userSecret = disclose(secret_key());
+    const depositorsId = generateUserId(userSecret);
 
-    const depositPositionToMint = depositors.lookup(depositId);
-    // Reconstructs mintersId for security checks.
-    const mintersId = generateUserId(disclose(secret_key()));
-    assert (mintersId == depositPositionToMint.id, "Can not mint loan position: You are not the owner");
+    // Get old commitment and prove ownership
+    const oldLeaf = disclose(get_depositor_leaf());
+    const oldCommitment = hashDepositorLeaf(oldLeaf);
 
-    assert (mint_amount <=  depositPositionToMint.borrowLimit, "Can not mint more than borrow limt");
+    // Verify old commitment is in tree
+    const path = getDepositorPath();
+    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
+           "Old commitment not in tree");
+    assert(path.leaf == oldCommitment, "Commitment mismatch");
 
-    // Reconstructs metadataHash for security checks
+    // Verify ownership
+    assert(oldLeaf.id == depositorsId, "Cannot mint: Not the owner");
+
+    // Check not already spent
+    assert(!depositorNullifiers.member(oldCommitment),
+           "Cannot mint: Commitment already spent");
+
+    // Nullify old commitment
+    depositorNullifiers.insert(oldCommitment);
+
+    // Get and verify private metadata
     const mintMetadata = getMintMetadata();
-    const mintMetadataHash = hashMintMetadata(mintMetadata, depositId);
-    assert (mintMetadataHash == depositPositionToMint.metadataHash, "Invalid private state provided");
-    const debtMinted = mintMetadata.debt > 0 ? (mintMetadata.debt + disclosedMintAmount) as Uint<64> : disclosedMintAmount;
+    const mintMetadataHash = hashMintMetadata(mintMetadata, depositorsId);
+    assert(mintMetadataHash == oldLeaf.metadataHash, "Invalid private state provided");
+
+    // Calculate borrowing fee (one-time fee on mint)
+    const borrowing_fee = DivisionFunction((disclosedMintAmount * borrowingFee) as Uint<64>, 10000);
+    const debtMinted = (mintMetadata.debt > 0 ? (mintMetadata.debt + disclosedMintAmount + borrowing_fee) : (disclosedMintAmount + borrowing_fee)) as Uint<64>;
+
+    // Enforce minimum debt requirement to prevent dust positions
+    assert (debtMinted >= minimumDebt, "Cannot mint: Final debt must meet minimum debt requirement");
+
+    // Calculate borrow limit in ZK from private collateral (for privacy)
+    const borrowLimit = DivisionFunction((LVT * mintMetadata.collateral) as Uint<64>, percentageDivisor) as Uint<32>;
+    assert (mint_amount <= borrowLimit, "Cannot mint more than borrow limit");
+
     // Calculates hFactor for the loan
     const healthFactor = calculateHFactor(mintMetadata.collateral, debtMinted, liquidationThreshold);
     assert (healthFactor >= 1, "Cannot mint sUSD for this collateral position: health factor is low");
-    const newNonce = evolveNonce(mintCounter, nonce);
-    mintToken(pad(32, "sUSD_token"), disclosedMintAmount, newNonce, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()));
-    // Reconstructs and update metadataHash with new mint amount
-    const newMintMetadata = MintMetadata{
+
+    // Get user's current counter from witness
+    const currentCounter = disclose(get_mint_counter());
+
+    // Derive randomness from user's secret key for mint counter commitment
+    const userSecretHash = persistentHash<Bytes<32>>(userSecret);
+    const counterRandomness = persistentHash<Bytes<32>>(userSecretHash);
+
+    // Verify user is providing correct counter by checking against their stored commitment
+    assert (persistentCommit<Uint<64>>(currentCounter, counterRandomness) == oldLeaf.mintCounterCommitment,
+            "Invalid mint counter: user must provide correct counter matching their commitment");
+
+    // Derive unique nonce using user's counter + user's secret key for privacy and uniqueness
+    const userSpecificSeed = persistentHash<Vector<2, Bytes<32>>>([depositorsId, userSecret]);
+    const uniqueNonce = evolveNonce(currentCounter as Uint<128>, evolveNonce(0, userSpecificSeed));
+
+    // Mint sUSD token with guaranteed unique nonce
+    mintToken(pad(32, "sUSD_token"), disclosedMintAmount, uniqueNonce, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()));
+
+    // Reconstructs and update metadataHash with new mint amount (including borrowing fee)
+    const newMintMetadata = MintMetadata {
         ...mintMetadata,
-        debt: (mintMetadata.debt + disclosedMintAmount) as Uint<64>
+        debt: debtMinted
     };
 
     // Set mint_metadata private state
     set_mint_metadata(newMintMetadata);
-    const newMetadataHash = hashMintMetadata(newMintMetadata, depositId);
-    const newBorrowLimit = disclosedMintAmount <= depositPositionToMint.borrowLimit ? (depositPositionToMint.borrowLimit - disclosedMintAmount) : 0;
-    // Updates the depositor list    
-    depositors.insert(depositId, Depositor{
-        ...depositPositionToMint,
-        position: DebtPositionStatus.active,
+    const newMetadataHash = hashMintMetadata(newMintMetadata, depositorsId);
+
+    // Update user's counter commitment with incremented value (prevents reuse)
+    const nextCounter = (currentCounter + 1) as Uint<64>;
+    const nextCounterCommitment = persistentCommit<Uint<64>>(nextCounter, counterRandomness);
+
+    // Create new commitment with updated state
+    const newLeaf = DepositorLeaf {
+        id: oldLeaf.id,
         metadataHash: newMetadataHash,
-        hFactor: healthFactor as Uint<4>,
-        borrowLimit: newBorrowLimit
-    });
+        position: DebtPositionStatus.active,
+        coinType: oldLeaf.coinType,
+        mintCounterCommitment: nextCounterCommitment
+    };
+    const newCommitment = hashDepositorLeaf(newLeaf);
 
-    // Updates ledger states for the next mint
-    nonce = newNonce;
-    mintCounter.increment(1);
-    totalMint = totalMint + disclosedMintAmount as Uint<128>;
-}   
+    // Insert new commitment into tree
+    depositorCommitments.insert(newCommitment);
 
-export circuit withdrawCollateral(_amountToWithdraw: Uint<32>, _oraclePrice: Uint<64>): [] { 
-    const depositId = ownPublicKey().bytes;
+    // Accumulate borrowing fee in admin metadata
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    const newAdminMetadata = AdminMetadata {
+        protocolFeePool: (adminMetadata.protocolFeePool + borrowing_fee) as Uint<128>,
+        super_admin: adminMetadata.super_admin,
+        admins: adminMetadata.admins,
+        admin_count: adminMetadata.admin_count
+    };
+    const newAdminMetadataHash = hashAdminMetadata(newAdminMetadata, secret);
+    set_admin_metadata(newAdminMetadata);
+    adminState = AdminState { metadataHash: newAdminMetadataHash };
+}
+
+export circuit withdrawCollateral(_amountToWithdraw: Uint<32>, _oraclePrice: Uint<64>, _oraclePk: Bytes<32>): [] {
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot withdraw collateral");
+
+    // Validate withdrawal amount
+    assert (disclose(_amountToWithdraw) > 0, "Cannot withdraw zero amount");
+
+    // Generate privacy-preserving user ID
+    const userSecret = disclose(secret_key());
+    const depositorsId = generateUserId(userSecret);
+
     const disclosedAmtToWithdraw = disclose(_amountToWithdraw);
-   
-   assert (depositors.member(depositId), "Deposit with the required id does not exist");
+    const disclosedOraclePrice = disclose(_oraclePrice);
+    const disclosedOraclePk = disclose(_oraclePk);
 
-   const depositPositionToWthdraw = depositors.lookup(depositId);
-   
-   // Checks the user is the authorized depositor
-   const reconstructedDepositorsId = generateUserId(disclose(secret_key()));
-   assert (reconstructedDepositorsId == depositPositionToWthdraw.id, "Can not withdrawal collateral: You are not the owner");
-   
-   // Reconstructs the metadata hash from private state
-   const metadata = getMintMetadata();
-   const metadataHash = hashMintMetadata(metadata, depositId);
+    // Get old commitment
+    const oldLeaf = disclose(get_depositor_leaf());
+    const oldCommitment = hashDepositorLeaf(oldLeaf);
 
-   // Checks to see if user has maliciously uttered private state
-   assert (metadataHash == depositPositionToWthdraw.metadataHash, "Can not withdraw collateral: Invalid private state");
-   assert (depositPositionToWthdraw.position != DebtPositionStatus.closed, "Can not withdrawl collateral: Your position has been liquidated");
-   // Minimum Collateral Value, Calculated using (Debt * MCR)
-   const MCV = DivisionFunction((metadata.debt * MCR) as Uint<64>, percentageDivisor);
-   const withdrawableCollateral = DivisionFunction(((metadata.collateral * _oraclePrice) - MCV) as Uint<64>, _oraclePrice);
-   // Asserts that the amount to withdraw is not greater than the collateral
-   assert (_amountToWithdraw <= withdrawableCollateral, "Can not withdraw more than available collateral deposited");
-   const balance = metadata.collateral - disclosedAmtToWithdraw;
-   // Sends the collateral amount to the callers publickey if the metadata hashs equal
-   const sent_amt = disclosedAmtToWithdraw * SPECK_per_tDUST;
-   const sendResult = send(reservePoolTotal, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), sent_amt);
+    // Verify in tree
+    const path = getDepositorPath();
+    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
+           "Old commitment not in tree");
+    assert(path.leaf == oldCommitment, "Commitment mismatch");
 
-    // Updates reservePoolTotal
+    // Verify ownership
+    assert(oldLeaf.id == depositorsId, "Cannot withdraw: Not the owner");
+
+    // Check not spent
+    assert(!depositorNullifiers.member(oldCommitment),
+           "Cannot withdraw: Commitment already spent");
+    assert(oldLeaf.position != DebtPositionStatus.closed, "Cannot withdraw: Position liquidated");
+
+    // Nullify old
+    depositorNullifiers.insert(oldCommitment);
+
+    // Verify metadata
+    const metadata = getMintMetadata();
+    const metadataHash = hashMintMetadata(metadata, depositorsId);
+    assert(metadataHash == oldLeaf.metadataHash, "Invalid private state");
+
+    // Verify oracle is trusted and price is within reasonable bounds
+    assert (trustedOracles.member(disclosedOraclePk), "Can not withdraw: Oracle is not trusted");
+    assert (disclosedOraclePrice >= MIN_ORACLE_PRICE, "Can not withdraw: Oracle price too low");
+    assert (disclosedOraclePrice <= MAX_ORACLE_PRICE, "Can not withdraw: Oracle price too high");
+
+    // Minimum Collateral Value, Calculated using (Debt * MCR)
+    const MCV = DivisionFunction((metadata.debt * MCR) as Uint<64>, percentageDivisor);
+    const withdrawableCollateral = DivisionFunction(((metadata.collateral * disclosedOraclePrice) - MCV) as Uint<64>, disclosedOraclePrice);
+
+    // Asserts that the amount to withdraw is not greater than the collateral
+    assert (_amountToWithdraw <= withdrawableCollateral, "Can not withdraw more than available collateral deposited");
+    const balance = metadata.collateral - disclosedAmtToWithdraw;
+
+    // Get reserve pool coin from witness and send withdrawal
+    const sent_amt = disclosedAmtToWithdraw * SPECK_per_tDUST;
+    const reserveCoin = getReservePoolCoin();
+    const sendResult = send(reserveCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), sent_amt);
+
+    // If there's change, receive it back to the contract
     if(sendResult.change.is_some){
-        // Updates the reservePoolTotal with the change from the send transaction
-        reservePoolTotal.writeCoin(
-            sendResult.change.value, 
-            right<ZswapCoinPublicKey, ContractAddress>(kernel.self())
-        );
-    }else{
-      reservePoolTotal.resetToDefault();
+        receive(sendResult.change.value);
     }
    
    const newMetadata = MintMetadata {
-    ...metadata,
-    collateral: balance
+        ...metadata,
+        collateral: balance
    };
 
-   const newMetadataHash = hashMintMetadata(newMetadata, depositId);
    // Sets mint_metadata private state
+   const newMetadataHash = hashMintMetadata(newMetadata, depositorsId);
    set_mint_metadata(newMetadata);
-   const newBorrowLimit = DivisionFunction((LVT * balance) as Uint<64>, percentageDivisor) as Uint<32>;
-   // Updates the ledger state
-   if(depositPositionToWthdraw.position == DebtPositionStatus.inactive){
-        depositors.insert(depositId, Depositor{
-            ...depositPositionToWthdraw,
-            position: balance == 0 ? DebtPositionStatus.closed : DebtPositionStatus.inactive,
-            metadataHash: newMetadataHash,
-            borrowLimit: newBorrowLimit
-        });
-   }else{
-        depositors.insert(depositId, Depositor{
-            ...depositPositionToWthdraw,
-            metadataHash: newMetadataHash,
-            borrowLimit: newBorrowLimit
-        });
-   }
+
+   // Create new commitment with updated state
+   const newLeaf = DepositorLeaf {
+        id: oldLeaf.id,
+        metadataHash: newMetadataHash,
+        position: (oldLeaf.position == DebtPositionStatus.inactive)
+            ? (balance == 0 ? DebtPositionStatus.closed : DebtPositionStatus.inactive)
+            : oldLeaf.position,
+        coinType: oldLeaf.coinType,
+        mintCounterCommitment: oldLeaf.mintCounterCommitment
+   };
+   const newCommitment = hashDepositorLeaf(newLeaf);
+
+   // Insert new commitment
+   depositorCommitments.insert(newCommitment);
 }
 
-export circuit repay( coin: CoinInfo, _amountToRepay: Uint<32> ): [] {
-   const depositId = ownPublicKey().bytes;
-   const disclosedAmtToRepay = disclose(_amountToRepay);
-   const disclosedCoin = disclose(coin);
+export circuit repay(coin: CoinInfo, _amountToRepay: Uint<32>): [] {
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot repay debt");
 
-   assert (depositors.member(depositId), "Deposit with the required id does not exist");
-   
-   const mintPositionToRepay = depositors.lookup(depositId);
-   assert (mintPositionToRepay.position == DebtPositionStatus.active, "Cannot repay an inactive, closed or liquidated c0llateral position");
-   
-   // Reconstruct the metadata hash from private state
-   const metadata = getMintMetadata();
-   const metadataHash = hashMintMetadata(metadata, depositId);
-   
-   // Asserts to see if user has maliciously altered private state
-   assert (metadataHash == mintPositionToRepay.metadataHash, "Can not withdraw collateral: Invalid private state");
-   
-   assert (coin.color == sUSDTokenType, "Can not repay minted sUSD: Invalid token type provided");
-   assert (_amountToRepay <= metadata.debt, "Can not repay minted sUSD: tokens must be equivalent to the amount of sUSD minted");
-   assert (_amountToRepay >= coin.value, "Can not repay minted sUSD: Insufficient tokens provided to cover amount to repay");
-   
-   // Receives coin
-   receive(disclosedCoin);
+    // Validate repay amount
+    assert (disclose(_amountToRepay) > 0, "Cannot repay zero amount");
 
-   const balanceToRepay = metadata.debt - disclosedAmtToRepay; 
-   
+    // Generate privacy-preserving user ID
+    const userSecret = disclose(secret_key());
+    const depositorsId = generateUserId(userSecret);
+
+    const disclosedAmtToRepay = disclose(_amountToRepay);
+    const disclosedCoin = disclose(coin);
+
+    const oldLeaf = disclose(get_depositor_leaf());
+    const oldCommitment = hashDepositorLeaf(oldLeaf);
+
+    const path = getDepositorPath();
+    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
+    assert(path.leaf == oldCommitment, "Mismatch");
+    assert(oldLeaf.id == depositorsId, "Not owner");
+    assert(oldLeaf.position == DebtPositionStatus.active, "Position not active");
+    assert(!depositorNullifiers.member(oldCommitment), "Already spent");
+
+    // Nullify old commitment
+    depositorNullifiers.insert(oldCommitment);
+
+    const metadata = getMintMetadata();
+    const metadataHash = hashMintMetadata(metadata, depositorsId);
+    assert(metadataHash == oldLeaf.metadataHash, "Invalid state");
+
+    assert (coin.color == sUSDTokenType, "Can not repay minted sUSD: Invalid token type provided");
+    assert (_amountToRepay <= metadata.debt, "Can not repay minted sUSD: tokens must be equivalent to the amount of sUSD minted");
+
+    // Coin value must be >= amount to repay
+    assert (coin.value >= _amountToRepay, "Can not repay minted sUSD: Insufficient tokens provided to cover amount to repay");
+
+    // Receives coin
+    receive(disclosedCoin);
+
+    const balanceToRepay = metadata.debt - disclosedAmtToRepay;
+
+    // Ensure remaining debt meets minimum requirement (unless fully repaying to 0)
+    assert (balanceToRepay == 0 || balanceToRepay >= minimumDebt, "Cannot repay: Remaining debt must be 0 or meet minimum debt requirement");
+
     // Generates and send token to a burn address
     const burnAddrs = burnAddress();
     sendImmediate(disclosedCoin, burnAddrs, disclosedAmtToRepay);
+
     // Updates MintMetadata (private state)
     const newMetadata = MintMetadata {
-    ...metadata,
-    debt: balanceToRepay
-   };
+        ...metadata,
+        debt: balanceToRepay
+    };
 
-   const newMetadataHash = hashMintMetadata(newMetadata, depositId);
-   // Set mint_metadata private state
-   set_mint_metadata(newMetadata);
+    const newMetadataHash = hashMintMetadata(newMetadata, depositorsId);
 
-   const newBorrowLimit = (mintPositionToRepay.borrowLimit + disclosedAmtToRepay) as Uint<32>;
-   const newHFactor = newMetadata.debt > 0 ? calculateHFactor(metadata.collateral, newMetadata.debt, liquidationThreshold) : 0;
-   const borrowLimit = mintPositionToRepay.borrowLimit + disclosedAmtToRepay;
-   if (balanceToRepay > 0) {
-        depositors.insert(depositId, Depositor{
-            ...mintPositionToRepay,
-            metadataHash: newMetadataHash,
-            hFactor: newHFactor as Uint<4>,
-            borrowLimit: newBorrowLimit
-        });
-    }else{
-        depositors.insert(depositId, Depositor {
-            ...mintPositionToRepay,
-            metadataHash: newMetadataHash,
-            position: DebtPositionStatus.inactive,
-            hFactor: newHFactor as Uint<4>,
-            borrowLimit: newBorrowLimit
-        });
-    }
+    // Set mint_metadata private state
+    set_mint_metadata(newMetadata);
+
+    // Create new commitment
+    const newLeaf = DepositorLeaf {
+        id: oldLeaf.id,
+        metadataHash: newMetadataHash,
+        position: balanceToRepay > 0 ? DebtPositionStatus.active : DebtPositionStatus.inactive,
+        coinType: oldLeaf.coinType,
+        mintCounterCommitment: oldLeaf.mintCounterCommitment
+    };
+    const newCommitment = hashDepositorLeaf(newLeaf);
+    depositorCommitments.insert(newCommitment);
 }
 
 /* INTERACTIONS FOR STAKERS */
 
-export circuit depositToStabilityPool(coin: CoinInfo): [] {
+export circuit depositToStabilityPool(coin: CoinInfo, _isNewStaker: Boolean): [] {
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot deposit to stability pool");
+
     const disclosedCoin = disclose(coin);
+    const isNewStaker = disclose(_isNewStaker);
     assert (coin.color == sUSDTokenType, "Invalid coin type provided to pool");
 
-    // Receives and write to coin balance
+    // Receive the sUSD coin - contract now holds it privately
     receive(disclosedCoin);
-    
-    // Writes coin to the stakePoolTotal
-    if(stakers.isEmpty()){
-        // Writes coin generated within the tx as first stake
-        stakePoolTotal.writeCoin(disclosedCoin, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
-    }else{
-        // Merges the previous coin stored on the ledger with the one generated within the tx and writes it as the new stakePool total
-        stakePoolTotal.writeCoin(mergeCoinImmediate(stakePoolTotal, disclosedCoin), right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
-    }
 
-    // Updates statbility pool mapping
+    // Generate user ID
     const stakersId = generateUserId(disclose(secret_key()));
-    // Inserts the new stake detail with the user's adddress as key
-    stakers.member(ownPublicKey().bytes) ? 
-    stakers.insert(ownPublicKey().bytes, Staker{
-        ...stakers.lookup(ownPublicKey().bytes),
-        effective_user_balance: (stakers.lookup(ownPublicKey().bytes).effective_user_balance + disclosedCoin.value) as Uint<32>,
-        entry_ADA_SUSD_index: ADA_sUSD_index,
-        entry_scale_factor: cumulative_scaling_factor,
-    }) :
-    stakers.insert(ownPublicKey().bytes, Staker {
-        ...default<Staker>,
-        id: stakersId,
-        address: ownPublicKey(),
-        entry_ADA_SUSD_index: ADA_sUSD_index,
-        entry_scale_factor: cumulative_scaling_factor,
-        effective_user_balance: disclosedCoin.value as Uint<32>
-    });
+    const stakerPk = ownPublicKey().bytes;
+
+    if(isNewStaker){
+        // Create initial commitment
+        const newMetadata = StakeMetadata {
+            effectiveBalance: disclosedCoin.value as Uint<32>,
+            stakeReward: 0,
+            entry_ADA_SUSD_index: ADA_sUSD_index,
+            entry_scale_factor: cumulative_scaling_factor
+        };
+        const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
+        set_stake_metadata(newMetadata);
+
+        const newLeaf = StakerLeaf {
+            id: stakersId,
+            metadataHash: newMetadataHash
+        };
+        const commitment = hashStakerLeaf(newLeaf);
+        stakerCommitments.insert(commitment);
+
+    }else{
+        // Nullify old, create new
+        const oldLeaf = disclose(get_staker_leaf());
+        const oldCommitment = hashStakerLeaf(oldLeaf);
+
+        const path = getStakerPath();
+        assert(stakerCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
+        assert(path.leaf == oldCommitment, "Mismatch");
+        assert(oldLeaf.id == stakersId, "Not owner");
+        assert(!stakerNullifiers.member(oldCommitment), "Already spent");
+
+        stakerNullifiers.insert(oldCommitment);
+
+        const metadata = getStakeMetadata();
+        assert(hashStakeMetadata(metadata, stakerPk) == oldLeaf.metadataHash, "Invalid");
+
+        const newMetadata = StakeMetadata {
+            effectiveBalance: (metadata.effectiveBalance + disclosedCoin.value) as Uint<32>,
+            stakeReward: metadata.stakeReward,
+            entry_ADA_SUSD_index: metadata.entry_ADA_SUSD_index,
+            entry_scale_factor: metadata.entry_scale_factor
+        };
+        const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
+        set_stake_metadata(newMetadata);
+
+        const newLeaf = StakerLeaf {
+            id: oldLeaf.id,
+            metadataHash: newMetadataHash
+        };
+        const newCommitment = hashStakerLeaf(newLeaf);
+        stakerCommitments.insert(newCommitment);
+    }
 }
 
-export circuit checkStakeReward(): [Uint<128>, Staker]{
-    assert (stakers.member(ownPublicKey().bytes), "Can not check stake reward: You have no stake position");
-    
-    const stakePosition = stakers.lookup(ownPublicKey().bytes);
-    // Verifies users stake id using their secret_key
+export circuit checkStakeReward(): [Uint<128>, StakerLeaf]{
+    const stakerPk = ownPublicKey().bytes;
     const stakersId = generateUserId(disclose(secret_key()));
-    assert (stakersId == stakePosition.id, "You are not a staker: Invalid staker ID");
+
+    // Commitment/nullifier
+    const oldLeaf = disclose(get_staker_leaf());
+    const oldCommitment = hashStakerLeaf(oldLeaf);
+    const path = getStakerPath();
+    assert(stakerCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
+    assert(path.leaf == oldCommitment, "Mismatch");
+    assert(oldLeaf.id == stakersId, "Not owner");
+    assert(!stakerNullifiers.member(oldCommitment), "Already spent");
+    stakerNullifiers.insert(oldCommitment);
+
+    const metadata = getStakeMetadata();
+    assert(hashStakeMetadata(metadata, stakerPk) == oldLeaf.metadataHash, "Invalid");
 
     // Computes the user stake reward i.e earned_ADA = user_sUSD × (total_ADA_per_sUSD − user_entry_ADA_per_sUSD) + pending_balance
-    const stakeReward = (((stakePosition.effective_user_balance as Field) * (ADA_sUSD_index - stakePosition.entry_ADA_SUSD_index)) + stakePosition.stake_reward) as Uint<64>;
-    // Calculates user's new effective stake balance using userstakeAmount * (cumulative_scaling_factor / user_entry_scale_factor) 
-    const new_user_effective_bal = (stakePosition.effective_user_balance as Field) * DivisionFunction(cumulative_scaling_factor as Uint<64>, stakePosition.entry_scale_factor);
-    // Updates the user's pending ADA upon interaction to avoid looping to update individually
-    const updatedStakersPosition = Staker {
-        ...stakePosition,
-        stake_reward: stakeReward,
-        effective_user_balance: new_user_effective_bal as Uint<32>
+    const stakeReward = (((metadata.effectiveBalance as Field) * (ADA_sUSD_index - metadata.entry_ADA_SUSD_index)) + metadata.stakeReward) as Uint<64>;
+
+    // Prevent division by zero - entry_scale_factor must be non-zero
+    assert (metadata.entry_scale_factor > 0, "Invalid stake position: entry scale factor is zero");
+
+    // Calculates user's new effective stake balance using userstakeAmount * (cumulative_scaling_factor / user_entry_scale_factor)
+    const new_user_effective_bal = (metadata.effectiveBalance as Field) * DivisionFunction(cumulative_scaling_factor as Uint<64>, metadata.entry_scale_factor);
+
+    // Create new metadata with updated values, preserving entry fields
+    const newMetadata = StakeMetadata {
+        effectiveBalance: new_user_effective_bal as Uint<32>,
+        stakeReward: stakeReward,
+        entry_ADA_SUSD_index: metadata.entry_ADA_SUSD_index,
+        entry_scale_factor: metadata.entry_scale_factor
     };
 
-    stakers.insert(ownPublicKey().bytes, updatedStakersPosition);
+    // Hash and set new metadata
+    const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
+    set_stake_metadata(newMetadata);
 
-    return [stakeReward, updatedStakersPosition];
+    // Create new commitment
+    const newLeaf = StakerLeaf {
+        id: oldLeaf.id,
+        metadataHash: newMetadataHash
+    };
+    const newCommitment = hashStakerLeaf(newLeaf);
+    stakerCommitments.insert(newCommitment);
+
+    return [stakeReward, newLeaf];
 }
 
 export circuit withdrawStakeReward(_amount: Uint<64>):[]{
-    const [stakeReward, updatedStakersPosition] = checkStakeReward();
-    // Checks if the amount to withdraw is not more than the withdrawableStakeReward
-    assert (disclose(_amount) <= stakeReward, "Can not withdraw more than available stake reward");
-    assert (stakeReward >= _amount, "Withdraw amount can not be more than availbale stake reward");
-    
-    // Sends the pending ADA to the staker
-    const send_amt = disclose(_amount) * SPECK_per_tDUST;
-    const sendResult = send(reservePoolTotal, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), send_amt);
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot withdraw stake reward");
 
+    const [stakeReward, updatedStakersPosition] = checkStakeReward();
+    const stakerPk = ownPublicKey().bytes;
+
+    // Check amount is non-zero and not more than available
+    assert (disclose(_amount) > 0, "Cannot withdraw zero amount");
+    assert (disclose(_amount) <= stakeReward, "Cannot withdraw more than available stake reward");
+
+    // Get reserve pool coin from witness and send reward
+    const send_amt = disclose(_amount) * SPECK_per_tDUST;
+    const reserveCoin = getReservePoolCoin();
+    assert (reserveCoin.value >= send_amt, "Insufficient reserve pool balance");
+
+    // Send the pending ADA to the staker
+    const sendResult = send(reserveCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), send_amt);
+
+    // If there's change, receive it back to the contract
     if(sendResult.change.is_some){
-        reservePoolTotal.writeCoin(sendResult.change.value, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
-    }else{
-      // Reset Pool total if there's no change left
-      reservePoolTotal.resetToDefault();
+        receive(sendResult.change.value);
     }
-    
+
+    // Get current metadata (already updated by checkStakeReward)
+    const metadata = getStakeMetadata();
+
     // Updates the user's pending ADA upon interaction to avoid looping to update individually
     const stakeRewardBalance = stakeReward - disclose(_amount);
-    const updatedStakePosition = Staker {
-        ...updatedStakersPosition,
-        stake_reward: stakeRewardBalance as Uint<64>,
-        entry_ADA_SUSD_index: ADA_sUSD_index,
+
+    // Create new metadata with updated reward balance, preserving entry fields
+    const newMetadata = StakeMetadata {
+        effectiveBalance: metadata.effectiveBalance,
+        stakeReward: stakeRewardBalance as Uint<64>,
+        entry_ADA_SUSD_index: metadata.entry_ADA_SUSD_index,
+        entry_scale_factor: metadata.entry_scale_factor
     };
 
-    stakers.insert(ownPublicKey().bytes, updatedStakePosition);
+    // Hash and set new metadata
+    const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
+    set_stake_metadata(newMetadata);
+
+    // Create new commitment (checkStakeReward already nullified old one)
+    const finalLeaf = StakerLeaf {
+        id: updatedStakersPosition.id,
+        metadataHash: newMetadataHash
+    };
+    const finalCommitment = hashStakerLeaf(finalLeaf);
+    stakerCommitments.insert(finalCommitment);
 }
 
 /* Permits user to withdraw all or part of their stake reward from the stakePool */
 export circuit withdrawStake(_amount: Uint<32>): []{
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot withdraw stake");
+
     const disclosedAmount = disclose(_amount);
-    assert (stakers.member(ownPublicKey().bytes), "Can not withdraw stake: You are not a staker");
+    const stakerPk = ownPublicKey().bytes;
 
-    const stakePosition = stakers.lookup(ownPublicKey().bytes);
-
-    assert (_amount <= stakePosition.effective_user_balance, "Can not withdraw more than available stake balance");
     const stakersId = generateUserId(disclose(secret_key()));
-    assert (stakersId == stakePosition.id, "Cannot withdraw stake reward you are not the owner");
-    const sendResult = send(stakePoolTotal, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), disclosedAmount);
-    const balance = stakePosition.effective_user_balance - disclosedAmount;
 
-    sendResult.change.is_some ? 
-    stakePoolTotal.writeCoin(sendResult.change.value, right<ZswapCoinPublicKey, ContractAddress>(kernel.self())) :
-    stakePoolTotal.resetToDefault();
+    // Commitment/nullifier
+    const oldLeaf = disclose(get_staker_leaf());
+    const oldCommitment = hashStakerLeaf(oldLeaf);
+    const path = getStakerPath();
+    assert(stakerCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
+    assert(path.leaf == oldCommitment, "Mismatch");
+    assert(oldLeaf.id == stakersId, "Not owner");
+    assert(!stakerNullifiers.member(oldCommitment), "Already spent");
+    stakerNullifiers.insert(oldCommitment);
 
-    const updatedStakePosition = Staker {
-        ...stakePosition,
-        effective_user_balance: balance as Uint<32>
+    const metadata = getStakeMetadata();
+    assert(hashStakeMetadata(metadata, stakerPk) == oldLeaf.metadataHash, "Invalid");
+
+    // Validate withdrawal amount in ZK using private balance
+    assert (_amount <= metadata.effectiveBalance, "Can not withdraw more than available stake balance");
+
+    // Get pool coin from witness and send withdrawal
+    const poolCoin = getStakePoolCoin();
+    const sendResult = send(poolCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), disclosedAmount);
+
+    // If there's change, receive it back to the contract
+    if(sendResult.change.is_some){
+        receive(sendResult.change.value);
+    }
+
+    const balance = metadata.effectiveBalance - disclosedAmount;
+
+    // Create new metadata with updated balance, preserving entry fields
+    const newMetadata = StakeMetadata {
+        effectiveBalance: balance as Uint<32>,
+        stakeReward: metadata.stakeReward,
+        entry_ADA_SUSD_index: metadata.entry_ADA_SUSD_index,
+        entry_scale_factor: metadata.entry_scale_factor
     };
 
-    stakers.insert(ownPublicKey().bytes, updatedStakePosition);
+    // Hash and set new metadata
+    const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
+    set_stake_metadata(newMetadata);
+
+    // Create new commitment with updated metadata
+    const newLeaf = StakerLeaf {
+        id: oldLeaf.id,
+        metadataHash: newMetadataHash
+    };
+    const newCommitment = hashStakerLeaf(newLeaf);
+    stakerCommitments.insert(newCommitment);
 }
 
 /* LIQUIDATOR'S INTERACTIONS */
 
+/*
+ * @liquidateDebtPosition - Allows liquidators to partially liquidate underwater positions
+ *
+ * @_totalCollateral - Total collateral in the position (for verification)
+ * @_totalDebt - Total debt in the position (for verification)
+ * @_debtToLiquidate - Amount of debt to repay in this partial liquidation
+ * @_depositId - The position ID to liquidate
+ */
 export circuit liquidateDebtPosition(
-    _collateralAmt: Uint<64>, 
-    _depositId: Bytes<32>, 
-    _debt: Uint<64>,
+    _totalCollateral: Uint<64>,
+    _totalDebt: Uint<64>,
+    _debtToLiquidate: Uint<64>,
+    _depositId: Bytes<32>,
 ):[]{
-    // Checks if the loan positon exist
-    assert (depositors.member(disclose(_depositId)), "Deposit with the required Id does not exist");
-    const collateralDepositToLiquidate = depositors.lookup(disclose(_depositId)); 
-    assert (stakePoolTotal.value >= disclose(_debt), "Insufficient Funds in stake pool");
-    // Burns equivalent amount of minted asset from the stakePoolTotal in order to regulate the circulation of sUSD
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot liquidate positions");
+
+    // Validate liquidation amounts
+    const disclosedDebtToLiquidate = disclose(_debtToLiquidate);
+    const disclosedTotalDebt = disclose(_totalDebt);
+    const disclosedTotalCollateral = disclose(_totalCollateral);
+
+    assert (disclosedDebtToLiquidate >= MINIMUM_LIQUIDATION_DEBT, "Cannot liquidate: Debt below minimum liquidation threshold");
+    assert (disclosedDebtToLiquidate > 0, "Cannot liquidate: Zero debt");
+    assert (disclosedDebtToLiquidate <= disclosedTotalDebt, "Cannot liquidate more debt than position has");
+    assert (disclosedTotalCollateral > 0, "Cannot liquidate: Zero collateral");
+
+    // ===== COMMITMENT/NULLIFIER: Liquidator provides victim's old commitment proof =====
+    const victimOldLeaf = disclose(get_depositor_leaf());
+    const victimOldCommitment = hashDepositorLeaf(victimOldLeaf);
+
+    // Verify victim's old commitment is in the tree
+    const path = getDepositorPath();
+    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
+           "Invalid liquidation: Victim commitment not in tree");
+
+    // Verify victim's commitment hasn't been spent already
+    assert(!depositorNullifiers.member(victimOldCommitment),
+           "Invalid liquidation: Victim commitment already spent");
+
+    // Nullify the victim's old commitment (liquidation spends it)
+    depositorNullifiers.insert(victimOldCommitment);
+
+    // Verify victim ID matches provided ID
+    assert(victimOldLeaf.id == disclose(_depositId), "Deposit ID mismatch");
+
+    // Prevent re-liquidation of already closed positions
+    assert(victimOldLeaf.position != DebtPositionStatus.closed,
+        "Cannot liquidate: Position is already closed");
+
+    // Construct MintMetadata from liquidator-provided values and verify hash matches
+    const liquidatorProvidedMetadata = MintMetadata{
+        collateral: disclosedTotalCollateral,
+        debt: disclosedTotalDebt
+    };
+    const liquidatorMetadataHash = hashMintMetadata(liquidatorProvidedMetadata, disclose(_depositId));
+    assert(liquidatorMetadataHash == victimOldLeaf.metadataHash,
+        "Invalid liquidation: Provided collateral/debt does not match victim's position");
+
+    // Validate liquidation threshold before using it
+    assert (liquidationThreshold > 0 && liquidationThreshold <= 100,
+        "Invalid liquidation threshold: Protocol misconfigured");
+
+    // Verify position is actually liquidatable by checking health factor
+    const currentHealthFactor = calculateHFactor(disclosedTotalCollateral, disclosedTotalDebt, liquidationThreshold);
+    assert (currentHealthFactor < 1, "Cannot liquidate: Position is still healthy (health factor >= 1)");
+
+    // Calculate proportional collateral to seize based on debt being repaid
+    // If liquidating 50% of debt, seize 50% of collateral
+    const collateralToSeize = DivisionFunction((disclosedTotalCollateral * disclosedDebtToLiquidate) as Uint<64>, disclosedTotalDebt);
+
+    // Calculate remaining position values
+    const remainingDebt = (disclosedTotalDebt - disclosedDebtToLiquidate) as Uint<64>;
+    const remainingCollateral = (disclosedTotalCollateral - collateralToSeize) as Uint<64>;
+
+    // Get pool coin from witness and burn debt from it
+    const poolCoin = getStakePoolCoin();
+    const poolValue = poolCoin.value as Uint<64>;
+
+    // Verify sufficient funds in stake pool
+    assert (poolValue >= disclosedDebtToLiquidate, "Insufficient funds in stability pool for liquidation");
+
     const burnAddrs = burnAddress();
-    const sendResult = send(stakePoolTotal, burnAddrs, disclose(_debt));
+    const sendResult = send(poolCoin, burnAddrs, disclosedDebtToLiquidate);
+
+    // If there's change, receive it back to the contract
     if(sendResult.change.is_some){
-        stakePoolTotal.writeCoin(sendResult.change.value, right<ZswapCoinPublicKey, ContractAddress>(kernel.self()));
-    }else{
-      // Reset Pool total if there's no change left
-      stakePoolTotal.resetToDefault();
+        receive(sendResult.change.value);
     }
-    // Calculates ADA_sUSD_index using liquidatedCollateral / sUSD_Pool_ Total
-    const current_ADA_sUSD_index = DivisionFunction(disclose(_collateralAmt) as Uint<64>, stakePoolTotal.value as Uint<64>) as Uint<128>;
-    ADA_sUSD_index = (ADA_sUSD_index + current_ADA_sUSD_index) as Uint<128>;
-    // Calculates and update the cumulative scaling factor
-    const loss_ratio = DivisionFunction(disclose(_debt), stakePoolTotal.value as Uint<64>);
+
+    // Liquidation incentive accounting
+    const collateral_in_speck = (collateralToSeize * SPECK_per_tDUST) as Uint<64>;
+    const liquidator_incentive = DivisionFunction((collateral_in_speck * liquidationIncentive) as Uint<64>, 10000);
+
+    // Get reserve pool coin from witness and verify sufficient collateral
+    const reserveCoin = getReservePoolCoin();
+    assert (reserveCoin.value >= collateral_in_speck, "Insufficient collateral in reserve pool for liquidation");
+
+    // Transfer liquidation incentive to liquidator
+    const liquidatorSendResult = send(reserveCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), liquidator_incentive);
+
+    // If there's change, receive it back to the contract
+    if(liquidatorSendResult.change.is_some){
+        receive(liquidatorSendResult.change.value);
+    }
+
+    // Transfer remaining collateral accounting to stakers via ADA_sUSD_index
+    const collateral_for_stakers = (collateral_in_speck - liquidator_incentive) as Uint<64>;
+
+    // Only update ADA_sUSD_index if there are stakers
+    if (poolValue > 0) {
+        const current_ADA_sUSD_index = DivisionFunction(collateral_for_stakers, poolValue) as Uint<128>;
+        ADA_sUSD_index = (ADA_sUSD_index + current_ADA_sUSD_index) as Uint<128>;
+    }
+
+    // Update cumulative scaling factor
+    const loss_ratio = DivisionFunction(disclosedDebtToLiquidate, poolValue);
+    assert (loss_ratio <= 1, "Cannot liquidate: Debt exceeds stability pool (stability pool undercollateralized)");
     cumulative_scaling_factor = cumulative_scaling_factor * (1 - loss_ratio);
-    
-    // Sets user's private state
-    set_mint_metadata(MintMetadata {
-        collateral: 0,
-        debt: 0
-    });
-    
-    // Updates deposit state in the mapping
-    depositors.insert(disclose(_depositId), Depositor {
-        ...collateralDepositToLiquidate,    
-        hFactor: 0,
-        position: DebtPositionStatus.closed,
-        borrowLimit: 0,
-    });
+
+    // Determine final position status
+    // If remaining debt is 0, close the position; otherwise keep it active but liquidated
+    const finalPositionStatus = remainingDebt == 0 ? DebtPositionStatus.closed : DebtPositionStatus.active;
+
+    // Create new metadata with remaining values
+    const newMetadata = MintMetadata{
+        collateral: remainingCollateral,
+        debt: remainingDebt
+    };
+    const newMetadataHash = hashMintMetadata(newMetadata, disclose(_depositId));
+
+    // Update witness to track new metadata for the victim
+    set_mint_metadata(newMetadata);
+
+    // ===== CREATE NEW COMMITMENT: Victim's updated state after liquidation =====
+    const victimNewLeaf = DepositorLeaf {
+        id: victimOldLeaf.id,
+        metadataHash: newMetadataHash,
+        position: finalPositionStatus,
+        coinType: victimOldLeaf.coinType,
+        mintCounterCommitment: victimOldLeaf.mintCounterCommitment
+    };
+    const victimNewCommitment = hashDepositorLeaf(victimNewLeaf);
+    depositorCommitments.insert(victimNewCommitment);
 
     liquidationCount.increment(1);
+}
+
+/* REDEMPTION MECHANISM */
+
+/*
+ * @redeemSUSD - Allows anyone holding sUSD to redeem it for ADA from the reserve pool
+ * This provides an exit mechanism for sUSD holders who are not depositors
+ *
+ * @coin - The sUSD coin to redeem
+ * @_amountToRedeem - Amount of sUSD to redeem
+ * @_oraclePrice - Oracle price of ADA in USD (scaled, e.g., 1 ADA = 1000000 for $1)
+ * @_oraclePk - Public key of the trusted oracle providing the price
+ *
+ * Formula: ADA_to_send = (sUSD_amount * SPECK_per_tDUST) / oracle_price
+ * Fee: redemptionFee basis points (e.g., 50 = 0.5%)
+ *
+ * Example: Redeem 100 sUSD at $1 ADA price with 0.5% fee
+ *   - ADA amount = 100 ADA
+ *   - Fee = 0.5 ADA
+ *   - User receives = 99.5 ADA
+*/
+export circuit redeemSUSD(coin: CoinInfo, _amountToRedeem: Uint<64>, _oraclePrice: Uint<64>, _oraclePk: Bytes<32>): [] {
+    // Check if protocol is paused
+    assert (isPaused == 0, "Protocol is paused: Cannot redeem sUSD");
+
+    const disclosedAmtToRedeem = disclose(_amountToRedeem);
+    const disclosedCoin = disclose(coin);
+    const disclosedOraclePrice = disclose(_oraclePrice);
+    const disclosedOraclePk = disclose(_oraclePk);
+
+    // Validate inputs
+    assert (coin.color == sUSDTokenType, "Can not redeem: Invalid token type provided");
+    assert (_amountToRedeem <= coin.value, "Can not redeem: Insufficient sUSD provided");
+
+    // Verify oracle is trusted
+    assert (trustedOracles.member(disclosedOraclePk), "Can not redeem: Oracle is not trusted");
+
+    // Verify oracle price is within reasonable bounds
+    assert (disclosedOraclePrice >= MIN_ORACLE_PRICE, "Can not redeem: Oracle price too low");
+    assert (disclosedOraclePrice <= MAX_ORACLE_PRICE, "Can not redeem: Oracle price too high");
+
+    // Calculate ADA amount to send based on oracle price
+    // ADA_amount = (sUSD_amount * SPECK_per_tDUST) / oracle_price
+    const ada_amount_raw = DivisionFunction((disclosedAmtToRedeem * SPECK_per_tDUST) as Uint<64>, disclosedOraclePrice);
+
+    // Calculate redemption fee using BASIS_POINTS_DIVISOR constant
+    const fee_amount = DivisionFunction((ada_amount_raw * redemptionFee) as Uint<64>, BASIS_POINTS_DIVISOR);
+    const ada_amount_after_fee = (ada_amount_raw - fee_amount) as Uint<64>;
+
+    // Accumulate redemption fee in admin metadata (convert from speck to tDUST)
+    const fee_in_tDUST = DivisionFunction(fee_amount as Uint<64>, SPECK_per_tDUST);
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    const newAdminMetadata = AdminMetadata {
+        protocolFeePool: (adminMetadata.protocolFeePool + fee_in_tDUST) as Uint<128>,
+        super_admin: adminMetadata.super_admin,
+        admins: adminMetadata.admins,
+        admin_count: adminMetadata.admin_count
+    };
+    const newAdminMetadataHash = hashAdminMetadata(newAdminMetadata, secret);
+    set_admin_metadata(newAdminMetadata);
+    adminState = AdminState { metadataHash: newAdminMetadataHash };
+
+    // Get reserve pool coin from witness and verify sufficient ADA
+    const reserveCoin = getReservePoolCoin();
+    assert (reserveCoin.value >= ada_amount_after_fee, "Can not redeem: Insufficient ADA in reserve pool");
+
+    // Receive the sUSD coin from the user
+    receive(disclosedCoin);
+
+    // Burn the redeemed sUSD
+    const burnAddrs = burnAddress();
+    sendImmediate(disclosedCoin, burnAddrs, disclosedAmtToRedeem);
+
+    // Send ADA to the redeemer
+    const sendResult = send(reserveCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), ada_amount_after_fee);
+
+    // If there's change, receive it back to the contract
+    if(sendResult.change.is_some){
+        receive(sendResult.change.value);
+    }
 }

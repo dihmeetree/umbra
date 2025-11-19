@@ -25,28 +25,21 @@ export type StateraContractProviders = MidnightProviders<
 >
 export type DeployedStateraOnchainContract = FoundContract<StateraContract>
 export type DerivedStateraContractState = {
-  readonly mintCounter: bigint
-  readonly totalMint: bigint
-  readonly super_admin: Uint8Array
-  readonly nonce: Uint8Array
   readonly sUSDTokenType: Uint8Array
-  readonly stakePoolTotal: bigint
-  readonly reservePoolTotal: {
-    nonce: Uint8Array
-    color: Uint8Array
-    value: bigint
-    mt_index: bigint
-  }
   readonly liquidationThreshold: bigint
-  readonly collateralDepositors: DerivedDepositor[]
-  readonly stakers: DerivedStaker[]
-  readonly noOfDepositors: bigint
-  readonly admins: Uint8Array[]
+  // Commitment/Nullifier pattern: depositor and staker data is now in on-chain trees
+  readonly depositorCommitmentsCount: bigint  // Number of commitments in tree
+  readonly stakerCommitmentsCount: bigint      // Number of staker commitments
+  readonly depositorNullifiersCount: bigint    // Number of spent commitments
+  readonly stakerNullifiersCount: bigint       // Number of spent staker commitments
   readonly LVT: bigint
   readonly MCR: bigint
   readonly liquidationCount: bigint
   readonly validCollateralType: Uint8Array
   readonly trustedOracles: DerivedTrustedOracle[]
+  // Merkle tree roots for reference
+  readonly depositorCommitmentsRoot: { field: bigint }
+  readonly stakerCommitmentsRoot: { field: bigint }
 }
 
 export type DerivedDepositor = {

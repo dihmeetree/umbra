@@ -56,7 +56,6 @@ This protocol implements a collateralized debt position (CDP) system where users
 | ---------------------- | ------------------------------------------------------------ | ----------- |
 | `liquidationThreshold` | Minimum collateral ratio to avoid liquidation (default: 80%) | `Uint<8>`   |
 | `LVT`                  | Maximum loan-to-value ratio for borrowing                    | `Uint<8>`   |
-| `totalMint`            | Total amount of sUSD tokens minted                           | `Uint<128>` |
 | `ADA_sUSD_index`       | Liquidation reward tracking index                            | `Uint<128>` |
 
 ## Data Structures

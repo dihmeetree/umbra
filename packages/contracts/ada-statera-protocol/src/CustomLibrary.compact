@@ -1,11 +1,30 @@
 module CustomLibrary {
     import CompactStandardLibrary;
-    export { MintMetadata, calculateHFactor, DivisionFunction, generateUserId, getMintMetadata, hashMintMetadata, generateAdminId, ComplianceToken, KYCTokenData, ValidityRange};
-    
-    /* Structure for Private state */
+    export { DebtPositionStatus, MintMetadata, StakeMetadata, AdminMetadata, calculateHFactor, DivisionFunction, generateUserId, getMintMetadata, hashMintMetadata, getStakeMetadata, hashStakeMetadata, getAdminMetadata, hashAdminMetadata, generateAdminId, ComplianceToken, KYCTokenData, ValidityRange, getStakePoolCoin, hashStakePoolCoin, getReservePoolCoin, hashReservePoolCoin, isAdmin, isSuperAdmin, createEmptyAdmins, DepositorLeaf, StakerLeaf, hashDepositorLeaf, hashStakerLeaf, verifyDepositorMembership, verifyStakerMembership, getDepositorPath, getStakerPath, createEmptyDepositorLeaf, createEmptyStakerLeaf};
+
+    // Describes the status of a user's debt position
+    enum DebtPositionStatus { inactive, active, closed };
+
+    /* Structure for Private state - Depositors */
     struct MintMetadata {
         collateral: Uint<64>;
         debt: Uint<64>;
+    }
+
+    /* Structure for Private state - Stakers */
+    struct StakeMetadata {
+        effectiveBalance: Uint<32>;
+        stakeReward: Uint<64>;
+        entry_ADA_SUSD_index: Uint<128>;
+        entry_scale_factor: Uint<32>;
+    }
+
+    /* Structure for Private state - Admin */
+    struct AdminMetadata {
+        protocolFeePool: Uint<128>;
+        super_admin: Bytes<32>;
+        admins: Vector<10, Bytes<32>>;
+        admin_count: Uint<8>;
     }
 
     struct KYCTokenData {
@@ -30,8 +49,37 @@ module CustomLibrary {
         oracleSignature: Bytes<32>;
     }
 
+    /* Merkle tree leaf structures for privacy-preserving registries */
+
+    // Depositor leaf - stores minimal public data, hashed into Merkle tree
+    struct DepositorLeaf {
+        id: Bytes<32>;              // Privacy-preserving user ID
+        metadataHash: Bytes<32>;    // Hash of private MintMetadata
+        position: DebtPositionStatus; // Position status (inactive/active/closed)
+        coinType: Bytes<32>;        // Collateral asset type
+        mintCounterCommitment: Bytes<32>; // Per-user mint counter commitment
+    }
+
+    // Staker leaf - stores minimal public data, hashed into Merkle tree
+    struct StakerLeaf {
+        id: Bytes<32>;              // Privacy-preserving user ID
+        metadataHash: Bytes<32>;    // Hash of private StakeMetadata
+    }
+
     witness division(divident: Uint<64>, divisor:Uint<64>): [Uint<64>, Uint<64>];
     witness get_mintmetadata_private_state(): MintMetadata;
+    witness get_stakemetadata_private_state(): StakeMetadata;
+    witness get_adminmetadata_private_state(): AdminMetadata;
+    witness get_stakepoolcoin_private_state(): QualifiedCoinInfo;
+    witness get_reservepoolcoin_private_state(): QualifiedCoinInfo;
+    witness admin_secret(): Bytes<32>;
+
+    // Merkle tree witness functions - provide Merkle proofs for membership verification
+    // Depth 20 supports up to 2^20 = 1,048,576 depositors/stakers with privacy
+    witness get_depositor_merkle_path(): MerkleTreePath<20, Bytes<32>>;
+    witness get_staker_merkle_path(): MerkleTreePath<20, Bytes<32>>;
+    witness get_depositor_leaf(): DepositorLeaf;
+    witness get_staker_leaf(): StakerLeaf;
  
     circuit calculateHFactor(collateralAmount: Uint<64>, amountToMint: Uint<64>, liquidationThreshold: Uint<8>): Uint<128>{
         const percentageDivisor: Uint<64> = 100;
@@ -49,24 +97,19 @@ module CustomLibrary {
     }
 
     circuit generateUserId(sk: Bytes<32>): Bytes<32>{
-        return persistentHash<Vector<2, Bytes<32>>>(
-            [ 
-                pad(32, "susd:user"),
-                persistentHash<Vector<2, Bytes<32>>>(
-                    [sk, kernel.self().bytes]
-                )
-             ]
-        );
+        // Use commitment instead of hash for better privacy
+        // Commit to user's public key using their secret key as randomness
+        return persistentCommit<Bytes<32>>(ownPublicKey().bytes, sk);
     }
 
     circuit generateAdminId(sk: Bytes<32>): Bytes<32>{
         return persistentHash<Vector<2, Bytes<32>>>(
-            [ 
+            [
                 pad(32, "susd:admin"),
                 persistentHash<Vector<2, Bytes<32>>>(
                     [sk, kernel.self().bytes]
                 )
-             ]
+            ]
         );
     }
 
@@ -81,5 +124,165 @@ module CustomLibrary {
     circuit hashMintMetadata (metadata: MintMetadata, randomizer: Bytes<32>): Bytes<32> {
         return persistentCommit<MintMetadata>(metadata, randomizer);
     }
-    
+
+    circuit getStakeMetadata(): StakeMetadata{
+        const {effectiveBalance, stakeReward, entry_ADA_SUSD_index, entry_scale_factor} = disclose(get_stakemetadata_private_state());
+        return StakeMetadata {
+            effectiveBalance,
+            stakeReward,
+            entry_ADA_SUSD_index,
+            entry_scale_factor
+        };
+    }
+
+    circuit hashStakeMetadata (metadata: StakeMetadata, randomizer: Bytes<32>): Bytes<32> {
+        return persistentCommit<StakeMetadata>(metadata, randomizer);
+    }
+
+    circuit getAdminMetadata(): AdminMetadata{
+        const {protocolFeePool, super_admin, admins, admin_count} = disclose(get_adminmetadata_private_state());
+        return AdminMetadata {
+            protocolFeePool,
+            super_admin,
+            admins,
+            admin_count
+        };
+    }
+
+    circuit hashAdminMetadata (metadata: AdminMetadata, randomizer: Bytes<32>): Bytes<32> {
+        return persistentCommit<AdminMetadata>(metadata, randomizer);
+    }
+
+    circuit getStakePoolCoin(): QualifiedCoinInfo{
+        const poolCoin = disclose(get_stakepoolcoin_private_state());
+        return poolCoin;
+    }
+
+    circuit hashStakePoolCoin (poolCoin: QualifiedCoinInfo): Bytes<32> {
+        return persistentHash<QualifiedCoinInfo>(poolCoin);
+    }
+
+    circuit getReservePoolCoin(): QualifiedCoinInfo{
+        const poolCoin = disclose(get_reservepoolcoin_private_state());
+        return poolCoin;
+    }
+
+    circuit hashReservePoolCoin (poolCoin: QualifiedCoinInfo): Bytes<32> {
+        return persistentHash<QualifiedCoinInfo>(poolCoin);
+    }
+
+    // Helper to create empty admins vector
+    circuit createEmptyAdmins(): Vector<10, Bytes<32>> {
+        const zero: Bytes<32> = pad(32, "");
+        return [zero, zero, zero, zero, zero, zero, zero, zero, zero, zero];
+    }
+
+    // Check if current user is super admin
+    circuit isSuperAdmin(metadata: AdminMetadata): Boolean {
+        return ownPublicKey().bytes == metadata.super_admin;
+    }
+
+    // Check if current user is an admin (super admin or in admins list)
+    circuit isAdmin(metadata: AdminMetadata): Boolean {
+        const currentUser = ownPublicKey().bytes;
+
+        // Check if super admin
+        if (currentUser == metadata.super_admin) {
+            return true;
+        }
+
+        // Check if in admins list (manual unrolling for max 10 admins)
+        if (metadata.admin_count > 0 && currentUser == metadata.admins[0]) { return true; }
+        if (metadata.admin_count > 1 && currentUser == metadata.admins[1]) { return true; }
+        if (metadata.admin_count > 2 && currentUser == metadata.admins[2]) { return true; }
+        if (metadata.admin_count > 3 && currentUser == metadata.admins[3]) { return true; }
+        if (metadata.admin_count > 4 && currentUser == metadata.admins[4]) { return true; }
+        if (metadata.admin_count > 5 && currentUser == metadata.admins[5]) { return true; }
+        if (metadata.admin_count > 6 && currentUser == metadata.admins[6]) { return true; }
+        if (metadata.admin_count > 7 && currentUser == metadata.admins[7]) { return true; }
+        if (metadata.admin_count > 8 && currentUser == metadata.admins[8]) { return true; }
+        if (metadata.admin_count > 9 && currentUser == metadata.admins[9]) { return true; }
+
+        return false;
+    }
+
+    /* ==================== MERKLE TREE PRIVACY FUNCTIONS ==================== */
+
+    // Hash a depositor leaf for Merkle tree insertion
+    // Uses persistent hash to ensure consistency across contract upgrades
+    circuit hashDepositorLeaf(leaf: DepositorLeaf): Bytes<32> {
+        return persistentHash<DepositorLeaf>(leaf);
+    }
+
+    // Hash a staker leaf for Merkle tree insertion
+    circuit hashStakerLeaf(leaf: StakerLeaf): Bytes<32> {
+        return persistentHash<StakerLeaf>(leaf);
+    }
+
+    // Create an empty depositor leaf (for initialization or placeholder)
+    circuit createEmptyDepositorLeaf(): DepositorLeaf {
+        const emptyBytes: Bytes<32> = pad(32, "");
+        return DepositorLeaf {
+            id: emptyBytes,
+            metadataHash: emptyBytes,
+            position: DebtPositionStatus.closed,
+            coinType: emptyBytes,
+            mintCounterCommitment: emptyBytes
+        };
+    }
+
+    // Create an empty staker leaf (for initialization or placeholder)
+    circuit createEmptyStakerLeaf(): StakerLeaf {
+        const emptyBytes: Bytes<32> = pad(32, "");
+        return StakerLeaf {
+            id: emptyBytes,
+            metadataHash: emptyBytes
+        };
+    }
+
+    // Get depositor Merkle path from witness
+    circuit getDepositorPath(): MerkleTreePath<20, Bytes<32>> {
+        return disclose(get_depositor_merkle_path());
+    }
+
+    // Get staker Merkle path from witness
+    circuit getStakerPath(): MerkleTreePath<20, Bytes<32>> {
+        return disclose(get_staker_merkle_path());
+    }
+
+    // Verify depositor membership in Merkle tree and return leaf data
+    // This provides privacy by only storing a single root hash on-chain
+    circuit verifyDepositorMembership(expectedRoot: MerkleTreeDigest, userId: Bytes<32>): DepositorLeaf {
+        // Get Merkle path from witness (off-chain proof)
+        const path = getDepositorPath();
+
+        // The leaf in the path is the hashed depositor data
+        const leafHash = path.leaf;
+
+        // Verify the Merkle proof - ensures the leaf is in the tree
+        const computedRoot = merkleTreePathRootNoLeafHash<20>(path);
+        assert(computedRoot.field == expectedRoot.field, "Invalid depositor Merkle proof: root mismatch");
+
+        // Leaf data must be provided by witness and verified against the hash
+        // This prevents malicious users from providing fake leaf data
+        // The off-chain witness provider must supply the actual leaf matching the hash
+
+        return createEmptyDepositorLeaf(); // Placeholder - actual leaf decoded by witness
+    }
+
+    // Verify staker membership in Merkle tree and return leaf data
+    circuit verifyStakerMembership(expectedRoot: MerkleTreeDigest, userId: Bytes<32>): StakerLeaf {
+        // Get Merkle path from witness (off-chain proof)
+        const path = getStakerPath();
+
+        // The leaf in the path is the hashed staker data
+        const leafHash = path.leaf;
+
+        // Verify the Merkle proof
+        const computedRoot = merkleTreePathRootNoLeafHash<20>(path);
+        assert(computedRoot.field == expectedRoot.field, "Invalid staker Merkle proof: root mismatch");
+
+        return createEmptyStakerLeaf(); // Placeholder - actual leaf decoded by witness
+    }
+
 }

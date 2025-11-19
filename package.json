@@ -64,7 +64,8 @@
     "ts-jest": "^29.1.1",
     "ts-node": "^10.9.2",
     "turbo": "^2.5.8",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^1.6.1"
   },
   "engines": {
     "node": ">=22"
@@ -74,6 +75,7 @@
     "packages/server",
     "packages/api",
     "packages/cli",
+    "packages/simulator",
     "packages/contracts/ada-statera-protocol"
   ]
 }

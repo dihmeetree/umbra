@@ -56,7 +56,8 @@ export interface DeployedStateraAPI {
   ) => Promise<FinalizedCallTxData<StateraContract, 'repay'>>
   withdrawCollateral: (
     amountToWithdraw: number,
-    _oraclePrice: number
+    _oraclePrice: number,
+    oraclePk: string
   ) => Promise<FinalizedCallTxData<StateraContract, 'withdrawCollateral'>>
   checkStakeReward: () => Promise<
     FinalizedCallTxData<StateraContract, 'checkStakeReward'>
@@ -81,6 +82,14 @@ export interface DeployedStateraAPI {
   removeTrustedOracle: (
     oraclePk: string
   ) => Promise<FinalizedCallTxData<StateraContract, 'removeTrustedOraclePk'>>
+  redeemSUSD: (
+    amount: number,
+    oraclePrice: number,
+    oraclePk: string
+  ) => Promise<FinalizedCallTxData<StateraContract, 'redeemSUSD'>>
+  setRedemptionFee: (
+    feeInBasisPoints: number
+  ) => Promise<FinalizedCallTxData<StateraContract, 'setRedemptionFee'>>
 }
 
 export class StateraAPI implements DeployedStateraAPI {
@@ -92,7 +101,7 @@ export class StateraAPI implements DeployedStateraAPI {
    * @param logger becomes accessible s if they were decleared as static properties as part of the class
    */
   private constructor(
-    providers: StateraContractProviders,
+    private providers: StateraContractProviders,
     public readonly allReadyDeployedContract: DeployedStateraOnchainContract,
     private logger?: Logger
   ) {
@@ -122,29 +131,25 @@ export class StateraAPI implements DeployedStateraAPI {
       ],
       (ledgerState, privateState) => {
         return {
-          mintCounter: ledgerState.mintCounter,
-          totalMint: ledgerState.totalMint,
-          super_admin: ledgerState.super_admin,
-          nonce: ledgerState.nonce,
           sUSDTokenType: ledgerState.sUSDTokenType,
-          stakePoolTotal: ledgerState.stakePoolTotal.value,
-          reservePoolTotal: ledgerState.reservePoolTotal,
           liquidationThreshold: ledgerState.liquidationThreshold,
-          collateralDepositors: utils.createDerivedDepositorsArray(
-            ledgerState.depositors
-          ),
-          stakers: utils.createDerivedStakersArray(ledgerState.stakers),
-          noOfDepositors: ledgerState.depositors.size(),
+          // Commitment/Nullifier pattern: track tree statistics instead of individual entries
+          depositorCommitmentsCount: ledgerState.depositorCommitments.firstFree(),
+          stakerCommitmentsCount: ledgerState.stakerCommitments.firstFree(),
+          depositorNullifiersCount: ledgerState.depositorNullifiers.size(),
+          stakerNullifiersCount: ledgerState.stakerNullifiers.size(),
           mintMetadata: privateState?.mint_metadata,
           secret_key: privateState?.secret_key,
-          admins: utils.createDerivedAdminArray(ledgerState.admins),
           LVT: ledgerState.LVT,
           MCR: ledgerState.MCR,
           liquidationCount: ledgerState.liquidationCount,
           validCollateralType: ledgerState.validCollateralAssetType,
           trustedOracles: utils.createDerivedOraclesArray(
             ledgerState.trustedOracles
-          )
+          ),
+          // Merkle tree roots for reference
+          depositorCommitmentsRoot: ledgerState.depositorCommitments.root(),
+          stakerCommitmentsRoot: ledgerState.stakerCommitments.root()
         }
       }
     )
@@ -165,11 +170,14 @@ export class StateraAPI implements DeployedStateraAPI {
       initialPrivateState: await StateraAPI.getPrivateState(providers),
       privateStateId: stateraPrivateStateId,
       args: [
-        utils.randomNonceBytes(32, logger),
-        90n,
-        80n,
-        120n,
-        encodeTokenType(nativeToken())
+        90n, // initLiquidationThreshold: 90%
+        80n, // initialLVT: 80%
+        120n, // initialMCR: 120%
+        encodeTokenType(nativeToken()), // _validCollateralAssetType
+        5n, // initialRedemptionFee: 5% (stored as percentage, max 255)
+        5n, // initialBorrowingFee: 5% (stored as percentage, max 255)
+        10n, // initialLiquidationIncentive: 10% (stored as percentage, max 255)
+        100n // initialMinimumDebt: 100 sUSD minimum debt
       ]
     })
 
@@ -244,13 +252,21 @@ export class StateraAPI implements DeployedStateraAPI {
     amount: number
   ): Promise<FinalizedCallTxData<StateraContract, 'depositToCollateralPool'>> {
     this.logger?.info(`Depositing collateral...`)
-    // First update the private state for the minter
+
+    // Check if this is a new depositor by checking private state
+    const privateState = await this.providers.privateStateProvider.get(stateraPrivateStateId)
+    const isNewDepositor = !privateState?.mint_metadata ||
+                           (privateState.mint_metadata.collateral === 0n && privateState.mint_metadata.debt === 0n)
+
+    this.logger?.debug(`Depositor status: ${isNewDepositor ? 'NEW' : 'EXISTING'}`)
+
     const deposit_unit_specks = amount * 1_000_000
     const txData =
       await this.allReadyDeployedContract.callTx.depositToCollateralPool(
         this.coin(deposit_unit_specks),
         BigInt(amount),
-        utils.getTestComplianceToken()
+        utils.getTestComplianceToken(),
+        isNewDepositor  // Pass the new parameter
       )
 
     this.logger?.trace('Collateral Deposit was successful', {
@@ -424,14 +440,16 @@ export class StateraAPI implements DeployedStateraAPI {
   // Repay debtAsset
   async withdrawCollateral(
     amountToWithdraw: number,
-    _oraclePrice: number
+    _oraclePrice: number,
+    oraclePk: string
   ): Promise<FinalizedCallTxData<StateraContract, 'withdrawCollateral'>> {
     this.logger?.info('Withdrawing collateral asset...')
     // Construct tx with dynamic coin data
     const txData =
       await this.allReadyDeployedContract.callTx.withdrawCollateral(
         BigInt(amountToWithdraw),
-        BigInt(_oraclePrice)
+        BigInt(_oraclePrice),
+        utils.hexStringToUint8Array(oraclePk)
       )
 
     this.logger?.trace({
@@ -474,10 +492,18 @@ export class StateraAPI implements DeployedStateraAPI {
     amount: number
   ): Promise<FinalizedCallTxData<StateraContract, 'depositToStabilityPool'>> {
     this.logger?.info('Depositing to stake pool...')
-    // Construct tx with dynamic coin data
+
+    // Check if this is a new staker by checking private state
+    const privateState = await this.providers.privateStateProvider.get(stateraPrivateStateId)
+    const isNewStaker = !privateState?.stake_metadata ||
+                        (privateState.stake_metadata.effectiveBalance === 0n && privateState.stake_metadata.stakeReward === 0n)
+
+    this.logger?.debug(`Staker status: ${isNewStaker ? 'NEW' : 'EXISTING'}`)
+
     const txData =
       await this.allReadyDeployedContract.callTx.depositToStabilityPool(
-        this.sUSD_coin(amount)
+        this.sUSD_coin(amount),
+        isNewStaker  // Pass the new parameter
       )
 
     this.logger?.trace({
@@ -571,9 +597,10 @@ export class StateraAPI implements DeployedStateraAPI {
     // Construct tx with dynamic coin data
     const txData =
       await this.allReadyDeployedContract.callTx.liquidateDebtPosition(
-        privateState?.mint_metadata.collateral as bigint,
-        utils.hexStringToUint8Array(collateralId),
-        privateState?.mint_metadata.debt as bigint
+        privateState?.mint_metadata.collateral as bigint, // _totalCollateral
+        privateState?.mint_metadata.debt as bigint, // _totalDebt
+        privateState?.mint_metadata.debt as bigint, // _debtToLiquidate (full debt)
+        utils.hexStringToUint8Array(collateralId) // _depositId
       )
 
     this.logger?.trace({
@@ -590,22 +617,98 @@ export class StateraAPI implements DeployedStateraAPI {
   }
 
   // Used to get the private state from the wallets privateState Provider
+  // Redeems sUSD for ADA from the reserve pool
+  async redeemSUSD(
+    amount: number,
+    oraclePrice: number,
+    oraclePk: string
+  ): Promise<FinalizedCallTxData<StateraContract, 'redeemSUSD'>> {
+    this.logger?.info(
+      `Redeeming ${amount} sUSD for ADA at oracle price ${oraclePrice} from oracle ${oraclePk}...`
+    )
+
+    const txData = await this.allReadyDeployedContract.callTx.redeemSUSD(
+      this.sUSD_coin(amount),
+      BigInt(amount),
+      BigInt(oraclePrice),
+      utils.hexStringToUint8Array(oraclePk)
+    )
+
+    this.logger?.trace({
+      transactionAdded: {
+        circuit: 'redeemSUSD',
+        txHash: txData.public.txHash,
+        amountRedeemed: amount,
+        oraclePrice: oraclePrice,
+        oraclePk: oraclePk,
+        blockDetails: {
+          blockHash: txData.public.blockHash,
+          blockHeight: txData.public.blockHeight
+        }
+      }
+    })
+
+    return txData
+  }
+
+  // Sets the redemption fee (admin only)
+  async setRedemptionFee(
+    feeInBasisPoints: number
+  ): Promise<FinalizedCallTxData<StateraContract, 'setRedemptionFee'>> {
+    this.logger?.info(
+      `Setting redemption fee to ${feeInBasisPoints} basis points...`
+    )
+
+    const txData = await this.allReadyDeployedContract.callTx.setRedemptionFee(
+      BigInt(feeInBasisPoints)
+    )
+
+    this.logger?.trace({
+      transactionAdded: {
+        circuit: 'setRedemptionFee',
+        txHash: txData.public.txHash,
+        feeInBasisPoints: feeInBasisPoints,
+        blockDetails: {
+          blockHash: txData.public.blockHash,
+          blockHeight: txData.public.blockHeight
+        }
+      }
+    })
+
+    return txData
+  }
+
   private static async getPrivateState(
     providers: StateraContractProviders
   ): Promise<StateraPrivateState> {
     const existingPrivateState = await providers.privateStateProvider.get(
       stateraPrivateStateId
     )
-    return (
-      existingPrivateState ?? {
-        secret_key: createPrivateStateraState(utils.randomNonceBytes(32))
-          .secret_key,
-        mint_metadata: {
-          collateral: BigInt(0),
-          debt: BigInt(0)
-        }
+
+    // Validate existing private state
+    if (existingPrivateState) {
+      // Check if secret_key is valid
+      if (existingPrivateState.secret_key &&
+          existingPrivateState.secret_key.length === 32 &&
+          existingPrivateState.secret_key instanceof Uint8Array) {
+        return existingPrivateState
       }
-    )
+      // If secret_key is invalid, fall through to create new state
+      console.warn('Existing private state has invalid secret_key, recreating...')
+    }
+
+    // Create new private state with random secret key
+    const secretKey = utils.randomNonceBytes(32)
+    if (!secretKey || secretKey.length !== 32) {
+      throw new Error('Failed to generate valid secret key')
+    }
+
+    const newPrivateState = createPrivateStateraState(secretKey)
+
+    // Save the new private state immediately
+    await providers.privateStateProvider.set(stateraPrivateStateId, newPrivateState)
+
+    return newPrivateState
   }
 }
 
