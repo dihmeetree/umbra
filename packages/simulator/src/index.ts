@@ -49,6 +49,51 @@ export {
   generateSecretKey,
 } from './utils.js';
 
+// Logging
+export {
+  logger,
+  LogLevel,
+  enableDebugLogging,
+  enableTraceLogging,
+  disableLogging,
+  setQuietMode,
+} from './logger.js';
+
+// Errors
+export {
+  SimulatorError,
+  SimulatorErrorCode,
+  CircuitNotFoundError,
+  MultipleOutputsError,
+  OutputNotFoundError,
+  WalletNotFoundError,
+  CircuitExecutionError,
+} from './errors.js';
+
+// Token helpers
+export {
+  createTokenType,
+  createNativeTokenType,
+  areTokenTypesEqual,
+  TokenRegistry,
+} from './token-helpers.js';
+
+// Assertions
+export {
+  assertBalance,
+  assertBalanceAtLeast,
+  assertZeroBalance,
+  assertHasOutputs,
+  assertNoOutputs,
+  assertBalanceChange,
+  assertBalances,
+} from './assertions.js';
+export type { BalanceAssertion } from './assertions.js';
+
+// Snapshots
+export { SnapshotManager } from './snapshot.js';
+export type { Snapshot } from './snapshot.js';
+
 export type {
   ContractWithCircuits,
   ContractConfig,
