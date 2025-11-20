@@ -123,9 +123,8 @@ const displayLedgerState = async (
     );
   } else {
     logger.info(`Current stablecoin color is: ${ledgerState.sUSDTokenType}`);
-    logger.info(`Depositor commitments count: ${ledgerState.depositorCommitments.firstFree()}`);
-    logger.info(`Staker commitments count: ${ledgerState.stakerCommitments.firstFree()}`);
-    logger.info(`Depositor nullifiers count: ${ledgerState.depositorNullifiers.size()}`);
+    logger.info(`Depositors count: ${ledgerState.depositors.size()}`);
+    logger.info(`Stakers count: ${ledgerState.stakers.size()}`);
     logger.info(
       `Current liquidation threshold is: ${ledgerState.liquidationThreshold}`
     );
@@ -136,14 +135,10 @@ const displayDerivedLedgerState = async (
   currentState: DerivedStateraContractState,
   logger: Logger
 ): Promise<void> => {
-  // Commitment/Nullifier pattern: display tree statistics instead of individual entries
+  // Direct Map storage: display counts
   console.log(`Current stablecoin color is:`, currentState.sUSDTokenType);
-  console.log(`Depositor commitments count:`, currentState.depositorCommitmentsCount);
-  console.log(`Staker commitments count:`, currentState.stakerCommitmentsCount);
-  console.log(`Depositor nullifiers count (spent):`, currentState.depositorNullifiersCount);
-  console.log(`Staker nullifiers count (spent):`, currentState.stakerNullifiersCount);
-  console.log(`Depositor commitments root:`, currentState.depositorCommitmentsRoot.field);
-  console.log(`Staker commitments root:`, currentState.stakerCommitmentsRoot.field);
+  console.log(`Depositors count:`, currentState.depositorsCount);
+  console.log(`Stakers count:`, currentState.stakersCount);
   console.log(`Current trusted oracles:`, currentState.trustedOracles);
   console.log(
     `Current liquidation threshold is:`,

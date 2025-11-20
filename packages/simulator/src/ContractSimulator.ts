@@ -261,12 +261,10 @@ export class ContractSimulator<TPrivateState> {
    * IMPORTANT: Call this BEFORE executing a circuit that expects to receive coins
    *
    * @param coinInfo - The coin to make available as input
-   * @param mtIndex - Optional Merkle tree index (defaults to 0 for testing)
    */
-  addCoinInput(coinInfo: ocrt.CoinInfo, mtIndex: bigint = 0n): void {
+  addCoinInput(coinInfo: ocrt.CoinInfo): void {
     logger.trace('Adding coin input', {
       value: coinInfo.value,
-      mtIndex,
     });
 
     // Work directly with the encoded state to avoid type issues
@@ -278,7 +276,7 @@ export class ContractSimulator<TPrivateState> {
       nonce: this.nonceToBytes(coinInfo.nonce),
       color: encodeTokenType(coinInfo.type),
       value: coinInfo.value,
-      mt_index: mtIndex,
+      mt_index: 0n, // Default to 0 for testing
     };
 
     // Add the encoded coin to inputs so receive() can find it

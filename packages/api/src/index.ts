@@ -133,11 +133,9 @@ export class StateraAPI implements DeployedStateraAPI {
         return {
           sUSDTokenType: ledgerState.sUSDTokenType,
           liquidationThreshold: ledgerState.liquidationThreshold,
-          // Commitment/Nullifier pattern: track tree statistics instead of individual entries
-          depositorCommitmentsCount: ledgerState.depositorCommitments.firstFree(),
-          stakerCommitmentsCount: ledgerState.stakerCommitments.firstFree(),
-          depositorNullifiersCount: ledgerState.depositorNullifiers.size(),
-          stakerNullifiersCount: ledgerState.stakerNullifiers.size(),
+          // Direct Map storage - count entries
+          depositorsCount: ledgerState.depositors.size(),
+          stakersCount: ledgerState.stakers.size(),
           mintMetadata: privateState?.mint_metadata,
           secret_key: privateState?.secret_key,
           LVT: ledgerState.LVT,
@@ -146,10 +144,7 @@ export class StateraAPI implements DeployedStateraAPI {
           validCollateralType: ledgerState.validCollateralAssetType,
           trustedOracles: utils.createDerivedOraclesArray(
             ledgerState.trustedOracles
-          ),
-          // Merkle tree roots for reference
-          depositorCommitmentsRoot: ledgerState.depositorCommitments.root(),
-          stakerCommitmentsRoot: ledgerState.stakerCommitments.root()
+          )
         }
       }
     )
@@ -265,8 +260,7 @@ export class StateraAPI implements DeployedStateraAPI {
       await this.allReadyDeployedContract.callTx.depositToCollateralPool(
         this.coin(deposit_unit_specks),
         BigInt(amount),
-        utils.getTestComplianceToken(),
-        isNewDepositor  // Pass the new parameter
+        utils.getTestComplianceToken()
       )
 
     this.logger?.trace('Collateral Deposit was successful', {
@@ -502,8 +496,7 @@ export class StateraAPI implements DeployedStateraAPI {
 
     const txData =
       await this.allReadyDeployedContract.callTx.depositToStabilityPool(
-        this.sUSD_coin(amount),
-        isNewStaker  // Pass the new parameter
+        this.sUSD_coin(amount)
       )
 
     this.logger?.trace({

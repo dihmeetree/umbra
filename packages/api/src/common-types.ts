@@ -27,19 +27,16 @@ export type DeployedStateraOnchainContract = FoundContract<StateraContract>
 export type DerivedStateraContractState = {
   readonly sUSDTokenType: Uint8Array
   readonly liquidationThreshold: bigint
-  // Commitment/Nullifier pattern: depositor and staker data is now in on-chain trees
-  readonly depositorCommitmentsCount: bigint  // Number of commitments in tree
-  readonly stakerCommitmentsCount: bigint      // Number of staker commitments
-  readonly depositorNullifiersCount: bigint    // Number of spent commitments
-  readonly stakerNullifiersCount: bigint       // Number of spent staker commitments
+  // Direct Map storage: count depositors and stakers
+  readonly depositorsCount: bigint  // Number of depositors in Map
+  readonly stakersCount: bigint      // Number of stakers in Map
   readonly LVT: bigint
   readonly MCR: bigint
   readonly liquidationCount: bigint
   readonly validCollateralType: Uint8Array
   readonly trustedOracles: DerivedTrustedOracle[]
-  // Merkle tree roots for reference
-  readonly depositorCommitmentsRoot: { field: bigint }
-  readonly stakerCommitmentsRoot: { field: bigint }
+  readonly mintMetadata?: any  // Added from private state
+  readonly secret_key?: Uint8Array  // Added from private state
 }
 
 export type DerivedDepositor = {

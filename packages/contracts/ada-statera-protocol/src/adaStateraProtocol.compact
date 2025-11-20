@@ -2,7 +2,10 @@ pragma language_version >= 0.17.0;
 
 import CompactStandardLibrary;
 import "./CustomLibrary";
-export { CoinInfo, MintMetadata, Depositor, Staker, AdminState, DebtPositionStatus, ComplianceToken, KYCTokenData, ValidityRange, ComplianceToken, DepositorLeaf, StakerLeaf };
+export { CoinInfo, MintMetadata, Depositor, Staker, AdminState, DebtPositionStatus, ComplianceToken, KYCTokenData, ValidityRange, ComplianceToken };
+
+// Describes the status of a user's debt position
+enum DebtPositionStatus { inactive, active, closed };
 
 export ledger liquidationThreshold: Uint<8>;
 export ledger LVT: Uint<8>; // LVT --> Max. percentage of debt a user can take based on collateral deposited
@@ -10,39 +13,14 @@ export ledger MCR: Uint<8>; // MCR --> Minimum Collateral Ratio (expressed in pe
 
 export ledger sUSDTokenType: Bytes<32>;
 
-/* Commitment/Nullifier pattern for depositor privacy
- *
- * COMMITMENT SET: Historic Merkle tree stores depositor commitments (hashes)
- * - Each state change creates a NEW commitment (tree only grows, never updates in place)
- * - Old commitments are nullified (spent) when creating new state
- * - This follows Zcash/Midnight's recommended privacy pattern
- *
- * Privacy benefits:
- *   - Hides total number of depositors (tree size != active users)
- *   - Hides who depositors are
- *   - Hides when updates occur (all operations look like new inserts)
- *   - Old proofs remain valid (historic tree property)
- *
- * Supports up to 2^20 = 1,048,576 total commitments.
- */
-export ledger depositorCommitments: HistoricMerkleTree<20, Bytes<32>>;
-
-/* NULLIFIER SET: Tracks spent depositor commitments
- * When a user updates their position, they:
- *   1. Prove ownership of old commitment
- *   2. Add old commitment to nullifier set (marks it as spent)
- *   3. Insert new commitment into tree
- *
- * This prevents double-spending of commitments.
- */
-export ledger depositorNullifiers: Set<Bytes<32>>;
+/* Mapping for collateral deposit --> encodedPk -> Depositor */
+export ledger depositors: Map<Bytes<32>, Depositor>;
 
 /* Tracks the list of trusted kyc oracle networks */
 export ledger trustedOracles: Set<Bytes<32>>;
 
-/* Staker commitments following same commitment/nullifier pattern */
-export ledger stakerCommitments: HistoricMerkleTree<20, Bytes<32>>;
-export ledger stakerNullifiers: Set<Bytes<32>>;
+/* Mapping for stakers --> addrs -> Staker */
+export ledger stakers: Map<Bytes<32>, Staker>;
 
 export ledger cumulative_scaling_factor: Uint<32>;
 export ledger validCollateralAssetType: Bytes<32>;
@@ -128,26 +106,6 @@ witness admin_secret(): Bytes<32>;
 /* Provides the user's current mint counter value */
 witness get_mint_counter(): Uint<64>;
 
-/* Merkle tree witnesses for privacy-preserving user registries */
-
-/* Provides the current depositor leaf data (before update) */
-witness get_depositor_leaf(): DepositorLeaf;
-
-/* Provides the updated depositor leaf data (after update) */
-witness get_updated_depositor_leaf(): DepositorLeaf;
-
-/* Provides the updated Merkle root after depositor update */
-witness get_updated_depositors_root(): MerkleTreeDigest;
-
-/* Provides the current staker leaf data (before update) */
-witness get_staker_leaf(): StakerLeaf;
-
-/* Provides the updated staker leaf data (after update) */
-witness get_updated_staker_leaf(): StakerLeaf;
-
-/* Provides the updated Merkle root after staker update */
-witness get_updated_stakers_root(): MerkleTreeDigest;
-
 /*
  * @initLiquidationThreshold -> Sets the percentage a collateral need to stay above to avoid liquidation
  * @initialRedemptionFee -> Sets the initial redemption fee in basis points (e.g., 50 = 0.5%)
@@ -197,10 +155,6 @@ constructor(
     MIN_ORACLE_PRICE = 100000; // $0.10 (tightened from $0.01)
     MAX_ORACLE_PRICE = 10000000; // $10.00 (tightened from $1000)
     MINIMUM_LIQUIDATION_DEBT = 10; // Minimum 10 sUSD to liquidate
-
-    // Initialize empty commitment/nullifier sets for privacy
-    // Following Zcash/Midnight's recommended pattern for private state updates
-    // Collections (HistoricMerkleTree, Set) are auto-initialized as empty
 }
 
 /* INTERACTION FOR ADMIN ONLY */
@@ -459,41 +413,67 @@ export circuit transferAdminRole(address: Bytes<32>): []{
 
 /* INTERACTIONS FOR COLLATERAL DEPOSITORS */
 
-/*
- * @depositToCollateralPool - Deposit collateral using commitment/nullifier pattern
- *
- * New depositor: Creates initial commitment
- * Existing depositor: Nullifies old commitment, creates new one with updated balance
- *
- * This provides Zcash-level privacy - all operations look like new commitments
- */
-export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _compliance_token: ComplianceToken, _isNewDepositor: Boolean): [] {
+export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _compliance_token: ComplianceToken): [] {
     // Check if protocol is paused
     assert (isPaused == 0, "Protocol is paused: Cannot deposit collateral");
 
     // Validate deposit amount
     assert (disclose(_deposit_amt) > 0, "Cannot deposit zero amount");
+
     assert (coin.color == validCollateralAssetType, "Invalid token type provided: Can not create collateral position");
 
     const disclosed_amount = disclose(_deposit_amt);
     const disclosedCoin = disclose(coin);
+    const disclosedCoinColor = disclose(coin.color);
     const disclosedComplianceToken = disclose(_compliance_token);
-    const isNewDepositor = disclose(_isNewDepositor);
 
     const amount_in_speck = disclosed_amount * SPECK_per_tDUST;
     assert (coin.value >= amount_in_speck, "Insufficient funds provided");
     assert (trustedOracles.member(disclosedComplianceToken.tokenData.oraclePk), "Can not create position: Unauthorized KYC provider");
 
-    // Receive coin - contract now holds it privately
+    // Receives coin - contract now holds it privately
     receive(disclosedCoin);
 
-    // Generate privacy-preserving user ID (commitment to public key using secret key)
+    // Generate privacy-preserving user ID as map key (commitment to public key using secret key)
     const userSecret = disclose(secret_key());
     const depositorsId = generateUserId(userSecret);
 
-    if(isNewDepositor){
-        // ===== NEW DEPOSITOR: Create initial commitment =====
+    if(depositors.member(depositorsId)){
+        const currentDepositPosition = depositors.lookup(depositorsId);
 
+        // If position is closed, reinitialize it like a new position
+        if(currentDepositPosition.position == DebtPositionStatus.closed){
+            const metadata = MintMetadata{
+                collateral: disclosed_amount as Uint<64>,
+                debt: 0
+            };
+            const metadataHash = hashMintMetadata(metadata, depositorsId);
+            set_mint_metadata(metadata);
+
+            // Keep existing mintCounterCommitment when reopening - counter continues from where it left off
+            depositors.insert(depositorsId, Depositor {
+                ...currentDepositPosition,
+                position: DebtPositionStatus.inactive,
+                metadataHash: metadataHash,
+                coinType: disclose(coin.color)
+            });
+        }else{
+            // Hash metadata for shielding
+            const prev_metadata = getMintMetadata();
+            const newMetadata = MintMetadata{
+                ...prev_metadata,
+                collateral: (prev_metadata.collateral + disclosed_amount as Uint<64>) as Uint<64>
+            };
+            const newMetadataHash = hashMintMetadata(newMetadata, depositorsId);
+            set_mint_metadata(newMetadata);
+
+            depositors.insert(depositorsId, Depositor {
+                ...currentDepositPosition,
+                position: prev_metadata.collateral == 0 ? DebtPositionStatus.inactive : currentDepositPosition.position,
+                metadataHash: newMetadataHash
+            });
+        }
+    }else{
         const metadata = MintMetadata{
             collateral: disclosed_amount as Uint<64>,
             debt: 0
@@ -501,64 +481,18 @@ export circuit depositToCollateralPool(coin: CoinInfo, _deposit_amt: Uint<64>, _
         const metadataHash = hashMintMetadata(metadata, depositorsId);
         set_mint_metadata(metadata);
 
-        // Initialize per-user mint counter commitment
+        // Initialize per-user mint counter commitment with counter=0
         const userSecretHash = persistentHash<Bytes<32>>(userSecret);
         const initialRandomness = persistentHash<Bytes<32>>(userSecretHash);
         const initialCounterCommitment = persistentCommit<Uint<64>>(0, initialRandomness);
 
-        // Create commitment (leaf hash)
-        const newLeaf = DepositorLeaf {
+        depositors.insert(depositorsId, Depositor {
+            ...default<Depositor>,
             id: depositorsId,
             metadataHash: metadataHash,
-            position: DebtPositionStatus.inactive,
             coinType: disclose(coin.color),
             mintCounterCommitment: initialCounterCommitment
-        };
-        const commitment = hashDepositorLeaf(newLeaf);
-
-        // Insert commitment into tree (tree handles Merkle operations)
-        depositorCommitments.insert(commitment);
-
-    }else{
-        // Get old commitment and prove ownership
-        const oldLeaf = disclose(get_depositor_leaf());
-        const oldCommitment = hashDepositorLeaf(oldLeaf);
-
-        // Verify old commitment is in tree (not yet nullified)
-        const path = getDepositorPath();
-        assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
-               "Old commitment not in tree");
-        assert(path.leaf == oldCommitment, "Commitment mismatch");
-
-        // Verify ownership
-        assert(oldLeaf.id == depositorsId, "Cannot deposit: Not the owner");
-
-        // Check commitment not already spent
-        assert(!depositorNullifiers.member(oldCommitment),
-               "Cannot deposit: Commitment already spent");
-
-        // Nullify old commitment
-        depositorNullifiers.insert(oldCommitment);
-
-        // Create new metadata with updated balance
-        const prev_metadata = getMintMetadata();
-        const newMetadata = MintMetadata{
-            ...prev_metadata,
-            collateral: (prev_metadata.collateral + disclosed_amount as Uint<64>) as Uint<64>
-        };
-        const newMetadataHash = hashMintMetadata(newMetadata, depositorsId);
-        set_mint_metadata(newMetadata);
-
-        // Create new commitment with updated state
-        const newLeaf = DepositorLeaf {
-            ...oldLeaf,
-            metadataHash: newMetadataHash,
-            position: prev_metadata.collateral == 0 ? DebtPositionStatus.inactive : oldLeaf.position
-        };
-        const newCommitment = hashDepositorLeaf(newLeaf);
-
-        // Insert new commitment into tree
-        depositorCommitments.insert(newCommitment);
+        });
     }
 }
 
@@ -571,34 +505,22 @@ export circuit mint_sUSD( mint_amount: Uint<64>): []{
 
     const disclosedMintAmount = disclose(mint_amount);
 
-    // Generate privacy-preserving user ID
+    // Generate privacy-preserving user ID as map key
     const userSecret = disclose(secret_key());
     const depositorsId = generateUserId(userSecret);
 
-    // Get old commitment and prove ownership
-    const oldLeaf = disclose(get_depositor_leaf());
-    const oldCommitment = hashDepositorLeaf(oldLeaf);
+    assert (depositors.member(depositorsId), "Loan Position does not exist");
 
-    // Verify old commitment is in tree
-    const path = getDepositorPath();
-    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
-           "Old commitment not in tree");
-    assert(path.leaf == oldCommitment, "Commitment mismatch");
+    const depositPositionToMint = depositors.lookup(depositorsId);
 
-    // Verify ownership
-    assert(oldLeaf.id == depositorsId, "Cannot mint: Not the owner");
+    // Reconstructs mintersId for security checks.
+    const mintersId = generateUserId(userSecret);
+    assert (mintersId == depositPositionToMint.id, "Can not mint loan position: You are not the owner");
 
-    // Check not already spent
-    assert(!depositorNullifiers.member(oldCommitment),
-           "Cannot mint: Commitment already spent");
-
-    // Nullify old commitment
-    depositorNullifiers.insert(oldCommitment);
-
-    // Get and verify private metadata
+    // Reconstructs metadataHash for security checks
     const mintMetadata = getMintMetadata();
     const mintMetadataHash = hashMintMetadata(mintMetadata, depositorsId);
-    assert(mintMetadataHash == oldLeaf.metadataHash, "Invalid private state provided");
+    assert (mintMetadataHash == depositPositionToMint.metadataHash, "Invalid private state provided");
 
     // Calculate borrowing fee (one-time fee on mint)
     const borrowing_fee = DivisionFunction((disclosedMintAmount * borrowingFee) as Uint<64>, 10000);
@@ -623,7 +545,7 @@ export circuit mint_sUSD( mint_amount: Uint<64>): []{
     const counterRandomness = persistentHash<Bytes<32>>(userSecretHash);
 
     // Verify user is providing correct counter by checking against their stored commitment
-    assert (persistentCommit<Uint<64>>(currentCounter, counterRandomness) == oldLeaf.mintCounterCommitment,
+    assert (persistentCommit<Uint<64>>(currentCounter, counterRandomness) == depositPositionToMint.mintCounterCommitment,
             "Invalid mint counter: user must provide correct counter matching their commitment");
 
     // Derive unique nonce using user's counter + user's secret key for privacy and uniqueness
@@ -647,18 +569,13 @@ export circuit mint_sUSD( mint_amount: Uint<64>): []{
     const nextCounter = (currentCounter + 1) as Uint<64>;
     const nextCounterCommitment = persistentCommit<Uint<64>>(nextCounter, counterRandomness);
 
-    // Create new commitment with updated state
-    const newLeaf = DepositorLeaf {
-        id: oldLeaf.id,
-        metadataHash: newMetadataHash,
+    // Updates the depositor list with new metadata and counter commitment
+    depositors.insert(depositorsId, Depositor {
+        ...depositPositionToMint,
         position: DebtPositionStatus.active,
-        coinType: oldLeaf.coinType,
+        metadataHash: newMetadataHash,
         mintCounterCommitment: nextCounterCommitment
-    };
-    const newCommitment = hashDepositorLeaf(newLeaf);
-
-    // Insert new commitment into tree
-    depositorCommitments.insert(newCommitment);
+    });
 
     // Accumulate borrowing fee in admin metadata
     const adminMetadata = getAdminMetadata();
@@ -681,7 +598,7 @@ export circuit withdrawCollateral(_amountToWithdraw: Uint<32>, _oraclePrice: Uin
     // Validate withdrawal amount
     assert (disclose(_amountToWithdraw) > 0, "Cannot withdraw zero amount");
 
-    // Generate privacy-preserving user ID
+    // Generate privacy-preserving user ID as map key
     const userSecret = disclose(secret_key());
     const depositorsId = generateUserId(userSecret);
 
@@ -689,31 +606,21 @@ export circuit withdrawCollateral(_amountToWithdraw: Uint<32>, _oraclePrice: Uin
     const disclosedOraclePrice = disclose(_oraclePrice);
     const disclosedOraclePk = disclose(_oraclePk);
 
-    // Get old commitment
-    const oldLeaf = disclose(get_depositor_leaf());
-    const oldCommitment = hashDepositorLeaf(oldLeaf);
+    assert (depositors.member(depositorsId), "Deposit with the required id does not exist");
 
-    // Verify in tree
-    const path = getDepositorPath();
-    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
-           "Old commitment not in tree");
-    assert(path.leaf == oldCommitment, "Commitment mismatch");
+    const depositPositionToWthdraw = depositors.lookup(depositorsId);
 
-    // Verify ownership
-    assert(oldLeaf.id == depositorsId, "Cannot withdraw: Not the owner");
+    // Checks the user is the authorized depositor
+    const reconstructedDepositorsId = generateUserId(userSecret);
+    assert (reconstructedDepositorsId == depositPositionToWthdraw.id, "Can not withdrawal collateral: You are not the owner");
 
-    // Check not spent
-    assert(!depositorNullifiers.member(oldCommitment),
-           "Cannot withdraw: Commitment already spent");
-    assert(oldLeaf.position != DebtPositionStatus.closed, "Cannot withdraw: Position liquidated");
-
-    // Nullify old
-    depositorNullifiers.insert(oldCommitment);
-
-    // Verify metadata
+    // Reconstructs the metadata hash from private state
     const metadata = getMintMetadata();
     const metadataHash = hashMintMetadata(metadata, depositorsId);
-    assert(metadataHash == oldLeaf.metadataHash, "Invalid private state");
+
+    // Checks to see if user has maliciously uttered private state
+    assert (metadataHash == depositPositionToWthdraw.metadataHash, "Can not withdraw collateral: Invalid private state");
+    assert (depositPositionToWthdraw.position != DebtPositionStatus.closed, "Can not withdrawl collateral: Your position has been liquidated");
 
     // Verify oracle is trusted and price is within reasonable bounds
     assert (trustedOracles.member(disclosedOraclePk), "Can not withdraw: Oracle is not trusted");
@@ -744,23 +651,22 @@ export circuit withdrawCollateral(_amountToWithdraw: Uint<32>, _oraclePrice: Uin
    };
 
    // Sets mint_metadata private state
-   const newMetadataHash = hashMintMetadata(newMetadata, depositorsId);
+   const newMetadataHash = hashMintMetadata(newMetadata, userSecret);
    set_mint_metadata(newMetadata);
 
-   // Create new commitment with updated state
-   const newLeaf = DepositorLeaf {
-        id: oldLeaf.id,
-        metadataHash: newMetadataHash,
-        position: (oldLeaf.position == DebtPositionStatus.inactive)
-            ? (balance == 0 ? DebtPositionStatus.closed : DebtPositionStatus.inactive)
-            : oldLeaf.position,
-        coinType: oldLeaf.coinType,
-        mintCounterCommitment: oldLeaf.mintCounterCommitment
-   };
-   const newCommitment = hashDepositorLeaf(newLeaf);
-
-   // Insert new commitment
-   depositorCommitments.insert(newCommitment);
+   // Updates the ledger state
+   if(depositPositionToWthdraw.position == DebtPositionStatus.inactive){
+        depositors.insert(depositorsId, Depositor {
+            ...depositPositionToWthdraw,
+            position: balance == 0 ? DebtPositionStatus.closed : DebtPositionStatus.inactive,
+            metadataHash: newMetadataHash
+        });
+   }else{
+        depositors.insert(depositorsId, Depositor {
+            ...depositPositionToWthdraw,
+            metadataHash: newMetadataHash
+        });
+   }
 }
 
 export circuit repay(coin: CoinInfo, _amountToRepay: Uint<32>): [] {
@@ -770,29 +676,24 @@ export circuit repay(coin: CoinInfo, _amountToRepay: Uint<32>): [] {
     // Validate repay amount
     assert (disclose(_amountToRepay) > 0, "Cannot repay zero amount");
 
-    // Generate privacy-preserving user ID
+    // Generate privacy-preserving user ID as map key
     const userSecret = disclose(secret_key());
     const depositorsId = generateUserId(userSecret);
 
     const disclosedAmtToRepay = disclose(_amountToRepay);
     const disclosedCoin = disclose(coin);
 
-    const oldLeaf = disclose(get_depositor_leaf());
-    const oldCommitment = hashDepositorLeaf(oldLeaf);
+    assert (depositors.member(depositorsId), "Deposit with the required id does not exist");
 
-    const path = getDepositorPath();
-    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
-    assert(path.leaf == oldCommitment, "Mismatch");
-    assert(oldLeaf.id == depositorsId, "Not owner");
-    assert(oldLeaf.position == DebtPositionStatus.active, "Position not active");
-    assert(!depositorNullifiers.member(oldCommitment), "Already spent");
+    const mintPositionToRepay = depositors.lookup(depositorsId);
+    assert (mintPositionToRepay.position == DebtPositionStatus.active, "Cannot repay an inactive, closed or liquidated c0llateral position");
 
-    // Nullify old commitment
-    depositorNullifiers.insert(oldCommitment);
-
+    // Reconstruct the metadata hash from private state
     const metadata = getMintMetadata();
     const metadataHash = hashMintMetadata(metadata, depositorsId);
-    assert(metadataHash == oldLeaf.metadataHash, "Invalid state");
+
+    // Asserts to see if user has maliciously altered private state
+    assert (metadataHash == mintPositionToRepay.metadataHash, "Can not withdraw collateral: Invalid private state");
 
     assert (coin.color == sUSDTokenType, "Can not repay minted sUSD: Invalid token type provided");
     assert (_amountToRepay <= metadata.debt, "Can not repay minted sUSD: tokens must be equivalent to the amount of sUSD minted");
@@ -823,103 +724,106 @@ export circuit repay(coin: CoinInfo, _amountToRepay: Uint<32>): [] {
     // Set mint_metadata private state
     set_mint_metadata(newMetadata);
 
-    // Create new commitment
-    const newLeaf = DepositorLeaf {
-        id: oldLeaf.id,
-        metadataHash: newMetadataHash,
-        position: balanceToRepay > 0 ? DebtPositionStatus.active : DebtPositionStatus.inactive,
-        coinType: oldLeaf.coinType,
-        mintCounterCommitment: oldLeaf.mintCounterCommitment
-    };
-    const newCommitment = hashDepositorLeaf(newLeaf);
-    depositorCommitments.insert(newCommitment);
+    if (balanceToRepay > 0) {
+        depositors.insert(depositorsId, Depositor {
+            ...mintPositionToRepay,
+            metadataHash: newMetadataHash
+        });
+    }else{
+        depositors.insert(depositorsId, Depositor {
+            ...mintPositionToRepay,
+            metadataHash: newMetadataHash,
+            position: DebtPositionStatus.inactive
+        });
+    }
 }
 
 /* INTERACTIONS FOR STAKERS */
 
-export circuit depositToStabilityPool(coin: CoinInfo, _isNewStaker: Boolean): [] {
+export circuit depositToStabilityPool(coin: CoinInfo): [] {
     // Check if protocol is paused
     assert (isPaused == 0, "Protocol is paused: Cannot deposit to stability pool");
 
     const disclosedCoin = disclose(coin);
-    const isNewStaker = disclose(_isNewStaker);
     assert (coin.color == sUSDTokenType, "Invalid coin type provided to pool");
 
     // Receive the sUSD coin - contract now holds it privately
+    // No need to track the pool total on-chain, maintaining privacy
     receive(disclosedCoin);
 
-    // Generate user ID
+    // Updates stability pool mapping
     const stakersId = generateUserId(disclose(secret_key()));
     const stakerPk = ownPublicKey().bytes;
 
-    if(isNewStaker){
-        // Create initial commitment
-        const newMetadata = StakeMetadata {
-            effectiveBalance: disclosedCoin.value as Uint<32>,
-            stakeReward: 0,
-            entry_ADA_SUSD_index: ADA_sUSD_index,
-            entry_scale_factor: cumulative_scaling_factor
-        };
-        const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
-        set_stake_metadata(newMetadata);
+    if(stakers.member(stakerPk)){
+        // Existing staker - get metadata, verify hash, update metadata
+        const existingStaker = stakers.lookup(stakerPk);
 
-        const newLeaf = StakerLeaf {
-            id: stakersId,
-            metadataHash: newMetadataHash
-        };
-        const commitment = hashStakerLeaf(newLeaf);
-        stakerCommitments.insert(commitment);
+        // Verify staker ownership
+        assert (stakersId == existingStaker.id, "Cannot deposit to stake: You are not the owner");
 
-    }else{
-        // Nullify old, create new
-        const oldLeaf = disclose(get_staker_leaf());
-        const oldCommitment = hashStakerLeaf(oldLeaf);
-
-        const path = getStakerPath();
-        assert(stakerCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
-        assert(path.leaf == oldCommitment, "Mismatch");
-        assert(oldLeaf.id == stakersId, "Not owner");
-        assert(!stakerNullifiers.member(oldCommitment), "Already spent");
-
-        stakerNullifiers.insert(oldCommitment);
-
+        // Get private stake metadata
         const metadata = getStakeMetadata();
-        assert(hashStakeMetadata(metadata, stakerPk) == oldLeaf.metadataHash, "Invalid");
 
+        // Verify metadata hash matches
+        const metadataHash = hashStakeMetadata(metadata, stakerPk);
+        assert (metadataHash == existingStaker.metadataHash, "Invalid stake metadata provided");
+
+        // Update metadata with new deposit amount, keeping existing entry values
         const newMetadata = StakeMetadata {
             effectiveBalance: (metadata.effectiveBalance + disclosedCoin.value) as Uint<32>,
             stakeReward: metadata.stakeReward,
             entry_ADA_SUSD_index: metadata.entry_ADA_SUSD_index,
             entry_scale_factor: metadata.entry_scale_factor
         };
+
+        // Hash and set new metadata
         const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
         set_stake_metadata(newMetadata);
 
-        const newLeaf = StakerLeaf {
-            id: oldLeaf.id,
+        // Update staker with new metadata hash
+        stakers.insert(stakerPk, Staker {
+            ...existingStaker,
             metadataHash: newMetadataHash
+        });
+    }else{
+        // New staker - create initial metadata with entry values
+        const newMetadata = StakeMetadata {
+            effectiveBalance: disclosedCoin.value as Uint<32>,
+            stakeReward: 0,
+            entry_ADA_SUSD_index: ADA_sUSD_index,
+            entry_scale_factor: cumulative_scaling_factor
         };
-        const newCommitment = hashStakerLeaf(newLeaf);
-        stakerCommitments.insert(newCommitment);
+
+        // Hash and set metadata
+        const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
+        set_stake_metadata(newMetadata);
+
+        // Insert new staker
+        stakers.insert(stakerPk, Staker {
+            ...default<Staker>,
+            id: stakersId,
+            metadataHash: newMetadataHash
+        });
     }
 }
 
-export circuit checkStakeReward(): [Uint<128>, StakerLeaf]{
+export circuit checkStakeReward(): [Uint<128>, Staker]{
     const stakerPk = ownPublicKey().bytes;
+    assert (stakers.member(stakerPk), "Can not check stake reward: You have no stake position");
+
+    const stakePosition = stakers.lookup(stakerPk);
+
+    // Verifies users stake id using their secret_key
     const stakersId = generateUserId(disclose(secret_key()));
+    assert (stakersId == stakePosition.id, "You are not a staker: Invalid staker ID");
 
-    // Commitment/nullifier
-    const oldLeaf = disclose(get_staker_leaf());
-    const oldCommitment = hashStakerLeaf(oldLeaf);
-    const path = getStakerPath();
-    assert(stakerCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
-    assert(path.leaf == oldCommitment, "Mismatch");
-    assert(oldLeaf.id == stakersId, "Not owner");
-    assert(!stakerNullifiers.member(oldCommitment), "Already spent");
-    stakerNullifiers.insert(oldCommitment);
-
+    // Get private stake metadata
     const metadata = getStakeMetadata();
-    assert(hashStakeMetadata(metadata, stakerPk) == oldLeaf.metadataHash, "Invalid");
+
+    // Verify metadata hash matches
+    const metadataHash = hashStakeMetadata(metadata, stakerPk);
+    assert (metadataHash == stakePosition.metadataHash, "Invalid stake metadata provided");
 
     // Computes the user stake reward i.e earned_ADA = user_sUSD × (total_ADA_per_sUSD − user_entry_ADA_per_sUSD) + pending_balance
     const stakeReward = (((metadata.effectiveBalance as Field) * (ADA_sUSD_index - metadata.entry_ADA_SUSD_index)) + metadata.stakeReward) as Uint<64>;
@@ -942,15 +846,15 @@ export circuit checkStakeReward(): [Uint<128>, StakerLeaf]{
     const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
     set_stake_metadata(newMetadata);
 
-    // Create new commitment
-    const newLeaf = StakerLeaf {
-        id: oldLeaf.id,
+    // Updates the user's pending ADA upon interaction to avoid looping to update individually
+    const updatedStakersPosition = Staker {
+        ...stakePosition,
         metadataHash: newMetadataHash
     };
-    const newCommitment = hashStakerLeaf(newLeaf);
-    stakerCommitments.insert(newCommitment);
 
-    return [stakeReward, newLeaf];
+    stakers.insert(stakerPk, updatedStakersPosition);
+
+    return [stakeReward, updatedStakersPosition];
 }
 
 export circuit withdrawStakeReward(_amount: Uint<64>):[]{
@@ -995,13 +899,12 @@ export circuit withdrawStakeReward(_amount: Uint<64>):[]{
     const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
     set_stake_metadata(newMetadata);
 
-    // Create new commitment (checkStakeReward already nullified old one)
-    const finalLeaf = StakerLeaf {
-        id: updatedStakersPosition.id,
+    const updatedStakePosition = Staker {
+        ...updatedStakersPosition,
         metadataHash: newMetadataHash
     };
-    const finalCommitment = hashStakerLeaf(finalLeaf);
-    stakerCommitments.insert(finalCommitment);
+
+    stakers.insert(stakerPk, updatedStakePosition);
 }
 
 /* Permits user to withdraw all or part of their stake reward from the stakePool */
@@ -1011,21 +914,20 @@ export circuit withdrawStake(_amount: Uint<32>): []{
 
     const disclosedAmount = disclose(_amount);
     const stakerPk = ownPublicKey().bytes;
+    assert (stakers.member(stakerPk), "Can not withdraw stake: You are not a staker");
 
+    const stakePosition = stakers.lookup(stakerPk);
+
+    // Verify staker ownership
     const stakersId = generateUserId(disclose(secret_key()));
+    assert (stakersId == stakePosition.id, "Cannot withdraw stake: You are not the owner");
 
-    // Commitment/nullifier
-    const oldLeaf = disclose(get_staker_leaf());
-    const oldCommitment = hashStakerLeaf(oldLeaf);
-    const path = getStakerPath();
-    assert(stakerCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)), "Not in tree");
-    assert(path.leaf == oldCommitment, "Mismatch");
-    assert(oldLeaf.id == stakersId, "Not owner");
-    assert(!stakerNullifiers.member(oldCommitment), "Already spent");
-    stakerNullifiers.insert(oldCommitment);
-
+    // Get private stake metadata
     const metadata = getStakeMetadata();
-    assert(hashStakeMetadata(metadata, stakerPk) == oldLeaf.metadataHash, "Invalid");
+
+    // Verify metadata hash matches
+    const metadataHash = hashStakeMetadata(metadata, stakerPk);
+    assert (metadataHash == stakePosition.metadataHash, "Invalid stake metadata provided");
 
     // Validate withdrawal amount in ZK using private balance
     assert (_amount <= metadata.effectiveBalance, "Can not withdraw more than available stake balance");
@@ -1053,13 +955,12 @@ export circuit withdrawStake(_amount: Uint<32>): []{
     const newMetadataHash = hashStakeMetadata(newMetadata, stakerPk);
     set_stake_metadata(newMetadata);
 
-    // Create new commitment with updated metadata
-    const newLeaf = StakerLeaf {
-        id: oldLeaf.id,
+    const updatedStakePosition = Staker {
+        ...stakePosition,
         metadataHash: newMetadataHash
     };
-    const newCommitment = hashStakerLeaf(newLeaf);
-    stakerCommitments.insert(newCommitment);
+
+    stakers.insert(stakerPk, updatedStakePosition);
 }
 
 /* LIQUIDATOR'S INTERACTIONS */
@@ -1091,27 +992,12 @@ export circuit liquidateDebtPosition(
     assert (disclosedDebtToLiquidate <= disclosedTotalDebt, "Cannot liquidate more debt than position has");
     assert (disclosedTotalCollateral > 0, "Cannot liquidate: Zero collateral");
 
-    // ===== COMMITMENT/NULLIFIER: Liquidator provides victim's old commitment proof =====
-    const victimOldLeaf = disclose(get_depositor_leaf());
-    const victimOldCommitment = hashDepositorLeaf(victimOldLeaf);
-
-    // Verify victim's old commitment is in the tree
-    const path = getDepositorPath();
-    assert(depositorCommitments.checkRoot(merkleTreePathRootNoLeafHash<20>(path)),
-           "Invalid liquidation: Victim commitment not in tree");
-
-    // Verify victim's commitment hasn't been spent already
-    assert(!depositorNullifiers.member(victimOldCommitment),
-           "Invalid liquidation: Victim commitment already spent");
-
-    // Nullify the victim's old commitment (liquidation spends it)
-    depositorNullifiers.insert(victimOldCommitment);
-
-    // Verify victim ID matches provided ID
-    assert(victimOldLeaf.id == disclose(_depositId), "Deposit ID mismatch");
+    // Verify liquidation position data against public ledger
+    assert (depositors.member(disclose(_depositId)), "Deposit with the required Id does not exist");
+    const collateralDepositToLiquidate = depositors.lookup(disclose(_depositId));
 
     // Prevent re-liquidation of already closed positions
-    assert(victimOldLeaf.position != DebtPositionStatus.closed,
+    assert (collateralDepositToLiquidate.position != DebtPositionStatus.closed,
         "Cannot liquidate: Position is already closed");
 
     // Construct MintMetadata from liquidator-provided values and verify hash matches
@@ -1120,7 +1006,7 @@ export circuit liquidateDebtPosition(
         debt: disclosedTotalDebt
     };
     const liquidatorMetadataHash = hashMintMetadata(liquidatorProvidedMetadata, disclose(_depositId));
-    assert(liquidatorMetadataHash == victimOldLeaf.metadataHash,
+    assert (liquidatorMetadataHash == collateralDepositToLiquidate.metadataHash,
         "Invalid liquidation: Provided collateral/debt does not match victim's position");
 
     // Validate liquidation threshold before using it
@@ -1198,16 +1084,12 @@ export circuit liquidateDebtPosition(
     // Update witness to track new metadata for the victim
     set_mint_metadata(newMetadata);
 
-    // ===== CREATE NEW COMMITMENT: Victim's updated state after liquidation =====
-    const victimNewLeaf = DepositorLeaf {
-        id: victimOldLeaf.id,
-        metadataHash: newMetadataHash,
+    // Update deposit state with remaining position
+    depositors.insert(disclose(_depositId), Depositor {
+        ...collateralDepositToLiquidate,
         position: finalPositionStatus,
-        coinType: victimOldLeaf.coinType,
-        mintCounterCommitment: victimOldLeaf.mintCounterCommitment
-    };
-    const victimNewCommitment = hashDepositorLeaf(victimNewLeaf);
-    depositorCommitments.insert(victimNewCommitment);
+        metadataHash: newMetadataHash
+    });
 
     liquidationCount.increment(1);
 }

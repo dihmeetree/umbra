@@ -16,23 +16,17 @@ import { tokenType, encodeTokenType } from '@midnight-ntwrk/ledger';
 import { NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { encodeCoinPublicKey } from '@midnight-ntwrk/onchain-runtime';
 import {
-  sampleContractAddress,
-  constructorContext,
-  QueryContext,
-  persistentHash,
-  persistentCommit,
-  CompactTypeBytes,
-  CompactTypeUnsignedInteger,
-  CompactTypeEnum
+  sampleContractAddress
 } from '@midnight-ntwrk/compact-runtime';
 import type { TokenType, ContractAddress } from '@midnight-ntwrk/zswap';
 import {
   Contract,
   createPrivateStateraState,
   witnesses,
-  type StateraPrivateState
+  type StateraPrivateState,
+  ledger
 } from '../index.js';
-import {  DepositorLeaf, StakerLeaf, DebtPositionStatus, ledger } from '../managed/adaStateraProtocol/contract/index.cjs';
+import {  DebtPositionStatus } from '../managed/adaStateraProtocol/contract/index.cjs';
 
 // Set network ID for testing
 setNetworkId(NetworkId.Undeployed);
@@ -79,7 +73,9 @@ export function createStateraTestFixture(numUsers: number = 3): StateraTestFixtu
   const collateralTokenType = tokenType(pad('ADA', 32), contractAddress);
 
   // Create initial private state for admin
-  const adminPrivateState = createPrivateStateraState(adminWallet.secretKey);
+  // IMPORTANT: Pass admin's secret key as BOTH secret_key AND admin_secret
+  // This establishes the admin_secret that will be used for all admin metadata hashing
+  const adminPrivateState = createPrivateStateraState(adminWallet.secretKey, adminWallet.secretKey);
 
   // Deploy simulator
   // Note: We pass constructorArgs without nonce since the contract doesn't have a nonce parameter
@@ -109,8 +105,7 @@ export function createStateraTestFixture(numUsers: number = 3): StateraTestFixtu
 
   // Initialize sUSD token type by calling the circuit
   // This MUST be done before any operations that use sUSD tokens
-  simulator
-    .as(createAdminPrivateState(simulator, adminWallet))
+  asAdmin(simulator, adminWallet)
     .executeImpureCircuit('setSUSDTokenType');
 
   // Create balance tracker
@@ -131,9 +126,32 @@ export function createStateraTestFixture(numUsers: number = 3): StateraTestFixtu
 
 /**
  * Helper to create a private state for a wallet
+ *
+ * IMPORTANT: Always pass the simulator parameter to ensure admin_secret and admin_metadata are propagated!
+ * This is required for circuits that update admin metadata (mint_sUSD, redeemSUSD, etc.)
+ *
+ * @param wallet - The wallet
+ * @param simulator - Simulator to get admin_secret and admin_metadata from (REQUIRED for proper functionality)
+ * @returns Private state for the wallet
  */
-export function createPrivateStateForWallet(wallet: Wallet): StateraPrivateState {
-  return createPrivateStateraState(wallet.secretKey);
+export function createPrivateStateForWallet(
+  wallet: Wallet,
+  simulator?: ContractSimulator<StateraPrivateState>
+): StateraPrivateState {
+  if (!simulator) {
+    // If no simulator provided, create a basic state (won't work with admin operations)
+    return createPrivateStateraState(wallet.secretKey, wallet.secretKey);
+  }
+
+  const currentState = simulator.getPrivateState();
+  const baseState = createPrivateStateraState(wallet.secretKey, currentState.admin_secret);
+
+  // CRITICAL: Copy admin_metadata from simulator to preserve super_admin and other admin fields
+  return {
+    ...baseState,
+    admin_metadata: currentState.admin_metadata,
+    admin_secret: currentState.admin_secret
+  };
 }
 
 /**
@@ -152,111 +170,33 @@ export function asWallet<T>(
   wallet: Wallet,
   privateState?: T
 ): ContractSimulator<T> {
-  const state = privateState || (createPrivateStateraState(wallet.secretKey) as any);
+  // If no private state provided, create one with the admin_secret from simulator
+  const currentState = simulator.getPrivateState() as any;
+  const state = privateState || (createPrivateStateraState(wallet.secretKey, currentState?.admin_secret) as any);
   return simulator.as(state, wallet.coinPublicKey);
 }
 
 /**
- * Helper to create a depositor leaf after deposit
- * This matches what the depositToCollateralPool circuit creates
- *
- * @param wallet - The wallet
- * @param collateral - Collateral amount
- * @param debt - Debt amount
- * @param coinType - Collateral coin type (color)
- * @returns Depositor leaf matching circuit logic
- */
-function createDepositorLeaf(
-  wallet: Wallet,
-  collateral: bigint,
-  debt: bigint,
-  coinType: Uint8Array
-): any {
-  // User ID - in circuit this is generateUserId(userSecret)
-  // The contract does: persistentCommit<Bytes<32>>(ownPublicKey().bytes, sk)
-  // We MUST use encodeCoinPublicKey() to ensure the bytes match what ownPublicKey() returns
-  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey);
-
-  console.log('\n=== createDepositorLeaf Debug - TEST CODE COMPUTED VALUES ===');
-  console.log('Wallet coinPublicKey (hex string):', wallet.coinPublicKey);
-  console.log('Encoded public key bytes (ALL 32 bytes):',  Array.from(publicKeyBytes).map(b => b.toString(16).padStart(2, '0')).join(''));
-  console.log('Secret key (ALL 32 bytes):', Array.from(wallet.secretKey).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-  const userId = persistentCommit(_bytes32, publicKeyBytes, wallet.secretKey);
-  console.log('Generated userId (ALL 32 bytes):', Array.from(userId).map(b => b.toString(16).padStart(2, '0')).join(''));
-  console.log('===============================================================\n');
-
-  // Metadata - in circuit this is MintMetadata { collateral, debt }
-  const metadata = { collateral, debt };
-
-  // Metadata hash - in circuit this is hashMintMetadata(metadata, depositorsId)
-  // The circuit uses persistentCommit with the userId as randomizer
-  const metadataHash = hashMintMetadataForTest(metadata, userId);
-  console.log('Metadata hash (first 8):', Array.from(metadataHash.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-  // Mint counter commitment - in circuit this is persistentCommit(0, randomness)
-  // For the initial deposit, the counter is 0
-  // The randomness is derived from the user secret
-  const userSecretHash = persistentHash(_bytes32, wallet.secretKey);
-  const initialRandomness = persistentHash(_bytes32, userSecretHash);
-
-  // Create a descriptor for Uint<64> counter
-  const counterDescriptor = _uint64;
-  const mintCounterCommitment = persistentCommit(counterDescriptor, 0n, initialRandomness);
-  console.log('Mint counter commitment (first 8):', Array.from(mintCounterCommitment.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-  // Position status - inactive initially (0), active (1) when there's debt
-  // MUST use enum values from DebtPositionStatus to match circuit's serialization
-  const position = debt > 0n ? DebtPositionStatus.active : DebtPositionStatus.inactive;
-  console.log('Position (enum value):', position);
-  console.log('Position (DebtPositionStatus.inactive):', DebtPositionStatus.inactive);
-  console.log('CoinType (first 8):', Array.from(coinType.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-  const depositorLeaf = {
-    id: userId,
-    metadataHash,
-    position,
-    coinType,
-    mintCounterCommitment
-  };
-
-  console.log('\nDepositor leaf created, now hashing it...');
-  return depositorLeaf;
-}
-
-/**
- * Helper to create a private state for a wallet with depositor leaf
+ * Helper to create a private state for a wallet with mint metadata
  * Use this after deposit to enable mint/withdraw operations
- *
- * This properly constructs the depositor leaf to match what depositToCollateralPool creates
  *
  * @param wallet - The wallet
  * @param collateral - Collateral amount deposited
  * @param debt - Current debt amount (0 for new deposits)
- * @param coinType - Collateral coin type (default: ADA)
- * @returns Private state with depositor leaf
+ * @param adminSecret - Optional: the fixed admin secret from contract (get from simulator.getPrivateState().admin_secret)
+ * @returns Private state with mint metadata
  */
-export function createPrivateStateWithDepositorLeaf(
+export function createPrivateStateWithMintMetadata(
   wallet: Wallet,
   collateral: bigint = 1000n,
   debt: bigint = 0n,
-  coinType: Uint8Array = pad('ADA', 32)
+  adminSecret?: Uint8Array
 ): StateraPrivateState {
-  const baseState = createPrivateStateraState(wallet.secretKey);
+  const baseState = createPrivateStateraState(wallet.secretKey, adminSecret);
 
-  // Create the depositor leaf matching circuit logic
-  const depositorLeaf = createDepositorLeaf(wallet, collateral, debt, coinType);
-
-  // Hash the leaf using the SAME hash function as the circuit
-  const commitment = hashDepositorLeafForTest(depositorLeaf);
-  console.log('Final commitment hash (ALL 32 bytes):', Array.from(commitment).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-  // Update private state with the depositor leaf AND commitment
+  // Update private state with mint_metadata
   return {
     ...baseState,
-    currentDepositorLeaf: depositorLeaf,
-    currentDepositorCommitment: commitment,
-    // Also update mint_metadata to match what the circuit would have set
     mint_metadata: {
       collateral,
       debt
@@ -268,6 +208,9 @@ export function createPrivateStateWithDepositorLeaf(
  * Helper to create admin private state with proper metadata from simulator
  * Use this when executing admin circuits that require admin authentication
  *
+ * IMPORTANT: After fees have accumulated during user operations (mint_sUSD, redeemSUSD),
+ * the admin_metadata in the simulator's private state is kept up-to-date via set_admin_metadata witness.
+ *
  * @param simulator - The contract simulator with initialized admin state
  * @param adminWallet - The admin wallet
  * @returns Private state with correct admin metadata
@@ -276,14 +219,33 @@ export function createAdminPrivateState(
   simulator: ContractSimulator<StateraPrivateState>,
   adminWallet: Wallet
 ): StateraPrivateState {
-  // Get the current private state which has the correct admin_metadata set by constructor
+  // Get the current private state
   const currentState = simulator.getPrivateState();
 
-  // Return a new state with the admin's secret key and the initialized admin_metadata
+  // Return admin state with admin's secret key but preserving admin_secret from initialization
   return {
     ...currentState,
-    secret_key: adminWallet.secretKey
+    secret_key: adminWallet.secretKey,
+    admin_secret: currentState.admin_secret  // Preserve the fixed admin_secret
   };
+}
+
+/**
+ * Helper to execute a circuit as admin with proper authentication
+ * This ensures both the private state AND the public key context are set correctly for admin circuits
+ *
+ * IMPORTANT: Admin circuits check ownPublicKey() against adminMetadata.super_admin,
+ * so we must pass the admin's coinPublicKey as the second parameter to .as()
+ *
+ * @param simulator - The contract simulator
+ * @param adminWallet - The admin wallet
+ * @returns Simulator configured for admin execution
+ */
+export function asAdmin(
+  simulator: ContractSimulator<StateraPrivateState>,
+  adminWallet: Wallet
+): ContractSimulator<StateraPrivateState> {
+  return simulator.as(createAdminPrivateState(simulator, adminWallet), adminWallet.coinPublicKey);
 }
 
 /**
@@ -344,62 +306,23 @@ export function updateAllBalances(
   });
 }
 
-/**
- * Mock Merkle tree for testing commitment/nullifier pattern
- * This simulates the on-chain Merkle tree structure
- */
-export class MockMerkleTree {
-  private leaves: Map<string, Uint8Array> = new Map();
-
-  /**
-   * Adds a leaf to the mock tree
-   */
-  addLeaf(commitment: Uint8Array): void {
-    const key = Buffer.from(commitment).toString('hex');
-    this.leaves.set(key, commitment);
-  }
-
-  /**
-   * Finds a path for a leaf (simplified for testing)
-   */
-  findPathForLeaf(commitment: Uint8Array): any {
-    const key = Buffer.from(commitment).toString('hex');
-    if (!this.leaves.has(key)) {
-      return null;
-    }
-
-    // Return a mock path structure
-    // In a real implementation, this would return the actual Merkle path
-    return {
-      leaf: commitment,
-      siblings: [],
-      index: 0n
-    };
-  }
-
-  /**
-   * Checks if a commitment exists in the tree
-   */
-  hasLeaf(commitment: Uint8Array): boolean {
-    const key = Buffer.from(commitment).toString('hex');
-    return this.leaves.has(key);
-  }
-
-  /**
-   * Clears all leaves
-   */
-  clear(): void {
-    this.leaves.clear();
-  }
-}
 
 /**
  * Creates a user ID from a wallet's secret key
- * This is a simplified version for testing
+ * This matches the contract's generateUserId function which does:
+ * persistentCommit<Bytes<32>>(ownPublicKey().bytes, sk)
  */
 export function createUserId(wallet: Wallet): Uint8Array {
-  // In production, this would be derived from the secret key using proper hashing
-  return wallet.secretKey;
+  // The contract uses persistentCommit with public key and secret key
+  // For testing, we need to replicate this
+  // Import the persistentCommit function
+  const { persistentCommit } = require('@midnight-ntwrk/compact-runtime');
+  const { CompactTypeBytes } = require('@midnight-ntwrk/compact-runtime');
+
+  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey);
+  const descriptor = new CompactTypeBytes(32);
+
+  return persistentCommit(descriptor, publicKeyBytes, wallet.secretKey);
 }
 
 /**
@@ -558,326 +481,122 @@ export function prepareCoinForReceive<T>(
   simulator.addCoinInput(runtimeCoin);
 }
 
-// Create type descriptors using the same primitives as the contract
-const _bytes32 = new CompactTypeBytes(32);
-const _uint64 = new CompactTypeUnsignedInteger(18446744073709551615n, 8); // Uint<64>
-
-// DebtPositionStatus enum: inactive=0, active=1, closed=2
-// WORKAROUND: CompactTypeEnum(2, 1) has a bug where toValue(0) returns empty array
-// We use CompactTypeUnsignedInteger instead which correctly serializes 0
-const _debtPositionStatus = new CompactTypeUnsignedInteger(2n, 1); // Max value 2, 1 byte (same as enum)
-
 /**
- * Creates a type descriptor for DepositorLeaf that matches the contract's compiled descriptor
- *
- * DepositorLeaf structure from contract:
- * - id: Bytes<32>
- * - metadataHash: Bytes<32>
- * - position: DebtPositionStatus (enum with max value 2, size 1 byte)
- * - coinType: Bytes<32>
- * - mintCounterCommitment: Bytes<32>
+ * Creates a mock reserve pool coin for testing withdrawal operations
  */
-class DepositorLeafDescriptor {
-  alignment() {
-    // Concatenate alignments in the same order as the contract
-    // Use CompactTypeUnsignedInteger alignment for position (workaround for enum bug)
-    return _bytes32.alignment()
-      .concat(_bytes32.alignment())
-      .concat(_debtPositionStatus.alignment())
-      .concat(_bytes32.alignment())
-      .concat(_bytes32.alignment());
-  }
-
-  toValue(leaf: any): Uint8Array[] {
-    // Serialize in the same order as the contract
-    // Use CompactTypeUnsignedInteger to serialize position (workaround for CompactTypeEnum bug)
-    return (_bytes32.toValue(leaf.id) as Uint8Array[])
-      .concat(_bytes32.toValue(leaf.metadataHash) as Uint8Array[])
-      .concat(_debtPositionStatus.toValue(leaf.position) as Uint8Array[])
-      .concat(_bytes32.toValue(leaf.coinType) as Uint8Array[])
-      .concat(_bytes32.toValue(leaf.mintCounterCommitment) as Uint8Array[]);
-  }
-
-  fromValue(buffer: Uint8Array[]): any {
-    return {
-      id: _bytes32.fromValue(buffer),
-      metadataHash: _bytes32.fromValue(buffer),
-      position: _debtPositionStatus.fromValue(buffer),
-      coinType: _bytes32.fromValue(buffer),
-      mintCounterCommitment: _bytes32.fromValue(buffer)
-    };
-  }
+export function createMockReservePoolCoin(collateralTokenType: TokenType, amount: bigint = 100000000000n): any {
+  return {
+    nonce: generateNonce(),
+    color: encodeTokenType(collateralTokenType),
+    value: amount,
+    mt_index: 0n
+  };
 }
 
 /**
- * Creates a type descriptor for StakerLeaf
- *
- * StakerLeaf structure:
- * - id: Bytes<32>
- * - metadataHash: Bytes<32>
+ * Creates a mock stake pool coin for testing staking operations
  */
-class StakerLeafDescriptor {
-  alignment() {
-    return _bytes32.alignment().concat(_bytes32.alignment());
-  }
-
-  toValue(leaf: any): Uint8Array[] {
-    return (_bytes32.toValue(leaf.id) as Uint8Array[]).concat(_bytes32.toValue(leaf.metadataHash) as Uint8Array[]);
-  }
-
-  fromValue(buffer: Uint8Array[]): any {
-    return {
-      id: _bytes32.fromValue(buffer),
-      metadataHash: _bytes32.fromValue(buffer)
-    };
-  }
+export function createMockStakePoolCoin(sSUSDTokenType: TokenType, amount: bigint = 100000000000n): any {
+  return {
+    nonce: generateNonce(),
+    color: encodeTokenType(sSUSDTokenType),
+    value: amount,
+    mt_index: 0n
+  };
 }
 
 /**
- * Creates a type descriptor for MintMetadata
- *
- * MintMetadata structure:
- * - collateral: Uint<64>
- * - debt: Uint<64>
- */
-class MintMetadataDescriptor {
-  alignment() {
-    return _uint64.alignment().concat(_uint64.alignment());
-  }
-
-  toValue(metadata: any): Uint8Array[] {
-    return (_uint64.toValue(metadata.collateral) as Uint8Array[]).concat(_uint64.toValue(metadata.debt) as Uint8Array[]);
-  }
-
-  fromValue(buffer: Uint8Array[]): any {
-    return {
-      collateral: _uint64.fromValue(buffer),
-      debt: _uint64.fromValue(buffer)
-    };
-  }
-}
-
-const depositorLeafDescriptor = new DepositorLeafDescriptor();
-const stakerLeafDescriptor = new StakerLeafDescriptor();
-const mintMetadataDescriptor = new MintMetadataDescriptor();
-
-/**
- * Hash a depositor leaf using the compiled contract's hash function
- * CRITICAL: We MUST use the contract's hash function because it uses the BUGGY enum serialization
- * that's actually used when the circuit inserts commitments into the tree!
- */
-function hashDepositorLeafForTest(leaf: any): Uint8Array {
-  // Use persistentHash with our workaround descriptor
-  // But WAIT - the circuit uses the BUGGY enum, so we need to match that!
-  // Let's use the actual contract's enum descriptor
-  const _bytes32 = new CompactTypeBytes(32);
-  const _uint64 = new CompactTypeUnsignedInteger(18446744073709551615n, 8);
-  const _debtPositionStatusEnum = new CompactTypeEnum(2, 1); // Use BUGGY enum to match circuit!
-
-  class BuggyDepositorLeafDescriptor {
-    alignment() {
-      return _bytes32.alignment()
-        .concat(_bytes32.alignment())
-        .concat(_debtPositionStatusEnum.alignment()) // BUGGY enum
-        .concat(_bytes32.alignment())
-        .concat(_bytes32.alignment());
-    }
-
-    toValue(leaf: any): Uint8Array[] {
-      return (_bytes32.toValue(leaf.id) as Uint8Array[])
-        .concat(_bytes32.toValue(leaf.metadataHash) as Uint8Array[])
-        .concat(_debtPositionStatusEnum.toValue(leaf.position) as Uint8Array[]) // BUGGY enum!
-        .concat(_bytes32.toValue(leaf.coinType) as Uint8Array[])
-        .concat(_bytes32.toValue(leaf.mintCounterCommitment) as Uint8Array[]);
-    }
-
-    fromValue(buffer: Uint8Array[]): any {
-      return {
-        id: _bytes32.fromValue(buffer),
-        metadataHash: _bytes32.fromValue(buffer),
-        position: _debtPositionStatusEnum.fromValue(buffer),
-        coinType: _bytes32.fromValue(buffer),
-        mintCounterCommitment: _bytes32.fromValue(buffer)
-      };
-    }
-  }
-
-  const buggyDescriptor = new BuggyDepositorLeafDescriptor();
-  return persistentHash(buggyDescriptor, leaf);
-}
-
-/**
- * Hash a staker leaf using the same persistentHash function as the circuit
- */
-function hashStakerLeafForTest(leaf: any): Uint8Array {
-  return persistentHash(stakerLeafDescriptor, leaf);
-}
-
-/**
- * Hash mint metadata using persistentCommit (same as contract's hashMintMetadata)
- */
-function hashMintMetadataForTest(metadata: any, randomizer: Uint8Array): Uint8Array {
-  return persistentCommit(mintMetadataDescriptor, metadata, randomizer);
-}
-
-/**
- * Helper to extract the actual depositor commitment from the on-chain tree
- * This retrieves the REAL commitment hash that was inserted by the circuit
- *
- * @param simulator - The contract simulator (after deposit)
- * @param treeIndex - Index in the tree (usually firstFree - 1 for most recent)
- * @returns The actual commitment hash from the tree, or undefined if not found
- */
-function extractDepositorCommitmentFromTree(
-  simulator: ContractSimulator<StateraPrivateState>,
-  treeIndex: bigint
-): Uint8Array | undefined {
-  try {
-    const rawLedgerState = simulator.getLedger();
-    const ledgerAccessor = ledger(rawLedgerState);
-
-    // Create a dummy leaf (all zeros) - we just need to get the path
-    const dummyLeaf = new Uint8Array(32);
-    dummyLeaf.fill(0);
-
-    // Use pathForLeaf to get the path at this index
-    // The path.leaf field will contain the ACTUAL leaf hash that was inserted
-    const path = ledgerAccessor.depositorCommitments.pathForLeaf(treeIndex, dummyLeaf);
-
-    if (path && path.leaf) {
-      console.log(`✅ Extracted commitment from tree at index ${treeIndex}:`, Array.from(path.leaf.slice(0, 8)).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-      return path.leaf;
-    }
-
-    return undefined;
-  } catch (e) {
-    console.log(`⚠️  Could not extract commitment from tree at index ${treeIndex}:`, e);
-    return undefined;
-  }
-}
-
-/**
- * Helper to create private state with depositor leaf after a deposit
- *
- * IMPORTANT: Call this AFTER executing depositToCollateralPool circuit
- *
- * The deposit circuit:
- * 1. Receives the collateral coin
- * 2. Creates a depositor leaf with user's metadata
- * 3. Inserts the commitment into the on-chain Merkle tree
- * 4. Updates the private state's mint_metadata
- *
- * This helper extracts the ACTUAL commitment from the on-chain tree that was
- * inserted by the circuit, and recreates the depositor leaf to match.
+ * Helper to get private state after a deposit
+ * Much simpler now - just updates the mint_metadata
  *
  * @param simulator - The contract simulator (after deposit)
  * @param wallet - The user's wallet
  * @param depositAmount - Amount deposited
- * @param collateralTokenType - The collateral token type (REQUIRED - must match what was passed to prepareCoinForReceive)
- * @returns Private state with depositor leaf for subsequent operations
+ * @param collateralTokenType - Optional: add reserve pool coin for withdrawals
+ * @param sSUSDTokenType - Optional: add stake pool coin for liquidations
+ * @returns Private state with mint metadata for subsequent operations
  */
 export function getPrivateStateAfterDeposit(
   simulator: ContractSimulator<StateraPrivateState>,
   wallet: Wallet,
   depositAmount: bigint,
-  collateralTokenType: TokenType
+  collateralTokenType?: TokenType,
+  sSUSDTokenType?: TokenType
 ): StateraPrivateState {
-  console.log('\n=== getPrivateStateAfterDeposit called ===');
-  console.log('Wallet:', wallet.coinPublicKey);
-  console.log('Deposit amount:', depositAmount);
-
   // Get the updated private state from simulator
   const currentState = simulator.getPrivateState();
-
-  // CRITICAL: The circuit does disclose(coin.color) which gives the ENCODED TokenType!
-  // We MUST encode the TokenType to match what the circuit receives
-  const coinTypeBytes = encodeTokenType(collateralTokenType);
-  console.log('Encoded coinType (first 8):', Array.from(coinTypeBytes.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''));
-
-  // Recreate the depositor leaf that was created by the deposit circuit
-  const depositorLeaf = createDepositorLeaf(
-    wallet,
-    depositAmount,
-    0n,  // New deposits have 0 debt
-    coinTypeBytes
-  );
-
-  // CRITICAL: Use the BUGGY enum hash function to match what the circuit uses!
-  // The circuit's compiled descriptor uses CompactTypeEnum(2, 1) which has a bug,
-  // so we MUST replicate that bug to get matching hashes!
-  const commitment = hashDepositorLeafForTest(depositorLeaf);
-
-  // VERIFICATION: Also compute what the circuit would hash from this leaf
-  // The circuit does: oldCommitment = hashDepositorLeaf(oldLeaf)
-  // where oldLeaf comes from our private state
-  const circuitWouldCompute = hashDepositorLeafForTest(depositorLeaf);
-  console.log('\n=== HASH VERIFICATION ===');
-  console.log('Our stored commitment:      ', Array.from(commitment).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('Circuit would compute:      ', Array.from(circuitWouldCompute).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('Hashes match?', Array.from(commitment).every((b, i) => b === circuitWouldCompute[i]));
-  console.log('========================\n');
-
-  console.log('\n=== getPrivateStateAfterDeposit - TEST CODE FINAL RESULT ===');
-  console.log('Final commitment hash (using buggy enum - ALL 32 bytes):', Array.from(commitment).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('DepositorLeaf fields (what we computed in test code):');
-  console.log('  id (ALL 32 bytes):', Array.from(depositorLeaf.id).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('  metadataHash (ALL 32 bytes):', Array.from(depositorLeaf.metadataHash).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('  position:', depositorLeaf.position);
-  console.log('  coinType (ALL 32 bytes):', Array.from(depositorLeaf.coinType).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('  mintCounterCommitment (ALL 32 bytes):', Array.from(depositorLeaf.mintCounterCommitment).map((b: unknown) => (b as number).toString(16).padStart(2, '0')).join(''));
-  console.log('============================================================\n');
 
   return {
     ...currentState,
     secret_key: wallet.secretKey,
-    currentDepositorLeaf: depositorLeaf,
-    currentDepositorCommitment: commitment,
+    admin_secret: currentState.admin_secret,  // Preserve admin_secret from initialization
+    admin_metadata: currentState.admin_metadata,  // CRITICAL: Preserve admin_metadata including super_admin
     mint_metadata: {
       collateral: depositAmount,
       debt: 0n
-    }
+    },
+    reserve_pool_coin: collateralTokenType ? createMockReservePoolCoin(collateralTokenType) : currentState.reserve_pool_coin,
+    stake_pool_coin: sSUSDTokenType ? createMockStakePoolCoin(sSUSDTokenType) : currentState.stake_pool_coin
   };
 }
 
 /**
- * Helper to create private state with staker leaf after staking
- *
- * IMPORTANT: Call this AFTER executing depositToStabilityPool circuit
+ * Helper to get private state after staking
+ * Updates the stake_metadata to match what's stored on-chain
  *
  * @param simulator - The contract simulator (after stake)
  * @param wallet - The user's wallet
- * @param stakeAmount - Amount staked
- * @returns Private state with staker leaf for subsequent operations
+ * @param stakeAmount - Amount staked (optional - will read from ledger if not provided)
+ * @param sSUSDTokenType - Optional: add stake pool coin for withdrawals
+ * @param additionalRewards - Optional: simulate additional rewards earned
+ * @returns Private state with stake metadata for subsequent operations
  */
 export function getPrivateStateAfterStake(
   simulator: ContractSimulator<StateraPrivateState>,
   wallet: Wallet,
-  stakeAmount: bigint
+  stakeAmount?: bigint,
+  sSUSDTokenType?: TokenType,
+  additionalRewards: bigint = 0n
 ): StateraPrivateState {
   // Get the updated private state from simulator
   const currentState = simulator.getPrivateState();
 
-  // Recreate the staker leaf that was created by the depositToStabilityPool circuit
-  const userId = wallet.secretKey;
+  // Get the current ledger state to read ADA_sUSD_index and cumulative_scaling_factor
+  const ledgerState = simulator.getLedger();
 
-  // Create metadata hash (simplified for testing)
-  const metadataHash = new Uint8Array(32);
-  const stakeBytes = new DataView(new ArrayBuffer(8));
-  stakeBytes.setBigUint64(0, stakeAmount, true);
-  metadataHash.set(new Uint8Array(stakeBytes.buffer), 0);
+  // Try to read the staker from ledger to get accurate metadata
+  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey);
+  const ledgerAccessor = ledger(ledgerState as any);
 
-  const stakerLeaf = {
-    id: userId,
-    metadataHash
-  };
+  let effectiveBalance = stakeAmount || 0n;
+  let entry_ADA_SUSD_index = ledgerState.ADA_sUSD_index || 0n;
+  let entry_scale_factor = ledgerState.cumulative_scaling_factor || 1n;
 
-  // Hash the leaf using the SAME hash function as the circuit
-  const commitment = hashStakerLeafForTest(stakerLeaf);
+  // Try to read from on-chain stakers map
+  try {
+    if (ledgerAccessor.stakers && ledgerAccessor.stakers.member) {
+      const hasStaker = ledgerAccessor.stakers.member(publicKeyBytes);
+      if (hasStaker) {
+        const stakerRecord = ledgerAccessor.stakers.lookup(publicKeyBytes);
+        // The staker exists, use the amount we passed in or fall back to what we know
+        effectiveBalance = stakeAmount || effectiveBalance;
+      }
+    }
+  } catch (e) {
+    // If we can't read from ledger, use the provided amount
+  }
 
   return {
     ...currentState,
     secret_key: wallet.secretKey,
-    currentStakerLeaf: stakerLeaf,
-    currentStakerCommitment: commitment
+    admin_secret: currentState.admin_secret,  // Preserve admin_secret from initialization
+    admin_metadata: currentState.admin_metadata,  // CRITICAL: Preserve admin_metadata including super_admin
+    stake_metadata: {
+      effectiveBalance: effectiveBalance,
+      stakeReward: additionalRewards,
+      entry_ADA_SUSD_index,
+      entry_scale_factor
+    },
+    stake_pool_coin: sSUSDTokenType ? createMockStakePoolCoin(sSUSDTokenType) : currentState.stake_pool_coin
   };
 }

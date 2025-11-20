@@ -189,15 +189,5 @@ describe('Ada Statera Protocol - Basic Tests', () => {
       expect(privateState.reserve_pool_coin).toBeNull();
     });
 
-    it('should have undefined commitment fields initially', () => {
-      const { simulator } = fixture;
-
-      const privateState = simulator.getPrivateState();
-
-      expect(privateState.currentDepositorLeaf).toBeUndefined();
-      expect(privateState.currentDepositorCommitment).toBeUndefined();
-      expect(privateState.currentStakerLeaf).toBeUndefined();
-      expect(privateState.currentStakerCommitment).toBeUndefined();
-    });
   });
 });

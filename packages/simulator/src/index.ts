@@ -131,3 +131,14 @@ export type {
   OutputInfo,
   CircuitResult,
 } from './types.js';
+
+// Simulator Extensions
+export {
+  SimulatorHistoryTracker,
+  withHistory,
+} from './SimulatorExtensions.js';
+export type {
+  HistoryEntry,
+  ExecutionMetrics,
+  EventLogEntry,
+} from './SimulatorExtensions.js';

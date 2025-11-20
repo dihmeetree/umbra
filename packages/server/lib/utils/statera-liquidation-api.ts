@@ -81,9 +81,10 @@ export class StateraAPI implements DeployedStateraAPI {
     // Construct tx with dynamic coin data
     const txData =
       await this.allReadyDeployedContract.callTx.liquidateDebtPosition(
-        BigInt(position.collateral_amount),
-        utils.hexStringToUint8Array(position.id),
-        BigInt(position.debt)
+        BigInt(position.collateral_amount), // _totalCollateral
+        BigInt(position.debt),               // _totalDebt
+        BigInt(position.debt),               // _debtToLiquidate (full liquidation)
+        utils.hexStringToUint8Array(position.id) // _depositId
       )
 
     this.logger?.trace({
@@ -107,14 +108,7 @@ export class StateraAPI implements DeployedStateraAPI {
       stateraPrivateStateId
     )
     return (
-      existingPrivateState ?? {
-        secret_key: createPrivateStateraState(utils.randomNonceBytes(32))
-          .secret_key,
-        mint_metadata: {
-          collateral: BigInt(0),
-          debt: BigInt(0)
-        }
-      }
+      existingPrivateState ?? createPrivateStateraState(utils.randomNonceBytes(32))
     )
   }
 }
