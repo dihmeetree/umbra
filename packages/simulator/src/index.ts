@@ -94,6 +94,35 @@ export type { BalanceAssertion } from './assertions.js';
 export { SnapshotManager } from './snapshot.js';
 export type { Snapshot } from './snapshot.js';
 
+// Coin Builder
+export { CoinBuilder, LegacyCoinBuilder } from './CoinBuilder.js';
+
+// Ledger Inspector
+export { LedgerInspector } from './LedgerInspector.js';
+export type { MerkleTreeInfo } from './LedgerInspector.js';
+
+// Mock Generators
+export {
+  MockGenerators,
+  createOracle,
+  createOracles,
+  createComplianceToken,
+  createComplianceTokens,
+  createPrice,
+  createTimestamp,
+  createMetadataHash,
+  createNullifier,
+  createCommitment,
+  createDID,
+  createSignature,
+} from './MockGenerators.js';
+export type {
+  MockOracle,
+  MockComplianceToken,
+  MockOracleConfig,
+  MockComplianceConfig,
+} from './MockGenerators.js';
+
 export type {
   ContractWithCircuits,
   ContractConfig,

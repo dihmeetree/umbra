@@ -426,4 +426,26 @@ export class ContractSimulator<TPrivateState> {
     this.snapshots.clear();
     logger.debug('Cleared all snapshots');
   }
+
+  // ==================== INSPECTION UTILITIES ====================
+
+  /**
+   * Creates a ledger inspector for examining ledger state
+   *
+   * @returns A LedgerInspector instance
+   */
+  inspect(): any {
+    // Import dynamically to avoid circular dependency
+    const { LedgerInspector } = require('./LedgerInspector.js');
+    return new LedgerInspector(this);
+  }
+
+  /**
+   * Prints a summary of the current ledger state
+   * Convenience method that creates an inspector and prints
+   */
+  printLedgerSummary(): void {
+    const inspector = this.inspect();
+    inspector.printSummary();
+  }
 }

@@ -4,8 +4,14 @@ import {
   BalanceTracker,
   generateNonce,
   pad,
-  type Wallet
+  type Wallet,
+  LegacyCoinBuilder,
+  MockGenerators,
+  disableLogging
 } from '@statera/simulator';
+
+// Disable debug logging for cleaner test output
+disableLogging();
 import { tokenType, encodeTokenType } from '@midnight-ntwrk/ledger';
 import { NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { encodeCoinPublicKey } from '@midnight-ntwrk/onchain-runtime';
@@ -442,11 +448,10 @@ export function createMockCoin(value: bigint, colorName: string = 'ADA'): any {
  */
 export function createCollateralCoin(amountInADA: bigint): any {
   const SPECK_per_tDUST = 1000000n;
-  return {
-    nonce: generateNonce(),
-    color: pad('ADA', 32),
-    value: amountInADA * SPECK_per_tDUST
-  };
+  return LegacyCoinBuilder.create(
+    pad('ADA', 32),
+    amountInADA * SPECK_per_tDUST
+  );
 }
 
 /**
@@ -458,11 +463,10 @@ export function createCollateralCoin(amountInADA: bigint): any {
  * @returns CoinInfo with encoded token type as color
  */
 export function createSUSDCoin(value: bigint, sSUSDTokenType: TokenType): any {
-  return {
-    nonce: generateNonce(),
-    color: encodeTokenType(sSUSDTokenType),
+  return LegacyCoinBuilder.create(
+    encodeTokenType(sSUSDTokenType),
     value
-  };
+  );
 }
 
 /**
@@ -505,6 +509,8 @@ export function createMockComplianceToken(
   // Convert userPk to Uint8Array if it's a string
   const userPkBytes = typeof userPk === 'string' ? hexToBytes(userPk) : userPk;
 
+  // Use MockGenerators but adapt to our specific format
+  // Our contract expects a different structure, so we keep the custom format
   return {
     tokenData: {
       did: pad('mock-did', 32),
@@ -683,6 +689,16 @@ function hashDepositorLeafForTest(leaf: any): Uint8Array {
         .concat(_debtPositionStatusEnum.toValue(leaf.position) as Uint8Array[]) // BUGGY enum!
         .concat(_bytes32.toValue(leaf.coinType) as Uint8Array[])
         .concat(_bytes32.toValue(leaf.mintCounterCommitment) as Uint8Array[]);
+    }
+
+    fromValue(buffer: Uint8Array[]): any {
+      return {
+        id: _bytes32.fromValue(buffer),
+        metadataHash: _bytes32.fromValue(buffer),
+        position: _debtPositionStatusEnum.fromValue(buffer),
+        coinType: _bytes32.fromValue(buffer),
+        mintCounterCommitment: _bytes32.fromValue(buffer)
+      };
     }
   }
 
