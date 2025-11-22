@@ -2,9 +2,7 @@ import {
   Ledger,
   MintMetadata
 } from './managed/adaStateraProtocol/contract/index.cjs'
-import {
-  WitnessContext
-} from '@midnight-ntwrk/compact-runtime'
+import { WitnessContext } from '@midnight-ntwrk/compact-runtime'
 import {
   MissingCoinError,
   MissingMetadataError,
@@ -35,7 +33,7 @@ export type QualifiedCoinInfo = {
 
 export interface StateraPrivateState {
   readonly secret_key: Uint8Array
-  readonly admin_secret: Uint8Array  // Fixed admin secret for admin metadata hashing
+  readonly admin_secret: Uint8Array // Fixed admin secret for admin metadata hashing
   readonly mint_metadata: MintMetadata
   readonly stake_metadata: StakeMetadata
   readonly admin_metadata: AdminMetadata
@@ -49,7 +47,7 @@ export const createPrivateStateraState = (
   admin_secret?: Uint8Array
 ): StateraPrivateState => ({
   secret_key,
-  admin_secret: admin_secret || secret_key,  // Use provided admin secret or default to secret_key
+  admin_secret: admin_secret || secret_key, // Use provided admin secret or default to secret_key
   mint_metadata: {
     collateral: 0n,
     debt: 0n
@@ -78,7 +76,13 @@ export const witnesses = {
     divisor: bigint
   ): [StateraPrivateState, [bigint, bigint]] => {
     // Use safe division validator
-    const quotient = BigInt(Math.round(Number(WitnessValidators.safeDivision(dividend, divisor, 'division witness'))))
+    const quotient = BigInt(
+      Math.round(
+        Number(
+          WitnessValidators.safeDivision(dividend, divisor, 'division witness')
+        )
+      )
+    )
     const remainder = dividend % divisor
 
     return [privateState, [quotient, remainder]]
@@ -212,7 +216,10 @@ export const witnesses = {
     QualifiedCoinInfo
   ] => {
     if (!privateState.stake_pool_coin) {
-      throw new MissingCoinError('stake_pool', 'User must deposit to stake pool first.')
+      throw new MissingCoinError(
+        'stake_pool',
+        'User must deposit to stake pool first.'
+      )
     }
     return [privateState, privateState.stake_pool_coin]
   },
@@ -225,7 +232,10 @@ export const witnesses = {
     QualifiedCoinInfo
   ] => {
     if (!privateState.reserve_pool_coin) {
-      throw new MissingCoinError('reserve_pool', 'Contract must have reserve pool balance.')
+      throw new MissingCoinError(
+        'reserve_pool',
+        'Contract must have reserve pool balance.'
+      )
     }
     return [privateState, privateState.reserve_pool_coin]
   },
@@ -239,8 +249,8 @@ export const witnesses = {
     StateraPrivateState,
     Uint8Array
   ] => {
-    WitnessValidators.requireDefined(privateState, 'privateState');
-    WitnessValidators.requireDefined(privateState.admin_secret, 'admin_secret');
+    WitnessValidators.requireDefined(privateState, 'privateState')
+    WitnessValidators.requireDefined(privateState.admin_secret, 'admin_secret')
     return [privateState, privateState.admin_secret]
   },
 

@@ -1,6 +1,6 @@
-import type * as ocrt from '@midnight-ntwrk/onchain-runtime';
-import type { TokenType } from '@midnight-ntwrk/zswap';
-import type { ContractSimulator } from './ContractSimulator.js';
+import type * as ocrt from '@midnight-ntwrk/onchain-runtime'
+import type { TokenType } from '@midnight-ntwrk/zswap'
+import type { ContractSimulator } from './ContractSimulator.js'
 
 /**
  * Tracks and manages token balances across multiple wallets
@@ -9,7 +9,7 @@ import type { ContractSimulator } from './ContractSimulator.js';
  * providing a convenient interface for checking and displaying wallet balances.
  */
 export class BalanceTracker {
-  private balances: Map<string, Map<string, bigint>> = new Map();
+  private balances: Map<string, Map<string, bigint>> = new Map()
 
   /**
    * Records the balance for a wallet and token type
@@ -19,13 +19,13 @@ export class BalanceTracker {
    * @param amount - The balance amount
    */
   setBalance(walletKey: string, tokenType: TokenType, amount: bigint): void {
-    let walletBalances = this.balances.get(walletKey);
+    let walletBalances = this.balances.get(walletKey)
     if (!walletBalances) {
-      walletBalances = new Map();
-      this.balances.set(walletKey, walletBalances);
+      walletBalances = new Map()
+      this.balances.set(walletKey, walletBalances)
     }
 
-    walletBalances.set(tokenType.toString(), amount);
+    walletBalances.set(tokenType.toString(), amount)
   }
 
   /**
@@ -36,12 +36,12 @@ export class BalanceTracker {
    * @returns The balance amount, or 0n if not found
    */
   getBalance(walletKey: string, tokenType: TokenType): bigint {
-    const walletBalances = this.balances.get(walletKey);
+    const walletBalances = this.balances.get(walletKey)
     if (!walletBalances) {
-      return 0n;
+      return 0n
     }
 
-    return walletBalances.get(tokenType.toString()) || 0n;
+    return walletBalances.get(tokenType.toString()) || 0n
   }
 
   /**
@@ -51,17 +51,17 @@ export class BalanceTracker {
    * @returns A record mapping token types to balances
    */
   getAllBalances(walletKey: string): Record<string, bigint> {
-    const walletBalances = this.balances.get(walletKey);
+    const walletBalances = this.balances.get(walletKey)
     if (!walletBalances) {
-      return {};
+      return {}
     }
 
-    const result: Record<string, bigint> = {};
+    const result: Record<string, bigint> = {}
     walletBalances.forEach((balance, tokenType) => {
-      result[tokenType] = balance;
-    });
+      result[tokenType] = balance
+    })
 
-    return result;
+    return result
   }
 
   /**
@@ -76,16 +76,16 @@ export class BalanceTracker {
     recipient: ocrt.CoinPublicKey,
     walletKey?: string
   ): void {
-    const key = walletKey || recipient;
-    const balances = simulator.getAllBalances(recipient);
+    const key = walletKey || recipient
+    const balances = simulator.getAllBalances(recipient)
 
     for (const [tokenType, amount] of Object.entries(balances)) {
-      let walletBalances = this.balances.get(key);
+      let walletBalances = this.balances.get(key)
       if (!walletBalances) {
-        walletBalances = new Map();
-        this.balances.set(key, walletBalances);
+        walletBalances = new Map()
+        this.balances.set(key, walletBalances)
       }
-      walletBalances.set(tokenType, amount);
+      walletBalances.set(tokenType, amount)
     }
   }
 
@@ -93,14 +93,14 @@ export class BalanceTracker {
    * Clears all tracked balances
    */
   clear(): void {
-    this.balances.clear();
+    this.balances.clear()
   }
 
   /**
    * Gets all tracked wallets
    */
   getWallets(): string[] {
-    return Array.from(this.balances.keys());
+    return Array.from(this.balances.keys())
   }
 
   /**
@@ -110,19 +110,19 @@ export class BalanceTracker {
    * @param tokenNames - Optional mapping of token types to human-readable names
    */
   printBalances(walletKey: string, tokenNames?: Map<string, string>): void {
-    const balances = this.getAllBalances(walletKey);
-    console.log(`\n=== Balances for ${walletKey} ===`);
+    const balances = this.getAllBalances(walletKey)
+    console.log(`\n=== Balances for ${walletKey} ===`)
 
     if (Object.keys(balances).length === 0) {
-      console.log('  No balances');
-      return;
+      console.log('  No balances')
+      return
     }
 
     for (const [tokenType, amount] of Object.entries(balances)) {
-      const name = tokenNames?.get(tokenType) || tokenType.substring(0, 8);
-      console.log(`  ${name}: ${amount}`);
+      const name = tokenNames?.get(tokenType) || tokenType.substring(0, 8)
+      console.log(`  ${name}: ${amount}`)
     }
-    console.log('');
+    console.log('')
   }
 
   /**
@@ -131,9 +131,9 @@ export class BalanceTracker {
    * @param tokenNames - Optional mapping of token types to human-readable names
    */
   printAllBalances(tokenNames?: Map<string, string>): void {
-    console.log('\n=== All Wallet Balances ===');
+    console.log('\n=== All Wallet Balances ===')
     for (const walletKey of this.getWallets()) {
-      this.printBalances(walletKey, tokenNames);
+      this.printBalances(walletKey, tokenNames)
     }
   }
 
@@ -148,25 +148,27 @@ export class BalanceTracker {
     walletKey: string,
     previousBalances: Record<string, bigint>
   ): Record<string, bigint> {
-    const currentBalances = this.getAllBalances(walletKey);
-    const changes: Record<string, bigint> = {};
+    const currentBalances = this.getAllBalances(walletKey)
+    const changes: Record<string, bigint> = {}
 
     // Check for changes in existing tokens
     for (const [tokenType, currentAmount] of Object.entries(currentBalances)) {
-      const previousAmount = previousBalances[tokenType] || 0n;
-      const change = currentAmount - previousAmount;
+      const previousAmount = previousBalances[tokenType] || 0n
+      const change = currentAmount - previousAmount
       if (change !== 0n) {
-        changes[tokenType] = change;
+        changes[tokenType] = change
       }
     }
 
     // Check for tokens that existed before but don't now
-    for (const [tokenType, previousAmount] of Object.entries(previousBalances)) {
+    for (const [tokenType, previousAmount] of Object.entries(
+      previousBalances
+    )) {
       if (!(tokenType in currentBalances) && previousAmount !== 0n) {
-        changes[tokenType] = -previousAmount;
+        changes[tokenType] = -previousAmount
       }
     }
 
-    return changes;
+    return changes
   }
 }

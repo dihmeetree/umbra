@@ -1,6 +1,6 @@
-import type { TokenType } from '@midnight-ntwrk/zswap';
-import type * as ocrt from '@midnight-ntwrk/onchain-runtime';
-import { generateNonce, toHex } from './utils.js';
+import type { TokenType } from '@midnight-ntwrk/zswap'
+import type * as ocrt from '@midnight-ntwrk/onchain-runtime'
+import { generateNonce, toHex } from './utils.js'
 
 /**
  * Fluent builder for creating coins in tests
@@ -19,32 +19,32 @@ import { generateNonce, toHex } from './utils.js';
  * ```
  */
 export class CoinBuilder {
-  private tokenType?: TokenType;
-  private value: bigint = 0n;
-  private nonceValue?: Uint8Array;
+  private tokenType?: TokenType
+  private value: bigint = 0n
+  private nonceValue?: Uint8Array
 
   /**
    * Sets the token type for this coin
    */
   ofType(tokenType: TokenType): this {
-    this.tokenType = tokenType;
-    return this;
+    this.tokenType = tokenType
+    return this
   }
 
   /**
    * Sets the value/amount for this coin
    */
   withValue(value: bigint): this {
-    this.value = value;
-    return this;
+    this.value = value
+    return this
   }
 
   /**
    * Sets a specific nonce (auto-generated if not provided)
    */
   withNonce(nonce: Uint8Array): this {
-    this.nonceValue = nonce;
-    return this;
+    this.nonceValue = nonce
+    return this
   }
 
   /**
@@ -53,16 +53,18 @@ export class CoinBuilder {
    */
   build(): ocrt.CoinInfo {
     if (!this.tokenType) {
-      throw new Error('CoinBuilder: token type is required. Use ofType() to set it.');
+      throw new Error(
+        'CoinBuilder: token type is required. Use ofType() to set it.'
+      )
     }
 
-    const nonce = this.nonceValue || generateNonce();
+    const nonce = this.nonceValue || generateNonce()
 
     return {
       type: this.tokenType,
       value: this.value,
-      nonce: toHex(nonce) as ocrt.Nonce,
-    };
+      nonce: toHex(nonce) as ocrt.Nonce
+    }
   }
 
   /**
@@ -73,12 +75,16 @@ export class CoinBuilder {
    * @param nonce - Optional nonce (auto-generated if not provided)
    * @returns A CoinInfo object
    */
-  static create(tokenType: TokenType, value: bigint, nonce?: Uint8Array): ocrt.CoinInfo {
-    const builder = new CoinBuilder().ofType(tokenType).withValue(value);
+  static create(
+    tokenType: TokenType,
+    value: bigint,
+    nonce?: Uint8Array
+  ): ocrt.CoinInfo {
+    const builder = new CoinBuilder().ofType(tokenType).withValue(value)
     if (nonce) {
-      builder.withNonce(nonce);
+      builder.withNonce(nonce)
     }
-    return builder.build();
+    return builder.build()
   }
 
   /**
@@ -89,7 +95,7 @@ export class CoinBuilder {
    * @returns Array of CoinInfo objects
    */
   static createBatch(tokenType: TokenType, values: bigint[]): ocrt.CoinInfo[] {
-    return values.map(value => CoinBuilder.create(tokenType, value));
+    return values.map((value) => CoinBuilder.create(tokenType, value))
   }
 
   /**
@@ -99,7 +105,7 @@ export class CoinBuilder {
    * @returns A CoinInfo with value 0
    */
   static createEmpty(tokenType: TokenType): ocrt.CoinInfo {
-    return CoinBuilder.create(tokenType, 0n);
+    return CoinBuilder.create(tokenType, 0n)
   }
 }
 
@@ -108,32 +114,32 @@ export class CoinBuilder {
  * instead of { type, nonce, value }
  */
 export class LegacyCoinBuilder {
-  private color?: Uint8Array;
-  private value: bigint = 0n;
-  private nonce?: Uint8Array;
+  private color?: Uint8Array
+  private value: bigint = 0n
+  private nonce?: Uint8Array
 
   /**
    * Sets the color (token identifier) for this coin
    */
   withColor(color: Uint8Array): this {
-    this.color = color;
-    return this;
+    this.color = color
+    return this
   }
 
   /**
    * Sets the value/amount for this coin
    */
   withValue(value: bigint): this {
-    this.value = value;
-    return this;
+    this.value = value
+    return this
   }
 
   /**
    * Sets a specific nonce (auto-generated if not provided)
    */
   withNonce(nonce: Uint8Array): this {
-    this.nonce = nonce;
-    return this;
+    this.nonce = nonce
+    return this
   }
 
   /**
@@ -142,14 +148,16 @@ export class LegacyCoinBuilder {
    */
   build(): { nonce: Uint8Array; color: Uint8Array; value: bigint } {
     if (!this.color) {
-      throw new Error('LegacyCoinBuilder: color is required. Use withColor() to set it.');
+      throw new Error(
+        'LegacyCoinBuilder: color is required. Use withColor() to set it.'
+      )
     }
 
     return {
       nonce: this.nonce || generateNonce(),
       color: this.color,
-      value: this.value,
-    };
+      value: this.value
+    }
   }
 
   /**
@@ -160,6 +168,6 @@ export class LegacyCoinBuilder {
       .withColor(color)
       .withValue(value)
       .withNonce(nonce || generateNonce())
-      .build();
+      .build()
   }
 }

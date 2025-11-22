@@ -6,9 +6,12 @@
  */
 
 export class WitnessError extends Error {
-  constructor(message: string, public readonly context?: Record<string, any>) {
-    super(message);
-    this.name = 'WitnessError';
+  constructor(
+    message: string,
+    public readonly context?: Record<string, any>
+  ) {
+    super(message)
+    this.name = 'WitnessError'
   }
 }
 
@@ -17,28 +20,26 @@ export class MissingCoinError extends WitnessError {
     super(
       `${coinType === 'stake_pool' ? 'Stake pool' : 'Reserve pool'} coin not found in private state. ${requiredAction}`,
       { coinType, requiredAction }
-    );
-    this.name = 'MissingCoinError';
+    )
+    this.name = 'MissingCoinError'
   }
 }
 
 export class MissingMetadataError extends WitnessError {
   constructor(field: string) {
-    super(
-      `${field} not found in private state.`,
-      { field }
-    );
-    this.name = 'MissingMetadataError';
+    super(`${field} not found in private state.`, { field })
+    this.name = 'MissingMetadataError'
   }
 }
 
 export class InvalidMetadataError extends WitnessError {
   constructor(field: string, value: any, expected: string) {
-    super(
-      `Invalid ${field}: ${value}. Expected: ${expected}`,
-      { field, value, expected }
-    );
-    this.name = 'InvalidMetadataError';
+    super(`Invalid ${field}: ${value}. Expected: ${expected}`, {
+      field,
+      value,
+      expected
+    })
+    this.name = 'InvalidMetadataError'
   }
 }
 
@@ -51,9 +52,9 @@ export const WitnessValidators = {
    */
   requireDefined<T>(value: T | null | undefined, fieldName: string): T {
     if (value === null || value === undefined) {
-      throw new MissingMetadataError(fieldName);
+      throw new MissingMetadataError(fieldName)
     }
-    return value;
+    return value
   },
 
   /**
@@ -61,33 +62,37 @@ export const WitnessValidators = {
    */
   requirePositive(value: bigint, fieldName: string): bigint {
     if (value <= 0n) {
-      throw new InvalidMetadataError(fieldName, value, 'greater than 0');
+      throw new InvalidMetadataError(fieldName, value, 'greater than 0')
     }
-    return value;
+    return value
   },
 
   /**
    * Validates that a Uint8Array is not all zeros
    */
   requireNonZero(value: Uint8Array, fieldName: string): Uint8Array {
-    if (value.every(byte => byte === 0)) {
-      throw new InvalidMetadataError(fieldName, '0x00...', 'non-zero value');
+    if (value.every((byte) => byte === 0)) {
+      throw new InvalidMetadataError(fieldName, '0x00...', 'non-zero value')
     }
-    return value;
+    return value
   },
 
   /**
    * Validates array length
    */
-  requireLength(value: any[], expectedLength: number, fieldName: string): any[] {
+  requireLength(
+    value: any[],
+    expectedLength: number,
+    fieldName: string
+  ): any[] {
     if (value.length !== expectedLength) {
       throw new InvalidMetadataError(
         fieldName,
         `length ${value.length}`,
         `length ${expectedLength}`
-      );
+      )
     }
-    return value;
+    return value
   },
 
   /**
@@ -95,11 +100,12 @@ export const WitnessValidators = {
    */
   safeDivision(dividend: bigint, divisor: bigint, context: string): bigint {
     if (divisor === 0n) {
-      throw new WitnessError(
-        `Division by zero in ${context}`,
-        { dividend, divisor, context }
-      );
+      throw new WitnessError(`Division by zero in ${context}`, {
+        dividend,
+        divisor,
+        context
+      })
     }
-    return dividend / divisor;
+    return dividend / divisor
   }
-};
+}

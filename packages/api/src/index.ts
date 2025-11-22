@@ -249,11 +249,17 @@ export class StateraAPI implements DeployedStateraAPI {
     this.logger?.info(`Depositing collateral...`)
 
     // Check if this is a new depositor by checking private state
-    const privateState = await this.providers.privateStateProvider.get(stateraPrivateStateId)
-    const isNewDepositor = !privateState?.mint_metadata ||
-                           (privateState.mint_metadata.collateral === 0n && privateState.mint_metadata.debt === 0n)
+    const privateState = await this.providers.privateStateProvider.get(
+      stateraPrivateStateId
+    )
+    const isNewDepositor =
+      !privateState?.mint_metadata ||
+      (privateState.mint_metadata.collateral === 0n &&
+        privateState.mint_metadata.debt === 0n)
 
-    this.logger?.debug(`Depositor status: ${isNewDepositor ? 'NEW' : 'EXISTING'}`)
+    this.logger?.debug(
+      `Depositor status: ${isNewDepositor ? 'NEW' : 'EXISTING'}`
+    )
 
     const deposit_unit_specks = amount * 1_000_000
     const txData =
@@ -488,9 +494,13 @@ export class StateraAPI implements DeployedStateraAPI {
     this.logger?.info('Depositing to stake pool...')
 
     // Check if this is a new staker by checking private state
-    const privateState = await this.providers.privateStateProvider.get(stateraPrivateStateId)
-    const isNewStaker = !privateState?.stake_metadata ||
-                        (privateState.stake_metadata.effectiveBalance === 0n && privateState.stake_metadata.stakeReward === 0n)
+    const privateState = await this.providers.privateStateProvider.get(
+      stateraPrivateStateId
+    )
+    const isNewStaker =
+      !privateState?.stake_metadata ||
+      (privateState.stake_metadata.effectiveBalance === 0n &&
+        privateState.stake_metadata.stakeReward === 0n)
 
     this.logger?.debug(`Staker status: ${isNewStaker ? 'NEW' : 'EXISTING'}`)
 
@@ -681,13 +691,17 @@ export class StateraAPI implements DeployedStateraAPI {
     // Validate existing private state
     if (existingPrivateState) {
       // Check if secret_key is valid
-      if (existingPrivateState.secret_key &&
-          existingPrivateState.secret_key.length === 32 &&
-          existingPrivateState.secret_key instanceof Uint8Array) {
+      if (
+        existingPrivateState.secret_key &&
+        existingPrivateState.secret_key.length === 32 &&
+        existingPrivateState.secret_key instanceof Uint8Array
+      ) {
         return existingPrivateState
       }
       // If secret_key is invalid, fall through to create new state
-      console.warn('Existing private state has invalid secret_key, recreating...')
+      console.warn(
+        'Existing private state has invalid secret_key, recreating...'
+      )
     }
 
     // Create new private state with random secret key
@@ -699,7 +713,10 @@ export class StateraAPI implements DeployedStateraAPI {
     const newPrivateState = createPrivateStateraState(secretKey)
 
     // Save the new private state immediately
-    await providers.privateStateProvider.set(stateraPrivateStateId, newPrivateState)
+    await providers.privateStateProvider.set(
+      stateraPrivateStateId,
+      newPrivateState
+    )
 
     return newPrivateState
   }

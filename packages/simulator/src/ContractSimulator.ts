@@ -2,30 +2,30 @@ import type {
   CircuitContext,
   ContractAddress,
   ZswapLocalState,
-  EncodedQualifiedCoinInfo,
-} from '@midnight-ntwrk/compact-runtime';
+  EncodedQualifiedCoinInfo
+} from '@midnight-ntwrk/compact-runtime'
 import {
   constructorContext,
   decodeZswapLocalState,
   QueryContext,
-  sampleContractAddress,
-} from '@midnight-ntwrk/compact-runtime';
-import type * as ocrt from '@midnight-ntwrk/onchain-runtime';
-import { encodeCoinPublicKey } from '@midnight-ntwrk/onchain-runtime';
-import { TokenType } from '@midnight-ntwrk/zswap';
-import { encodeTokenType } from '@midnight-ntwrk/ledger';
+  sampleContractAddress
+} from '@midnight-ntwrk/compact-runtime'
+import type * as ocrt from '@midnight-ntwrk/onchain-runtime'
+import { encodeCoinPublicKey } from '@midnight-ntwrk/onchain-runtime'
+import { TokenType } from '@midnight-ntwrk/zswap'
+import { encodeTokenType } from '@midnight-ntwrk/ledger'
 import type {
   ContractWithCircuits,
   ContractConfig,
-  OutputInfo,
-} from './types.js';
-import { logger } from './logger.js';
-import { SnapshotManager } from './snapshot.js';
+  OutputInfo
+} from './types.js'
+import { logger } from './logger.js'
+import { SnapshotManager } from './snapshot.js'
 import {
   CircuitNotFoundError,
   MultipleOutputsError,
-  CircuitExecutionError,
-} from './errors.js';
+  CircuitExecutionError
+} from './errors.js'
 
 /**
  * Generic contract simulator for Midnight Compact contracts
@@ -37,10 +37,10 @@ import {
  * @template TPrivateState - The type of the contract's private state
  */
 export class ContractSimulator<TPrivateState> {
-  readonly contract: ContractWithCircuits<TPrivateState>;
-  readonly contractAddress: ContractAddress;
-  protected circuitContext: CircuitContext<TPrivateState>;
-  private snapshots: SnapshotManager<TPrivateState>;
+  readonly contract: ContractWithCircuits<TPrivateState>
+  readonly contractAddress: ContractAddress
+  protected circuitContext: CircuitContext<TPrivateState>
+  private snapshots: SnapshotManager<TPrivateState>
 
   /**
    * Creates a new contract simulator instance
@@ -52,26 +52,37 @@ export class ContractSimulator<TPrivateState> {
     contract: ContractWithCircuits<TPrivateState>,
     config: ContractConfig<TPrivateState>
   ) {
-    this.contract = contract;
-    this.contractAddress = config.contractAddress;
-    this.snapshots = new SnapshotManager<TPrivateState>();
+    this.contract = contract
+    this.contractAddress = config.contractAddress
+    this.snapshots = new SnapshotManager<TPrivateState>()
 
     logger.debug('Initializing contract simulator', {
       contractAddress: config.contractAddress,
-      hasCoinPublicKey: !!config.coinPublicKey,
-    });
+      hasCoinPublicKey: !!config.coinPublicKey
+    })
 
     const constructorCtx = constructorContext(
       config.initialPrivateState,
       config.coinPublicKey
-    );
+    )
 
     // Some contracts expect nonce as a separate parameter, others don't
     // If constructorArgs is provided, we assume the contract doesn't take nonce separately
-    const { currentPrivateState, currentContractState, currentZswapLocalState } =
+    const {
+      currentPrivateState,
+      currentContractState,
+      currentZswapLocalState
+    } =
       config.constructorArgs && config.constructorArgs.length > 0
-        ? (this.contract.initialState as any)(constructorCtx, ...config.constructorArgs)
-        : this.contract.initialState(constructorCtx, config.nonce, ...(config.constructorArgs || []));
+        ? (this.contract.initialState as any)(
+            constructorCtx,
+            ...config.constructorArgs
+          )
+        : this.contract.initialState(
+            constructorCtx,
+            config.nonce,
+            ...(config.constructorArgs || [])
+          )
 
     this.circuitContext = {
       currentPrivateState,
@@ -80,10 +91,10 @@ export class ContractSimulator<TPrivateState> {
       transactionContext: new QueryContext(
         currentContractState.data,
         config.contractAddress
-      ),
-    };
+      )
+    }
 
-    logger.debug('Contract simulator initialized successfully');
+    logger.debug('Contract simulator initialized successfully')
   }
 
   /**
@@ -96,8 +107,8 @@ export class ContractSimulator<TPrivateState> {
   ): ContractSimulator<TPrivateState> {
     return new ContractSimulator(contract, {
       ...config,
-      contractAddress: sampleContractAddress(),
-    });
+      contractAddress: sampleContractAddress()
+    })
   }
 
   /**
@@ -111,19 +122,19 @@ export class ContractSimulator<TPrivateState> {
   as(privateState: TPrivateState, coinPublicKey?: string): this {
     logger.trace('Switching context', {
       hasCoinPublicKey: !!coinPublicKey,
-      coinPublicKeyProvided: coinPublicKey !== undefined,
-    });
+      coinPublicKeyProvided: coinPublicKey !== undefined
+    })
 
     this.circuitContext = {
       ...this.circuitContext,
-      currentPrivateState: privateState,
-    };
+      currentPrivateState: privateState
+    }
 
     // If a new public key is provided, update the ZSwap local state
     // ownPublicKey() reads from circuitContext.currentZswapLocalState.coinPublicKey
     if (coinPublicKey !== undefined) {
-      const encodedPublicKey = { bytes: encodeCoinPublicKey(coinPublicKey) };
-      logger.trace('Setting coinPublicKey in ZSwap local state');
+      const encodedPublicKey = { bytes: encodeCoinPublicKey(coinPublicKey) }
+      logger.trace('Setting coinPublicKey in ZSwap local state')
 
       this.circuitContext = {
         ...this.circuitContext,
@@ -131,42 +142,44 @@ export class ContractSimulator<TPrivateState> {
           ...this.circuitContext.currentZswapLocalState,
           coinPublicKey: encodedPublicKey as any
         }
-      };
+      }
     }
 
-    return this;
+    return this
   }
 
   /**
    * Gets the current ledger state
    */
   getLedger(): any {
-    return this.circuitContext.transactionContext.state;
+    return this.circuitContext.transactionContext.state
   }
 
   /**
    * Gets the current private state
    */
   getPrivateState(): TPrivateState {
-    return this.circuitContext.currentPrivateState;
+    return this.circuitContext.currentPrivateState
   }
 
   /**
    * Gets the current ZSwap local state containing outputs
    */
   getZswapLocalState(): ZswapLocalState {
-    return decodeZswapLocalState(this.circuitContext.currentZswapLocalState);
+    return decodeZswapLocalState(this.circuitContext.currentZswapLocalState)
   }
 
   /**
    * Gets all outputs from the last circuit execution
    */
   getOutputs(): OutputInfo[] {
-    const zswapState = this.getZswapLocalState();
+    const zswapState = this.getZswapLocalState()
     return zswapState.outputs.map((output) => ({
-      recipient: output.recipient.is_left ? output.recipient.left : output.recipient.right,
-      coinInfo: output.coinInfo,
-    }));
+      recipient: output.recipient.is_left
+        ? output.recipient.left
+        : output.recipient.right,
+      coinInfo: output.coinInfo
+    }))
   }
 
   /**
@@ -176,19 +189,21 @@ export class ContractSimulator<TPrivateState> {
    * @param recipient - The recipient's coin public key
    * @returns The coin info for the recipient, or undefined if not found
    */
-  getOutputByRecipient(recipient: ocrt.CoinPublicKey): ocrt.CoinInfo | undefined {
-    const zswapState = this.getZswapLocalState();
+  getOutputByRecipient(
+    recipient: ocrt.CoinPublicKey
+  ): ocrt.CoinInfo | undefined {
+    const zswapState = this.getZswapLocalState()
     const outputs = zswapState.outputs.filter(
       (output) => output.recipient.left === recipient
-    );
+    )
 
     if (outputs.length === 0) {
-      return undefined;
+      return undefined
     } else if (outputs.length > 1) {
-      throw new MultipleOutputsError(recipient, outputs.length);
+      throw new MultipleOutputsError(recipient, outputs.length)
     }
 
-    return outputs[0].coinInfo;
+    return outputs[0].coinInfo
   }
 
   /**
@@ -198,10 +213,10 @@ export class ContractSimulator<TPrivateState> {
    * @returns Array of coin infos for the recipient
    */
   getOutputsByRecipient(recipient: ocrt.CoinPublicKey): ocrt.CoinInfo[] {
-    const zswapState = this.getZswapLocalState();
+    const zswapState = this.getZswapLocalState()
     return zswapState.outputs
       .filter((output) => output.recipient.left === recipient)
-      .map((output) => output.coinInfo);
+      .map((output) => output.coinInfo)
   }
 
   /**
@@ -212,10 +227,10 @@ export class ContractSimulator<TPrivateState> {
    * @returns The total balance of the token type
    */
   getBalance(recipient: ocrt.CoinPublicKey, tokenType: TokenType): bigint {
-    const outputs = this.getOutputsByRecipient(recipient);
+    const outputs = this.getOutputsByRecipient(recipient)
     return outputs
       .filter((output) => output.type === tokenType)
-      .reduce((sum, output) => sum + output.value, 0n);
+      .reduce((sum, output) => sum + output.value, 0n)
   }
 
   /**
@@ -225,15 +240,15 @@ export class ContractSimulator<TPrivateState> {
    * @returns A record mapping token types to their balances
    */
   getAllBalances(recipient: ocrt.CoinPublicKey): Record<string, bigint> {
-    const outputs = this.getOutputsByRecipient(recipient);
-    const balances: Record<string, bigint> = {};
+    const outputs = this.getOutputsByRecipient(recipient)
+    const balances: Record<string, bigint> = {}
 
     for (const output of outputs) {
-      const tokenKey = output.type.toString();
-      balances[tokenKey] = (balances[tokenKey] || 0n) + output.value;
+      const tokenKey = output.type.toString()
+      balances[tokenKey] = (balances[tokenKey] || 0n) + output.value
     }
 
-    return balances;
+    return balances
   }
 
   /**
@@ -242,16 +257,16 @@ export class ContractSimulator<TPrivateState> {
   private nonceToBytes(nonce: string | Uint8Array): Uint8Array {
     // If already Uint8Array, return as-is
     if (nonce instanceof Uint8Array) {
-      return nonce;
+      return nonce
     }
 
     // Convert hex string to bytes
-    const cleanHex = nonce.replace(/^0x/, '');
-    const bytes = new Uint8Array(cleanHex.length / 2);
+    const cleanHex = nonce.replace(/^0x/, '')
+    const bytes = new Uint8Array(cleanHex.length / 2)
     for (let i = 0; i < cleanHex.length; i += 2) {
-      bytes[i / 2] = parseInt(cleanHex.substr(i, 2), 16);
+      bytes[i / 2] = parseInt(cleanHex.substr(i, 2), 16)
     }
-    return bytes;
+    return bytes
   }
 
   /**
@@ -264,11 +279,11 @@ export class ContractSimulator<TPrivateState> {
    */
   addCoinInput(coinInfo: ocrt.CoinInfo): void {
     logger.trace('Adding coin input', {
-      value: coinInfo.value,
-    });
+      value: coinInfo.value
+    })
 
     // Work directly with the encoded state to avoid type issues
-    const currentEncoded = this.circuitContext.currentZswapLocalState;
+    const currentEncoded = this.circuitContext.currentZswapLocalState
 
     // Create an EncodedQualifiedCoinInfo for the ZSwap local state
     // This is what the circuit runtime expects in the inputs array
@@ -276,8 +291,8 @@ export class ContractSimulator<TPrivateState> {
       nonce: this.nonceToBytes(coinInfo.nonce),
       color: encodeTokenType(coinInfo.type),
       value: coinInfo.value,
-      mt_index: 0n, // Default to 0 for testing
-    };
+      mt_index: 0n // Default to 0 for testing
+    }
 
     // Add the encoded coin to inputs so receive() can find it
     this.circuitContext = {
@@ -286,7 +301,7 @@ export class ContractSimulator<TPrivateState> {
         ...currentEncoded,
         inputs: [...currentEncoded.inputs, encodedCoin]
       }
-    };
+    }
   }
 
   /**
@@ -294,14 +309,14 @@ export class ContractSimulator<TPrivateState> {
    * Useful for resetting state between test operations
    */
   clearCoinInputs(): void {
-    logger.trace('Clearing coin inputs');
+    logger.trace('Clearing coin inputs')
     this.circuitContext = {
       ...this.circuitContext,
       currentZswapLocalState: {
         ...this.circuitContext.currentZswapLocalState,
         inputs: []
       }
-    };
+    }
   }
 
   /**
@@ -312,21 +327,21 @@ export class ContractSimulator<TPrivateState> {
    * @returns The result of the circuit execution
    */
   executeCircuit(circuitName: string, ...args: any[]): any {
-    const circuit = this.contract.circuits[circuitName];
+    const circuit = this.contract.circuits[circuitName]
     if (!circuit) {
-      throw new CircuitNotFoundError(circuitName, true);
+      throw new CircuitNotFoundError(circuitName, true)
     }
 
-    logger.debug(`Executing circuit: ${circuitName}`);
+    logger.debug(`Executing circuit: ${circuitName}`)
 
     try {
-      const result = circuit(this.circuitContext, ...args);
-      this.circuitContext = result.context;
-      logger.debug(`Circuit ${circuitName} completed successfully`);
-      return result;
+      const result = circuit(this.circuitContext, ...args)
+      this.circuitContext = result.context
+      logger.debug(`Circuit ${circuitName} completed successfully`)
+      return result
     } catch (error) {
-      logger.error(`Circuit ${circuitName} failed:`, (error as Error).message);
-      throw new CircuitExecutionError(circuitName, error as Error);
+      logger.error(`Circuit ${circuitName} failed:`, (error as Error).message)
+      throw new CircuitExecutionError(circuitName, error as Error)
     }
   }
 
@@ -338,21 +353,24 @@ export class ContractSimulator<TPrivateState> {
    * @returns The result of the circuit execution
    */
   executeImpureCircuit(circuitName: string, ...args: any[]): any {
-    const circuit = this.contract.impureCircuits[circuitName];
+    const circuit = this.contract.impureCircuits[circuitName]
     if (!circuit) {
-      throw new CircuitNotFoundError(circuitName, false);
+      throw new CircuitNotFoundError(circuitName, false)
     }
 
-    logger.debug(`Executing impure circuit: ${circuitName}`);
+    logger.debug(`Executing impure circuit: ${circuitName}`)
 
     try {
-      const result = circuit(this.circuitContext, ...args);
-      this.circuitContext = result.context;
-      logger.debug(`Impure circuit ${circuitName} completed successfully`);
-      return result;
+      const result = circuit(this.circuitContext, ...args)
+      this.circuitContext = result.context
+      logger.debug(`Impure circuit ${circuitName} completed successfully`)
+      return result
     } catch (error) {
-      logger.error(`Impure circuit ${circuitName} failed:`, (error as Error).message);
-      throw new CircuitExecutionError(circuitName, error as Error);
+      logger.error(
+        `Impure circuit ${circuitName} failed:`,
+        (error as Error).message
+      )
+      throw new CircuitExecutionError(circuitName, error as Error)
     }
   }
 
@@ -361,7 +379,7 @@ export class ContractSimulator<TPrivateState> {
    * Useful for advanced operations and debugging
    */
   getContext(): CircuitContext<TPrivateState> {
-    return this.circuitContext;
+    return this.circuitContext
   }
 
   /**
@@ -369,7 +387,7 @@ export class ContractSimulator<TPrivateState> {
    * Use with caution - this is for advanced operations
    */
   setContext(context: CircuitContext<TPrivateState>): void {
-    this.circuitContext = context;
+    this.circuitContext = context
   }
 
   // ==================== SNAPSHOT MANAGEMENT ====================
@@ -381,9 +399,9 @@ export class ContractSimulator<TPrivateState> {
    * @returns The ID of the created snapshot
    */
   createSnapshot(id?: string): string {
-    const snapshotId = this.snapshots.create(this.circuitContext, id);
-    logger.debug(`Created snapshot: ${snapshotId}`);
-    return snapshotId;
+    const snapshotId = this.snapshots.create(this.circuitContext, id)
+    logger.debug(`Created snapshot: ${snapshotId}`)
+    return snapshotId
   }
 
   /**
@@ -392,8 +410,8 @@ export class ContractSimulator<TPrivateState> {
    * @param id - The ID of the snapshot to restore
    */
   restoreSnapshot(id: string): void {
-    logger.debug(`Restoring snapshot: ${id}`);
-    this.circuitContext = this.snapshots.restore(id);
+    logger.debug(`Restoring snapshot: ${id}`)
+    this.circuitContext = this.snapshots.restore(id)
   }
 
   /**
@@ -403,26 +421,26 @@ export class ContractSimulator<TPrivateState> {
    * @returns True if the snapshot was deleted
    */
   deleteSnapshot(id: string): boolean {
-    const deleted = this.snapshots.delete(id);
+    const deleted = this.snapshots.delete(id)
     if (deleted) {
-      logger.debug(`Deleted snapshot: ${id}`);
+      logger.debug(`Deleted snapshot: ${id}`)
     }
-    return deleted;
+    return deleted
   }
 
   /**
    * Gets all snapshot IDs
    */
   getSnapshotIds(): string[] {
-    return this.snapshots.getSnapshotIds();
+    return this.snapshots.getSnapshotIds()
   }
 
   /**
    * Clears all snapshots
    */
   clearSnapshots(): void {
-    this.snapshots.clear();
-    logger.debug('Cleared all snapshots');
+    this.snapshots.clear()
+    logger.debug('Cleared all snapshots')
   }
 
   // ==================== INSPECTION UTILITIES ====================
@@ -434,8 +452,8 @@ export class ContractSimulator<TPrivateState> {
    */
   inspect(): any {
     // Import dynamically to avoid circular dependency
-    const { LedgerInspector } = require('./LedgerInspector.js');
-    return new LedgerInspector(this);
+    const { LedgerInspector } = require('./LedgerInspector.js')
+    return new LedgerInspector(this)
   }
 
   /**
@@ -443,7 +461,7 @@ export class ContractSimulator<TPrivateState> {
    * Convenience method that creates an inspector and prints
    */
   printLedgerSummary(): void {
-    const inspector = this.inspect();
-    inspector.printSummary();
+    const inspector = this.inspect()
+    inspector.printSummary()
   }
 }

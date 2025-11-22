@@ -11,7 +11,7 @@ export enum SimulatorErrorCode {
   WALLET_NOT_FOUND = 'WALLET_NOT_FOUND',
   INVALID_TOKEN_TYPE = 'INVALID_TOKEN_TYPE',
   CIRCUIT_EXECUTION_FAILED = 'CIRCUIT_EXECUTION_FAILED',
-  INVALID_SNAPSHOT = 'INVALID_SNAPSHOT',
+  INVALID_SNAPSHOT = 'INVALID_SNAPSHOT'
 }
 
 export class SimulatorError extends Error {
@@ -20,19 +20,21 @@ export class SimulatorError extends Error {
     message: string,
     public details?: any
   ) {
-    super(message);
-    this.name = 'SimulatorError';
+    super(message)
+    this.name = 'SimulatorError'
   }
 }
 
 export class CircuitNotFoundError extends SimulatorError {
   constructor(circuitName: string, isPure: boolean = true) {
     super(
-      isPure ? SimulatorErrorCode.CIRCUIT_NOT_FOUND : SimulatorErrorCode.IMPURE_CIRCUIT_NOT_FOUND,
+      isPure
+        ? SimulatorErrorCode.CIRCUIT_NOT_FOUND
+        : SimulatorErrorCode.IMPURE_CIRCUIT_NOT_FOUND,
       `${isPure ? 'Circuit' : 'Impure circuit'} '${circuitName}' not found in contract`,
       { circuitName, isPure }
-    );
-    this.name = 'CircuitNotFoundError';
+    )
+    this.name = 'CircuitNotFoundError'
   }
 }
 
@@ -42,8 +44,8 @@ export class MultipleOutputsError extends SimulatorError {
       SimulatorErrorCode.MULTIPLE_OUTPUTS_FOUND,
       `Multiple outputs (${count}) found for recipient ${recipient.slice(0, 8)}..., use getOutputsByRecipient instead`,
       { recipient, count }
-    );
-    this.name = 'MultipleOutputsError';
+    )
+    this.name = 'MultipleOutputsError'
   }
 }
 
@@ -53,8 +55,8 @@ export class OutputNotFoundError extends SimulatorError {
       SimulatorErrorCode.OUTPUT_NOT_FOUND,
       `No output found for recipient ${recipient.slice(0, 8)}...`,
       { recipient }
-    );
-    this.name = 'OutputNotFoundError';
+    )
+    this.name = 'OutputNotFoundError'
   }
 }
 
@@ -64,8 +66,8 @@ export class WalletNotFoundError extends SimulatorError {
       SimulatorErrorCode.WALLET_NOT_FOUND,
       `Wallet '${walletName}' not found`,
       { walletName }
-    );
-    this.name = 'WalletNotFoundError';
+    )
+    this.name = 'WalletNotFoundError'
   }
 }
 
@@ -75,7 +77,7 @@ export class CircuitExecutionError extends SimulatorError {
       SimulatorErrorCode.CIRCUIT_EXECUTION_FAILED,
       `Circuit '${circuitName}' execution failed: ${originalError.message}`,
       { circuitName, originalError }
-    );
-    this.name = 'CircuitExecutionError';
+    )
+    this.name = 'CircuitExecutionError'
   }
 }

@@ -25,8 +25,8 @@ export const DepositAmounts = {
   LARGE: 5000n,
 
   /** Very large deposit for stress tests (10000 ADA) */
-  VERY_LARGE: 10000n,
-} as const;
+  VERY_LARGE: 10000n
+} as const
 
 /**
  * Common mint amounts for different test scenarios
@@ -51,8 +51,8 @@ export const MintAmounts = {
   MEDIUM: 1000n,
 
   /** Large mint (5000 sUSD) */
-  LARGE: 5000n,
-} as const;
+  LARGE: 5000n
+} as const
 
 /**
  * Common stake amounts for stability pool
@@ -68,8 +68,8 @@ export const StakeAmounts = {
   STANDARD: 10000n,
 
   /** Large stake (50000 sUSD) */
-  LARGE: 50000n,
-} as const;
+  LARGE: 50000n
+} as const
 
 /**
  * Protocol fee configuration (basis points - 1 bp = 0.01%)
@@ -92,9 +92,9 @@ export const Fees = {
 
   /** Calculate fee amount from principal */
   calculateFee: (principal: bigint, feeBps: bigint): bigint => {
-    return (principal * feeBps) / 10000n;
-  },
-} as const;
+    return (principal * feeBps) / 10000n
+  }
+} as const
 
 /**
  * Protocol threshold configuration
@@ -128,17 +128,29 @@ export const Thresholds = {
   MINIMUM_DEBT: 100n,
 
   /** Calculate health factor */
-  calculateHealthFactor: (collateral: bigint, debt: bigint, liquidationThreshold: bigint): bigint => {
-    if (debt === 0n) return 999999n; // Infinite health factor
-    return (collateral * liquidationThreshold) / (debt * 100n);
+  calculateHealthFactor: (
+    collateral: bigint,
+    debt: bigint,
+    liquidationThreshold: bigint
+  ): bigint => {
+    if (debt === 0n) return 999999n // Infinite health factor
+    return (collateral * liquidationThreshold) / (debt * 100n)
   },
 
   /** Check if position is healthy (HF >= 1) */
-  isHealthy: (collateral: bigint, debt: bigint, liquidationThreshold: bigint): boolean => {
-    const hf = Thresholds.calculateHealthFactor(collateral, debt, liquidationThreshold);
-    return hf >= 1n;
-  },
-} as const;
+  isHealthy: (
+    collateral: bigint,
+    debt: bigint,
+    liquidationThreshold: bigint
+  ): boolean => {
+    const hf = Thresholds.calculateHealthFactor(
+      collateral,
+      debt,
+      liquidationThreshold
+    )
+    return hf >= 1n
+  }
+} as const
 
 /**
  * Unit conversion constants
@@ -151,8 +163,8 @@ export const Units = {
   toSpeck: (tdust: bigint): bigint => tdust * Units.SPECK_PER_TDUST,
 
   /** Convert SPECK to tDUST */
-  toTDust: (speck: bigint): bigint => speck / Units.SPECK_PER_TDUST,
-} as const;
+  toTDust: (speck: bigint): bigint => speck / Units.SPECK_PER_TDUST
+} as const
 
 /**
  * Test scenario configurations
@@ -164,7 +176,8 @@ export const Scenarios = {
     mint: MintAmounts.STANDARD,
     lvt: Thresholds.DEFAULT_LVT,
     liquidationThreshold: Thresholds.DEFAULT_LIQUIDATION,
-    description: '1000 ADA collateral, 500 sUSD debt at 70% LVT, 80% liquidation threshold',
+    description:
+      '1000 ADA collateral, 500 sUSD debt at 70% LVT, 80% liquidation threshold'
   },
 
   /** Position at exact liquidation boundary */
@@ -173,7 +186,8 @@ export const Scenarios = {
     mint: MintAmounts.AT_LVT,
     lvt: Thresholds.DEFAULT_LVT,
     liquidationThreshold: Thresholds.LOW_LIQUIDATION, // Set to 70% to make 70% debt ratio liquidatable
-    description: '1000 ADA collateral, 700 sUSD debt, becomes liquidatable when threshold lowered to 70%',
+    description:
+      '1000 ADA collateral, 700 sUSD debt, becomes liquidatable when threshold lowered to 70%'
   },
 
   /** Underwater position ready for liquidation */
@@ -182,7 +196,7 @@ export const Scenarios = {
     mint: MintAmounts.AT_LVT,
     lvt: Thresholds.DEFAULT_LVT,
     liquidationThreshold: Thresholds.LOW_LIQUIDATION,
-    description: '1000 ADA collateral, 703.5 sUSD debt (with fee), HF < 1',
+    description: '1000 ADA collateral, 703.5 sUSD debt (with fee), HF < 1'
   },
 
   /** Small position for testing minimums */
@@ -191,7 +205,7 @@ export const Scenarios = {
     mint: MintAmounts.MINIMUM,
     lvt: Thresholds.DEFAULT_LVT,
     liquidationThreshold: Thresholds.DEFAULT_LIQUIDATION,
-    description: '100 ADA collateral, 100 sUSD debt (minimum)',
+    description: '100 ADA collateral, 100 sUSD debt (minimum)'
   },
 
   /** Large position for stress testing */
@@ -200,9 +214,9 @@ export const Scenarios = {
     mint: MintAmounts.LARGE,
     lvt: Thresholds.DEFAULT_LVT,
     liquidationThreshold: Thresholds.DEFAULT_LIQUIDATION,
-    description: '10000 ADA collateral, 5000 sUSD debt',
-  },
-} as const;
+    description: '10000 ADA collateral, 5000 sUSD debt'
+  }
+} as const
 
 /**
  * Oracle price configurations (in SPECK per ADA)
@@ -218,8 +232,8 @@ export const OraclePrices = {
   LOW: 500000n,
 
   /** Very low price for testing liquidations: $0.30 per ADA */
-  VERY_LOW: 300000n,
-} as const;
+  VERY_LOW: 300000n
+} as const
 
 /**
  * Time-based constants
@@ -232,8 +246,8 @@ export const Time = {
   ONE_WEEK: 604800n,
 
   /** One month in seconds (30 days) */
-  ONE_MONTH: 2592000n,
-} as const;
+  ONE_MONTH: 2592000n
+} as const
 
 /**
  * Helper to calculate expected values
@@ -242,16 +256,19 @@ export const Calculations = {
   /**
    * Calculate expected debt with borrowing fee
    */
-  calculateTotalDebt: (mintAmount: bigint, feeBps: bigint = Fees.BORROWING_FEE_BPS): bigint => {
-    const fee = Fees.calculateFee(mintAmount, feeBps);
-    return mintAmount + fee;
+  calculateTotalDebt: (
+    mintAmount: bigint,
+    feeBps: bigint = Fees.BORROWING_FEE_BPS
+  ): bigint => {
+    const fee = Fees.calculateFee(mintAmount, feeBps)
+    return mintAmount + fee
   },
 
   /**
    * Calculate maximum mintable amount at given LVT
    */
   calculateMaxMint: (collateral: bigint, lvt: bigint): bigint => {
-    return (collateral * lvt) / 100n;
+    return (collateral * lvt) / 100n
   },
 
   /**
@@ -262,7 +279,7 @@ export const Calculations = {
     totalDebt: bigint,
     debtToLiquidate: bigint
   ): bigint => {
-    return (totalCollateral * debtToLiquidate) / totalDebt;
+    return (totalCollateral * debtToLiquidate) / totalDebt
   },
 
   /**
@@ -272,10 +289,10 @@ export const Calculations = {
     collateralSeized: bigint,
     incentiveBps: bigint = Fees.LIQUIDATION_INCENTIVE_BPS
   ): bigint => {
-    const collateralInSpeck = Units.toSpeck(collateralSeized);
-    return (collateralInSpeck * incentiveBps) / 10000n;
-  },
-} as const;
+    const collateralInSpeck = Units.toSpeck(collateralSeized)
+    return (collateralInSpeck * incentiveBps) / 10000n
+  }
+} as const
 
 /**
  * Pre-configured test wallets identifiers
@@ -288,8 +305,8 @@ export const TestWallets = {
   BORROWER: 'user_0',
   STAKER: 'user_1',
   LIQUIDATOR: 'user_2',
-  REDEEMER: 'user_3',
-} as const;
+  REDEEMER: 'user_3'
+} as const
 
 /**
  * Export a convenience object with all test data
@@ -305,8 +322,8 @@ export const TestData = {
   prices: OraclePrices,
   time: Time,
   calc: Calculations,
-  wallets: TestWallets,
-} as const;
+  wallets: TestWallets
+} as const
 
 // Type export for scenarios
-export type TestScenario = typeof Scenarios[keyof typeof Scenarios];
+export type TestScenario = (typeof Scenarios)[keyof typeof Scenarios]

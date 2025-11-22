@@ -4,14 +4,14 @@
  * Functions for creating and managing private states in tests
  */
 
-import type { ContractSimulator, Wallet } from '@statera/simulator';
-import type { TokenType } from '@midnight-ntwrk/zswap';
+import type { ContractSimulator, Wallet } from '@statera/simulator'
+import type { TokenType } from '@midnight-ntwrk/zswap'
 import {
   createPrivateStateraState,
   type StateraPrivateState,
   type MintMetadata
-} from '../../index.js';
-import { createMockStakePoolCoin } from './coin-helpers.js';
+} from '../../index.js'
+import { createMockStakePoolCoin } from './coin-helpers.js'
 
 /**
  * Creates a basic private state for a wallet
@@ -22,17 +22,20 @@ export function createPrivateStateForWallet(
   simulator?: ContractSimulator<StateraPrivateState>
 ): StateraPrivateState {
   if (!simulator) {
-    return createPrivateStateraState(wallet.secretKey, wallet.secretKey);
+    return createPrivateStateraState(wallet.secretKey, wallet.secretKey)
   }
 
-  const currentState = simulator.getPrivateState();
-  const baseState = createPrivateStateraState(wallet.secretKey, currentState.admin_secret);
+  const currentState = simulator.getPrivateState()
+  const baseState = createPrivateStateraState(
+    wallet.secretKey,
+    currentState.admin_secret
+  )
 
   return {
     ...baseState,
     admin_metadata: currentState.admin_metadata,
     admin_secret: currentState.admin_secret
-  };
+  }
 }
 
 /**
@@ -42,13 +45,13 @@ export function createAdminPrivateState(
   simulator: ContractSimulator<StateraPrivateState>,
   adminWallet: Wallet
 ): StateraPrivateState {
-  const currentState = simulator.getPrivateState();
+  const currentState = simulator.getPrivateState()
 
   return {
     ...currentState,
     secret_key: adminWallet.secretKey,
     admin_secret: currentState.admin_secret
-  };
+  }
 }
 
 /**
@@ -58,7 +61,10 @@ export function asAdmin(
   simulator: ContractSimulator<StateraPrivateState>,
   adminWallet: Wallet
 ): ContractSimulator<StateraPrivateState> {
-  return simulator.as(createAdminPrivateState(simulator, adminWallet), adminWallet.coinPublicKey);
+  return simulator.as(
+    createAdminPrivateState(simulator, adminWallet),
+    adminWallet.coinPublicKey
+  )
 }
 
 /**
@@ -70,7 +76,7 @@ export function getPrivateStateAfterDeposit(
   depositAmount: bigint,
   collateralTokenType?: TokenType
 ): StateraPrivateState {
-  const currentState = simulator.getPrivateState();
+  const currentState = simulator.getPrivateState()
 
   return {
     ...currentState,
@@ -81,13 +87,15 @@ export function getPrivateStateAfterDeposit(
       collateral: depositAmount,
       debt: 0n
     },
-    reserve_pool_coin: collateralTokenType ? {
-      nonce: new Uint8Array(32),
-      color: new Uint8Array(32),
-      value: 100000000000n,
-      mt_index: 0n
-    } : currentState.reserve_pool_coin
-  };
+    reserve_pool_coin: collateralTokenType
+      ? {
+          nonce: new Uint8Array(32),
+          color: new Uint8Array(32),
+          value: 100000000000n,
+          mt_index: 0n
+        }
+      : currentState.reserve_pool_coin
+  }
 }
 
 /**
@@ -98,7 +106,7 @@ export function createPrivateStateWithMintMetadata(
   collateral: bigint,
   debt: bigint
 ): StateraPrivateState {
-  const baseState = createPrivateStateraState(wallet.secretKey);
+  const baseState = createPrivateStateraState(wallet.secretKey)
 
   return {
     ...baseState,
@@ -106,7 +114,7 @@ export function createPrivateStateWithMintMetadata(
       collateral,
       debt
     }
-  };
+  }
 }
 
 /**
@@ -119,14 +127,14 @@ export function getPrivateStateAfterStake(
   sSUSDTokenType?: TokenType,
   additionalRewards: bigint = 0n
 ): StateraPrivateState {
-  const currentState = simulator.getPrivateState();
-  let entry_ADA_SUSD_index = 0n;
-  let entry_scale_factor = 1n;
+  const currentState = simulator.getPrivateState()
+  let entry_ADA_SUSD_index = 0n
+  let entry_scale_factor = 1n
 
   try {
-    const ledger = simulator.getLedger();
-    entry_ADA_SUSD_index = ledger.ADA_sUSD_index || 0n;
-    entry_scale_factor = ledger.cumulative_scaling_factor || 1n;
+    const ledger = simulator.getLedger()
+    entry_ADA_SUSD_index = ledger.ADA_sUSD_index || 0n
+    entry_scale_factor = ledger.cumulative_scaling_factor || 1n
   } catch (e) {
     // If we can't read from ledger, use the provided amount
   }
@@ -142,6 +150,8 @@ export function getPrivateStateAfterStake(
       entry_ADA_SUSD_index,
       entry_scale_factor
     },
-    stake_pool_coin: sSUSDTokenType ? createMockStakePoolCoin(sSUSDTokenType) : currentState.stake_pool_coin
-  };
+    stake_pool_coin: sSUSDTokenType
+      ? createMockStakePoolCoin(sSUSDTokenType)
+      : currentState.stake_pool_coin
+  }
 }

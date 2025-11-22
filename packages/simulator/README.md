@@ -20,13 +20,17 @@ yarn add @statera/simulator
 ## Quick Start
 
 ```typescript
-import { ContractSimulator, WalletManager, generateNonce } from '@statera/simulator';
-import { MyContract } from './my-contract';
+import {
+  ContractSimulator,
+  WalletManager,
+  generateNonce
+} from '@statera/simulator'
+import { MyContract } from './my-contract'
 
 // Create wallets
-const walletManager = new WalletManager();
-const adminWallet = walletManager.createWallet('admin');
-const userWallet = walletManager.createWallet('user');
+const walletManager = new WalletManager()
+const adminWallet = walletManager.createWallet('admin')
+const userWallet = walletManager.createWallet('user')
 
 // Deploy contract
 const simulator = ContractSimulator.deploy(new MyContract.Contract({}), {
@@ -34,23 +38,25 @@ const simulator = ContractSimulator.deploy(new MyContract.Contract({}), {
   nonce: generateNonce(),
   coinPublicKey: adminWallet.coinPublicKey,
   constructorArgs: [initParam1, initParam2]
-});
+})
 
 // Execute circuits as admin
-simulator.as({ secretKey: adminWallet.secretKey })
-  .executeImpureCircuit('mint', 1000n);
+simulator
+  .as({ secretKey: adminWallet.secretKey })
+  .executeImpureCircuit('mint', 1000n)
 
 // Execute circuits as user
-simulator.as({ secretKey: userWallet.secretKey })
-  .executeImpureCircuit('transfer', recipientPubKey, 100n);
+simulator
+  .as({ secretKey: userWallet.secretKey })
+  .executeImpureCircuit('transfer', recipientPubKey, 100n)
 
 // Check balances
-const balance = simulator.getBalance(userWallet.coinPublicKey, tokenType);
-console.log(`User balance: ${balance}`);
+const balance = simulator.getBalance(userWallet.coinPublicKey, tokenType)
+console.log(`User balance: ${balance}`)
 
 // Get outputs
-const outputs = simulator.getOutputs();
-console.log(`Generated ${outputs.length} outputs`);
+const outputs = simulator.getOutputs()
+console.log(`Generated ${outputs.length} outputs`)
 ```
 
 ## API Reference
@@ -135,89 +141,83 @@ import {
   BalanceTracker,
   generateNonce,
   pad
-} from '@statera/simulator';
-import { tokenType } from '@midnight-ntwrk/ledger';
-import { MyTokenContract } from './my-token-contract';
+} from '@statera/simulator'
+import { tokenType } from '@midnight-ntwrk/ledger'
+import { MyTokenContract } from './my-token-contract'
 
 describe('Token Contract Tests', () => {
-  let simulator: ContractSimulator<MyPrivateState>;
-  let walletManager: WalletManager;
-  let balanceTracker: BalanceTracker;
-  let adminWallet: Wallet;
-  let userWallet: Wallet;
-  let tokenColorType: TokenType;
+  let simulator: ContractSimulator<MyPrivateState>
+  let walletManager: WalletManager
+  let balanceTracker: BalanceTracker
+  let adminWallet: Wallet
+  let userWallet: Wallet
+  let tokenColorType: TokenType
 
   beforeEach(() => {
     // Setup wallets
-    walletManager = new WalletManager();
-    adminWallet = walletManager.createWallet('admin');
-    userWallet = walletManager.createWallet('user');
+    walletManager = new WalletManager()
+    adminWallet = walletManager.createWallet('admin')
+    userWallet = walletManager.createWallet('user')
 
     // Deploy contract
-    simulator = ContractSimulator.deploy(
-      new MyTokenContract.Contract({}),
-      {
-        initialPrivateState: { secretKey: adminWallet.secretKey },
-        nonce: generateNonce(),
-        coinPublicKey: adminWallet.coinPublicKey,
-        constructorArgs: [adminWallet.publicKey]
-      }
-    );
+    simulator = ContractSimulator.deploy(new MyTokenContract.Contract({}), {
+      initialPrivateState: { secretKey: adminWallet.secretKey },
+      nonce: generateNonce(),
+      coinPublicKey: adminWallet.coinPublicKey,
+      constructorArgs: [adminWallet.publicKey]
+    })
 
     // Calculate token type
-    tokenColorType = tokenType(
-      pad('my-token', 32),
-      simulator.contractAddress
-    );
+    tokenColorType = tokenType(pad('my-token', 32), simulator.contractAddress)
 
     // Setup balance tracker
-    balanceTracker = new BalanceTracker();
-  });
+    balanceTracker = new BalanceTracker()
+  })
 
   it('should mint tokens', () => {
     // Mint as admin
     simulator
       .as({ secretKey: adminWallet.secretKey })
-      .executeImpureCircuit('mint', 1000n);
+      .executeImpureCircuit('mint', 1000n)
 
     // Check balance
     const balance = simulator.getBalance(
       adminWallet.coinPublicKey,
       tokenColorType
-    );
-    expect(balance).toBe(1000n);
+    )
+    expect(balance).toBe(1000n)
 
     // Track balance
     balanceTracker.updateFromSimulator(
       simulator,
       adminWallet.coinPublicKey,
       'admin'
-    );
-    balanceTracker.printBalances('admin');
-  });
+    )
+    balanceTracker.printBalances('admin')
+  })
 
   it('should transfer tokens', () => {
     // Mint tokens
     simulator
       .as({ secretKey: adminWallet.secretKey })
-      .executeImpureCircuit('mint', 1000n);
+      .executeImpureCircuit('mint', 1000n)
 
     // Get coin for transfer
-    const coin = simulator.getOutputByRecipient(adminWallet.coinPublicKey);
+    const coin = simulator.getOutputByRecipient(adminWallet.coinPublicKey)
 
     // Transfer to user
     simulator
       .as({ secretKey: adminWallet.secretKey })
-      .executeImpureCircuit('transfer', userWallet.coinPublicKey, coin, 500n);
+      .executeImpureCircuit('transfer', userWallet.coinPublicKey, coin, 500n)
 
     // Check balances
     const userBalance = simulator.getBalance(
       userWallet.coinPublicKey,
       tokenColorType
-    );
-    expect(userBalance).toBe(500n);
-  });
-});
+    )
+    expect(userBalance).toBe(500n)
+  })
+})
 ```
 
 ## Best Practices

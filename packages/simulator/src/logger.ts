@@ -10,94 +10,94 @@ export enum LogLevel {
   WARN = 2,
   INFO = 3,
   DEBUG = 4,
-  TRACE = 5,
+  TRACE = 5
 }
 
 class Logger {
-  private level: LogLevel = LogLevel.WARN;
-  private prefix: string = '[Simulator]';
+  private level: LogLevel = LogLevel.WARN
+  private prefix: string = '[Simulator]'
 
   setLevel(level: LogLevel): void {
-    this.level = level;
+    this.level = level
   }
 
   getLevel(): LogLevel {
-    return this.level;
+    return this.level
   }
 
   setPrefix(prefix: string): void {
-    this.prefix = prefix;
+    this.prefix = prefix
   }
 
   error(message: string, ...args: any[]): void {
     if (this.level >= LogLevel.ERROR) {
-      console.error(`${this.prefix} ERROR:`, message, ...args);
+      console.error(`${this.prefix} ERROR:`, message, ...args)
     }
   }
 
   warn(message: string, ...args: any[]): void {
     if (this.level >= LogLevel.WARN) {
-      console.warn(`${this.prefix} WARN:`, message, ...args);
+      console.warn(`${this.prefix} WARN:`, message, ...args)
     }
   }
 
   info(message: string, ...args: any[]): void {
     if (this.level >= LogLevel.INFO) {
-      console.log(`${this.prefix} INFO:`, message, ...args);
+      console.log(`${this.prefix} INFO:`, message, ...args)
     }
   }
 
   debug(message: string, ...args: any[]): void {
     if (this.level >= LogLevel.DEBUG) {
-      console.log(`${this.prefix} DEBUG:`, message, ...args);
+      console.log(`${this.prefix} DEBUG:`, message, ...args)
     }
   }
 
   trace(message: string, ...args: any[]): void {
     if (this.level >= LogLevel.TRACE) {
-      console.log(`${this.prefix} TRACE:`, message, ...args);
+      console.log(`${this.prefix} TRACE:`, message, ...args)
     }
   }
 
   group(label: string): void {
     if (this.level >= LogLevel.DEBUG) {
-      console.group(`${this.prefix} ${label}`);
+      console.group(`${this.prefix} ${label}`)
     }
   }
 
   groupEnd(): void {
     if (this.level >= LogLevel.DEBUG) {
-      console.groupEnd();
+      console.groupEnd()
     }
   }
 }
 
-export const logger = new Logger();
+export const logger = new Logger()
 
 /**
  * Enable verbose logging for debugging
  */
 export function enableDebugLogging(): void {
-  logger.setLevel(LogLevel.DEBUG);
+  logger.setLevel(LogLevel.DEBUG)
 }
 
 /**
  * Enable trace logging (most verbose)
  */
 export function enableTraceLogging(): void {
-  logger.setLevel(LogLevel.TRACE);
+  logger.setLevel(LogLevel.TRACE)
 }
 
 /**
  * Disable all logging except errors
  */
 export function disableLogging(): void {
-  logger.setLevel(LogLevel.ERROR);
+  logger.setLevel(LogLevel.ERROR)
 }
 
 /**
  * Set to quiet mode (only warnings and errors)
  */
 export function setQuietMode(): void {
-  logger.setLevel(LogLevel.WARN);
+  logger.setLevel(LogLevel.WARN)
 }

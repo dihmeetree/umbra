@@ -8,42 +8,40 @@ import {
   LegacyCoinBuilder,
   MockGenerators,
   disableLogging
-} from '@statera/simulator';
+} from '@statera/simulator'
 
 // Disable debug logging for cleaner test output
-disableLogging();
-import { tokenType, encodeTokenType } from '@midnight-ntwrk/ledger';
-import { NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
-import { encodeCoinPublicKey } from '@midnight-ntwrk/onchain-runtime';
-import {
-  sampleContractAddress
-} from '@midnight-ntwrk/compact-runtime';
-import type { TokenType, ContractAddress } from '@midnight-ntwrk/zswap';
+disableLogging()
+import { tokenType, encodeTokenType } from '@midnight-ntwrk/ledger'
+import { NetworkId, setNetworkId } from '@midnight-ntwrk/midnight-js-network-id'
+import { encodeCoinPublicKey } from '@midnight-ntwrk/onchain-runtime'
+import { sampleContractAddress } from '@midnight-ntwrk/compact-runtime'
+import type { TokenType, ContractAddress } from '@midnight-ntwrk/zswap'
 import {
   Contract,
   createPrivateStateraState,
   witnesses,
   type StateraPrivateState,
   ledger
-} from '../index.js';
-import {  DebtPositionStatus } from '../managed/adaStateraProtocol/contract/index.cjs';
+} from '../index.js'
+import { DebtPositionStatus } from '../managed/adaStateraProtocol/contract/index.cjs'
 
 // Set network ID for testing
-setNetworkId(NetworkId.Undeployed);
+setNetworkId(NetworkId.Undeployed)
 
 /**
  * Test fixture containing all necessary components for Ada Statera Protocol testing
  */
 export interface StateraTestFixture {
-  simulator: ContractSimulator<StateraPrivateState>;
-  walletManager: WalletManager;
-  balanceTracker: BalanceTracker;
-  adminWallet: Wallet;
-  userWallets: Wallet[];
-  contractAddress: ContractAddress;
-  sSUSDTokenType: TokenType;
-  sADATokenType: TokenType;
-  collateralTokenType: TokenType;
+  simulator: ContractSimulator<StateraPrivateState>
+  walletManager: WalletManager
+  balanceTracker: BalanceTracker
+  adminWallet: Wallet
+  userWallets: Wallet[]
+  contractAddress: ContractAddress
+  sSUSDTokenType: TokenType
+  sADATokenType: TokenType
+  collateralTokenType: TokenType
 }
 
 /**
@@ -52,30 +50,35 @@ export interface StateraTestFixture {
  * @param numUsers - Number of user wallets to create (default: 3)
  * @returns Complete test fixture
  */
-export function createStateraTestFixture(numUsers: number = 3): StateraTestFixture {
+export function createStateraTestFixture(
+  numUsers: number = 3
+): StateraTestFixture {
   // Create wallet manager
-  const walletManager = new WalletManager();
+  const walletManager = new WalletManager()
 
   // Create admin wallet
-  const adminWallet = walletManager.createWallet('admin');
+  const adminWallet = walletManager.createWallet('admin')
 
   // Create user wallets
-  const userWallets = walletManager.createWallets(numUsers, 'user');
+  const userWallets = walletManager.createWallets(numUsers, 'user')
 
   // Generate contract address
-  const contractAddress = sampleContractAddress();
+  const contractAddress = sampleContractAddress()
 
   // Create token types - MUST match what the contract uses in setSUSDTokenType circuit
   // Contract uses: tokenType(pad(32, "sUSD_token"), kernel.self())
-  const sSUSDTokenType = tokenType(pad('sUSD_token', 32), contractAddress);
-  const sADATokenType = tokenType(pad('statera:coin:sADA', 32), contractAddress);
+  const sSUSDTokenType = tokenType(pad('sUSD_token', 32), contractAddress)
+  const sADATokenType = tokenType(pad('statera:coin:sADA', 32), contractAddress)
   // Collateral token type (ADA)
-  const collateralTokenType = tokenType(pad('ADA', 32), contractAddress);
+  const collateralTokenType = tokenType(pad('ADA', 32), contractAddress)
 
   // Create initial private state for admin
   // IMPORTANT: Pass admin's secret key as BOTH secret_key AND admin_secret
   // This establishes the admin_secret that will be used for all admin metadata hashing
-  const adminPrivateState = createPrivateStateraState(adminWallet.secretKey, adminWallet.secretKey);
+  const adminPrivateState = createPrivateStateraState(
+    adminWallet.secretKey,
+    adminWallet.secretKey
+  )
 
   // Deploy simulator
   // Note: We pass constructorArgs without nonce since the contract doesn't have a nonce parameter
@@ -87,29 +90,28 @@ export function createStateraTestFixture(numUsers: number = 3): StateraTestFixtu
       nonce: generateNonce(), // Not used but required by ContractSimulator
       coinPublicKey: adminWallet.coinPublicKey,
       constructorArgs: [
-        80n,                    // initLiquidationThreshold (80%)
-        70n,                    // initialLVT (70%)
-        110n,                   // initialMCR (110%)
-        pad('ADA', 32),         // validCollateralAssetType (Bytes<32>)
-        50n,                    // initialRedemptionFee (0.5%)
-        50n,                    // initialBorrowingFee (0.5%)
-        5n,                     // initialLiquidationIncentive (5%)
-        100n                    // initialMinimumDebt (100 sUSD)
+        80n, // initLiquidationThreshold (80%)
+        70n, // initialLVT (70%)
+        110n, // initialMCR (110%)
+        pad('ADA', 32), // validCollateralAssetType (Bytes<32>)
+        50n, // initialRedemptionFee (0.5%)
+        50n, // initialBorrowingFee (0.5%)
+        5n, // initialLiquidationIncentive (5%)
+        100n // initialMinimumDebt (100 sUSD)
       ]
     }
-  );
+  )
 
   // After contract initialization, get the updated private state
   // The constructor sets up admin_metadata automatically with the hash
-  const initializedState = simulator.getPrivateState();
+  const initializedState = simulator.getPrivateState()
 
   // Initialize sUSD token type by calling the circuit
   // This MUST be done before any operations that use sUSD tokens
-  asAdmin(simulator, adminWallet)
-    .executeImpureCircuit('setSUSDTokenType');
+  asAdmin(simulator, adminWallet).executeImpureCircuit('setSUSDTokenType')
 
   // Create balance tracker
-  const balanceTracker = new BalanceTracker();
+  const balanceTracker = new BalanceTracker()
 
   return {
     simulator,
@@ -121,7 +123,7 @@ export function createStateraTestFixture(numUsers: number = 3): StateraTestFixtu
     sSUSDTokenType,
     sADATokenType,
     collateralTokenType
-  };
+  }
 }
 
 /**
@@ -140,18 +142,21 @@ export function createPrivateStateForWallet(
 ): StateraPrivateState {
   if (!simulator) {
     // If no simulator provided, create a basic state (won't work with admin operations)
-    return createPrivateStateraState(wallet.secretKey, wallet.secretKey);
+    return createPrivateStateraState(wallet.secretKey, wallet.secretKey)
   }
 
-  const currentState = simulator.getPrivateState();
-  const baseState = createPrivateStateraState(wallet.secretKey, currentState.admin_secret);
+  const currentState = simulator.getPrivateState()
+  const baseState = createPrivateStateraState(
+    wallet.secretKey,
+    currentState.admin_secret
+  )
 
   // CRITICAL: Copy admin_metadata from simulator to preserve super_admin and other admin fields
   return {
     ...baseState,
     admin_metadata: currentState.admin_metadata,
     admin_secret: currentState.admin_secret
-  };
+  }
 }
 
 /**
@@ -171,9 +176,14 @@ export function asWallet<T>(
   privateState?: T
 ): ContractSimulator<T> {
   // If no private state provided, create one with the admin_secret from simulator
-  const currentState = simulator.getPrivateState() as any;
-  const state = privateState || (createPrivateStateraState(wallet.secretKey, currentState?.admin_secret) as any);
-  return simulator.as(state, wallet.coinPublicKey);
+  const currentState = simulator.getPrivateState() as any
+  const state =
+    privateState ||
+    (createPrivateStateraState(
+      wallet.secretKey,
+      currentState?.admin_secret
+    ) as any)
+  return simulator.as(state, wallet.coinPublicKey)
 }
 
 /**
@@ -192,7 +202,7 @@ export function createPrivateStateWithMintMetadata(
   debt: bigint = 0n,
   adminSecret?: Uint8Array
 ): StateraPrivateState {
-  const baseState = createPrivateStateraState(wallet.secretKey, adminSecret);
+  const baseState = createPrivateStateraState(wallet.secretKey, adminSecret)
 
   // Update private state with mint_metadata
   return {
@@ -201,7 +211,7 @@ export function createPrivateStateWithMintMetadata(
       collateral,
       debt
     }
-  };
+  }
 }
 
 /**
@@ -220,14 +230,14 @@ export function createAdminPrivateState(
   adminWallet: Wallet
 ): StateraPrivateState {
   // Get the current private state
-  const currentState = simulator.getPrivateState();
+  const currentState = simulator.getPrivateState()
 
   // Return admin state with admin's secret key but preserving admin_secret from initialization
   return {
     ...currentState,
     secret_key: adminWallet.secretKey,
-    admin_secret: currentState.admin_secret  // Preserve the fixed admin_secret
-  };
+    admin_secret: currentState.admin_secret // Preserve the fixed admin_secret
+  }
 }
 
 /**
@@ -245,7 +255,10 @@ export function asAdmin(
   simulator: ContractSimulator<StateraPrivateState>,
   adminWallet: Wallet
 ): ContractSimulator<StateraPrivateState> {
-  return simulator.as(createAdminPrivateState(simulator, adminWallet), adminWallet.coinPublicKey);
+  return simulator.as(
+    createAdminPrivateState(simulator, adminWallet),
+    adminWallet.coinPublicKey
+  )
 }
 
 /**
@@ -260,9 +273,9 @@ export function printBalances(
   const tokenNames = new Map<string, string>([
     [sSUSDTokenType.toString(), 'sSUSD'],
     [sADATokenType.toString(), 'sADA']
-  ]);
+  ])
 
-  balanceTracker.printBalances(walletKey, tokenNames);
+  balanceTracker.printBalances(walletKey, tokenNames)
 }
 
 /**
@@ -276,25 +289,23 @@ export function printAllBalances(
   const tokenNames = new Map<string, string>([
     [sSUSDTokenType.toString(), 'sSUSD'],
     [sADATokenType.toString(), 'sADA']
-  ]);
+  ])
 
-  balanceTracker.printAllBalances(tokenNames);
+  balanceTracker.printAllBalances(tokenNames)
 }
 
 /**
  * Helper to update balances for all wallets in the fixture
  */
-export function updateAllBalances(
-  fixture: StateraTestFixture
-): void {
-  const { simulator, balanceTracker, adminWallet, userWallets } = fixture;
+export function updateAllBalances(fixture: StateraTestFixture): void {
+  const { simulator, balanceTracker, adminWallet, userWallets } = fixture
 
   // Update admin balance
   balanceTracker.updateFromSimulator(
     simulator,
     adminWallet.coinPublicKey,
     'admin'
-  );
+  )
 
   // Update user balances
   userWallets.forEach((wallet, index) => {
@@ -302,10 +313,9 @@ export function updateAllBalances(
       simulator,
       wallet.coinPublicKey,
       `user${index}`
-    );
-  });
+    )
+  })
 }
-
 
 /**
  * Creates a user ID from a wallet's secret key
@@ -316,13 +326,13 @@ export function createUserId(wallet: Wallet): Uint8Array {
   // The contract uses persistentCommit with public key and secret key
   // For testing, we need to replicate this
   // Import the persistentCommit function
-  const { persistentCommit } = require('@midnight-ntwrk/compact-runtime');
-  const { CompactTypeBytes } = require('@midnight-ntwrk/compact-runtime');
+  const { persistentCommit } = require('@midnight-ntwrk/compact-runtime')
+  const { CompactTypeBytes } = require('@midnight-ntwrk/compact-runtime')
 
-  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey);
-  const descriptor = new CompactTypeBytes(32);
+  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey)
+  const descriptor = new CompactTypeBytes(32)
 
-  return persistentCommit(descriptor, publicKeyBytes, wallet.secretKey);
+  return persistentCommit(descriptor, publicKeyBytes, wallet.secretKey)
 }
 
 /**
@@ -331,9 +341,9 @@ export function createUserId(wallet: Wallet): Uint8Array {
  */
 export function createMetadataHash(metadata: any): Uint8Array {
   // In production, this would use proper hashing
-  const hash = new Uint8Array(32);
-  hash.fill(0);
-  return hash;
+  const hash = new Uint8Array(32)
+  hash.fill(0)
+  return hash
 }
 
 /**
@@ -341,9 +351,9 @@ export function createMetadataHash(metadata: any): Uint8Array {
  */
 export function createMintCounterCommitment(counter: bigint): Uint8Array {
   // In production, this would use proper commitment scheme
-  const commitment = new Uint8Array(32);
-  commitment.fill(0);
-  return commitment;
+  const commitment = new Uint8Array(32)
+  commitment.fill(0)
+  return commitment
 }
 
 /**
@@ -359,7 +369,7 @@ export function createMockCoin(value: bigint, colorName: string = 'ADA'): any {
     nonce: generateNonce(),
     color: pad(colorName, 32),
     value
-  };
+  }
 }
 
 /**
@@ -370,11 +380,8 @@ export function createMockCoin(value: bigint, colorName: string = 'ADA'): any {
  * @returns CoinInfo with value in SPECK
  */
 export function createCollateralCoin(amountInADA: bigint): any {
-  const SPECK_per_tDUST = 1000000n;
-  return LegacyCoinBuilder.create(
-    pad('ADA', 32),
-    amountInADA * SPECK_per_tDUST
-  );
+  const SPECK_per_tDUST = 1000000n
+  return LegacyCoinBuilder.create(pad('ADA', 32), amountInADA * SPECK_per_tDUST)
 }
 
 /**
@@ -386,10 +393,7 @@ export function createCollateralCoin(amountInADA: bigint): any {
  * @returns CoinInfo with encoded token type as color
  */
 export function createSUSDCoin(value: bigint, sSUSDTokenType: TokenType): any {
-  return LegacyCoinBuilder.create(
-    encodeTokenType(sSUSDTokenType),
-    value
-  );
+  return LegacyCoinBuilder.create(encodeTokenType(sSUSDTokenType), value)
 }
 
 /**
@@ -397,26 +401,26 @@ export function createSUSDCoin(value: bigint, sSUSDTokenType: TokenType): any {
  */
 function hexToBytes(hex: string): Uint8Array {
   // Remove 0x prefix if present
-  hex = hex.replace(/^0x/, '');
+  hex = hex.replace(/^0x/, '')
 
   // Pad to ensure even length
   if (hex.length % 2 !== 0) {
-    hex = '0' + hex;
+    hex = '0' + hex
   }
 
-  const bytes = new Uint8Array(hex.length / 2);
+  const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16)
   }
 
   // Pad to 32 bytes if needed
   if (bytes.length < 32) {
-    const padded = new Uint8Array(32);
-    padded.set(bytes);
-    return padded;
+    const padded = new Uint8Array(32)
+    padded.set(bytes)
+    return padded
   }
 
-  return bytes.slice(0, 32);
+  return bytes.slice(0, 32)
 }
 
 /**
@@ -427,10 +431,10 @@ export function createMockComplianceToken(
   userPk: string | Uint8Array,
   oraclePk: Uint8Array
 ): any {
-  const currentTime = BigInt(Math.floor(Date.now() / 1000));
+  const currentTime = BigInt(Math.floor(Date.now() / 1000))
 
   // Convert userPk to Uint8Array if it's a string
-  const userPkBytes = typeof userPk === 'string' ? hexToBytes(userPk) : userPk;
+  const userPkBytes = typeof userPk === 'string' ? hexToBytes(userPk) : userPk
 
   // Use MockGenerators but adapt to our specific format
   // Our contract expects a different structure, so we keep the custom format
@@ -445,14 +449,14 @@ export function createMockComplianceToken(
       }
     },
     oracleSignature: pad('mock-signature', 32)
-  };
+  }
 }
 
 /**
  * Creates a mock oracle public key
  */
 export function createMockOraclePk(): Uint8Array {
-  return pad('trusted-oracle-1', 32);
+  return pad('trusted-oracle-1', 32)
 }
 
 /**
@@ -475,34 +479,40 @@ export function prepareCoinForReceive<T>(
     type: tokenType,
     nonce: mockCoin.nonce,
     value: mockCoin.value
-  };
+  }
 
   // Add to simulator inputs so receive() can find it
-  simulator.addCoinInput(runtimeCoin);
+  simulator.addCoinInput(runtimeCoin)
 }
 
 /**
  * Creates a mock reserve pool coin for testing withdrawal operations
  */
-export function createMockReservePoolCoin(collateralTokenType: TokenType, amount: bigint = 100000000000n): any {
+export function createMockReservePoolCoin(
+  collateralTokenType: TokenType,
+  amount: bigint = 100000000000n
+): any {
   return {
     nonce: generateNonce(),
     color: encodeTokenType(collateralTokenType),
     value: amount,
     mt_index: 0n
-  };
+  }
 }
 
 /**
  * Creates a mock stake pool coin for testing staking operations
  */
-export function createMockStakePoolCoin(sSUSDTokenType: TokenType, amount: bigint = 100000000000n): any {
+export function createMockStakePoolCoin(
+  sSUSDTokenType: TokenType,
+  amount: bigint = 100000000000n
+): any {
   return {
     nonce: generateNonce(),
     color: encodeTokenType(sSUSDTokenType),
     value: amount,
     mt_index: 0n
-  };
+  }
 }
 
 /**
@@ -524,20 +534,24 @@ export function getPrivateStateAfterDeposit(
   sSUSDTokenType?: TokenType
 ): StateraPrivateState {
   // Get the updated private state from simulator
-  const currentState = simulator.getPrivateState();
+  const currentState = simulator.getPrivateState()
 
   return {
     ...currentState,
     secret_key: wallet.secretKey,
-    admin_secret: currentState.admin_secret,  // Preserve admin_secret from initialization
-    admin_metadata: currentState.admin_metadata,  // CRITICAL: Preserve admin_metadata including super_admin
+    admin_secret: currentState.admin_secret, // Preserve admin_secret from initialization
+    admin_metadata: currentState.admin_metadata, // CRITICAL: Preserve admin_metadata including super_admin
     mint_metadata: {
       collateral: depositAmount,
       debt: 0n
     },
-    reserve_pool_coin: collateralTokenType ? createMockReservePoolCoin(collateralTokenType) : currentState.reserve_pool_coin,
-    stake_pool_coin: sSUSDTokenType ? createMockStakePoolCoin(sSUSDTokenType) : currentState.stake_pool_coin
-  };
+    reserve_pool_coin: collateralTokenType
+      ? createMockReservePoolCoin(collateralTokenType)
+      : currentState.reserve_pool_coin,
+    stake_pool_coin: sSUSDTokenType
+      ? createMockStakePoolCoin(sSUSDTokenType)
+      : currentState.stake_pool_coin
+  }
 }
 
 /**
@@ -559,27 +573,27 @@ export function getPrivateStateAfterStake(
   additionalRewards: bigint = 0n
 ): StateraPrivateState {
   // Get the updated private state from simulator
-  const currentState = simulator.getPrivateState();
+  const currentState = simulator.getPrivateState()
 
   // Get the current ledger state to read ADA_sUSD_index and cumulative_scaling_factor
-  const ledgerState = simulator.getLedger();
+  const ledgerState = simulator.getLedger()
 
   // Try to read the staker from ledger to get accurate metadata
-  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey);
-  const ledgerAccessor = ledger(ledgerState as any);
+  const publicKeyBytes = encodeCoinPublicKey(wallet.coinPublicKey)
+  const ledgerAccessor = ledger(ledgerState as any)
 
-  let effectiveBalance = stakeAmount || 0n;
-  let entry_ADA_SUSD_index = ledgerState.ADA_sUSD_index || 0n;
-  let entry_scale_factor = ledgerState.cumulative_scaling_factor || 1n;
+  let effectiveBalance = stakeAmount || 0n
+  let entry_ADA_SUSD_index = ledgerState.ADA_sUSD_index || 0n
+  let entry_scale_factor = ledgerState.cumulative_scaling_factor || 1n
 
   // Try to read from on-chain stakers map
   try {
     if (ledgerAccessor.stakers && ledgerAccessor.stakers.member) {
-      const hasStaker = ledgerAccessor.stakers.member(publicKeyBytes);
+      const hasStaker = ledgerAccessor.stakers.member(publicKeyBytes)
       if (hasStaker) {
-        const stakerRecord = ledgerAccessor.stakers.lookup(publicKeyBytes);
+        const stakerRecord = ledgerAccessor.stakers.lookup(publicKeyBytes)
         // The staker exists, use the amount we passed in or fall back to what we know
-        effectiveBalance = stakeAmount || effectiveBalance;
+        effectiveBalance = stakeAmount || effectiveBalance
       }
     }
   } catch (e) {
@@ -589,14 +603,16 @@ export function getPrivateStateAfterStake(
   return {
     ...currentState,
     secret_key: wallet.secretKey,
-    admin_secret: currentState.admin_secret,  // Preserve admin_secret from initialization
-    admin_metadata: currentState.admin_metadata,  // CRITICAL: Preserve admin_metadata including super_admin
+    admin_secret: currentState.admin_secret, // Preserve admin_secret from initialization
+    admin_metadata: currentState.admin_metadata, // CRITICAL: Preserve admin_metadata including super_admin
     stake_metadata: {
       effectiveBalance: effectiveBalance,
       stakeReward: additionalRewards,
       entry_ADA_SUSD_index,
       entry_scale_factor
     },
-    stake_pool_coin: sSUSDTokenType ? createMockStakePoolCoin(sSUSDTokenType) : currentState.stake_pool_coin
-  };
+    stake_pool_coin: sSUSDTokenType
+      ? createMockStakePoolCoin(sSUSDTokenType)
+      : currentState.stake_pool_coin
+  }
 }

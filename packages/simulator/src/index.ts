@@ -35,9 +35,9 @@
  * ```
  */
 
-export { ContractSimulator } from './ContractSimulator.js';
-export { WalletManager } from './WalletManager.js';
-export { BalanceTracker } from './BalanceTracker.js';
+export { ContractSimulator } from './ContractSimulator.js'
+export { WalletManager } from './WalletManager.js'
+export { BalanceTracker } from './BalanceTracker.js'
 
 export {
   randomBytes,
@@ -46,8 +46,8 @@ export {
   pad,
   createCoinPublicKey,
   generateNonce,
-  generateSecretKey,
-} from './utils.js';
+  generateSecretKey
+} from './utils.js'
 
 // Logging
 export {
@@ -56,8 +56,8 @@ export {
   enableDebugLogging,
   enableTraceLogging,
   disableLogging,
-  setQuietMode,
-} from './logger.js';
+  setQuietMode
+} from './logger.js'
 
 // Errors
 export {
@@ -67,16 +67,16 @@ export {
   MultipleOutputsError,
   OutputNotFoundError,
   WalletNotFoundError,
-  CircuitExecutionError,
-} from './errors.js';
+  CircuitExecutionError
+} from './errors.js'
 
 // Token helpers
 export {
   createTokenType,
   createNativeTokenType,
   areTokenTypesEqual,
-  TokenRegistry,
-} from './token-helpers.js';
+  TokenRegistry
+} from './token-helpers.js'
 
 // Assertions
 export {
@@ -86,20 +86,20 @@ export {
   assertHasOutputs,
   assertNoOutputs,
   assertBalanceChange,
-  assertBalances,
-} from './assertions.js';
-export type { BalanceAssertion } from './assertions.js';
+  assertBalances
+} from './assertions.js'
+export type { BalanceAssertion } from './assertions.js'
 
 // Snapshots
-export { SnapshotManager } from './snapshot.js';
-export type { Snapshot } from './snapshot.js';
+export { SnapshotManager } from './snapshot.js'
+export type { Snapshot } from './snapshot.js'
 
 // Coin Builder
-export { CoinBuilder, LegacyCoinBuilder } from './CoinBuilder.js';
+export { CoinBuilder, LegacyCoinBuilder } from './CoinBuilder.js'
 
 // Ledger Inspector
-export { LedgerInspector } from './LedgerInspector.js';
-export type { MerkleTreeInfo } from './LedgerInspector.js';
+export { LedgerInspector } from './LedgerInspector.js'
+export type { MerkleTreeInfo } from './LedgerInspector.js'
 
 // Mock Generators
 export {
@@ -114,14 +114,14 @@ export {
   createNullifier,
   createCommitment,
   createDID,
-  createSignature,
-} from './MockGenerators.js';
+  createSignature
+} from './MockGenerators.js'
 export type {
   MockOracle,
   MockComplianceToken,
   MockOracleConfig,
-  MockComplianceConfig,
-} from './MockGenerators.js';
+  MockComplianceConfig
+} from './MockGenerators.js'
 
 export type {
   ContractWithCircuits,
@@ -129,16 +129,13 @@ export type {
   Wallet,
   TokenBalance,
   OutputInfo,
-  CircuitResult,
-} from './types.js';
+  CircuitResult
+} from './types.js'
 
 // Simulator Extensions
-export {
-  SimulatorHistoryTracker,
-  withHistory,
-} from './SimulatorExtensions.js';
+export { SimulatorHistoryTracker, withHistory } from './SimulatorExtensions.js'
 export type {
   HistoryEntry,
   ExecutionMetrics,
-  EventLogEntry,
-} from './SimulatorExtensions.js';
+  EventLogEntry
+} from './SimulatorExtensions.js'

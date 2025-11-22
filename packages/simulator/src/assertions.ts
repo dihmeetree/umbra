@@ -1,6 +1,6 @@
-import type * as ocrt from '@midnight-ntwrk/onchain-runtime';
-import type { TokenType } from '@midnight-ntwrk/zswap';
-import type { ContractSimulator } from './ContractSimulator.js';
+import type * as ocrt from '@midnight-ntwrk/onchain-runtime'
+import type { TokenType } from '@midnight-ntwrk/zswap'
+import type { ContractSimulator } from './ContractSimulator.js'
 
 /**
  * Assertion helpers for testing with the simulator
@@ -9,10 +9,10 @@ import type { ContractSimulator } from './ContractSimulator.js';
  */
 
 export interface BalanceAssertion {
-  recipient: ocrt.CoinPublicKey;
-  tokenType: TokenType;
-  expected: bigint;
-  actual?: bigint;
+  recipient: ocrt.CoinPublicKey
+  tokenType: TokenType
+  expected: bigint
+  actual?: bigint
 }
 
 /**
@@ -30,14 +30,14 @@ export function assertBalance<T>(
   tokenType: TokenType,
   expectedBalance: bigint
 ): void {
-  const actualBalance = simulator.getBalance(recipient, tokenType);
+  const actualBalance = simulator.getBalance(recipient, tokenType)
   if (actualBalance !== expectedBalance) {
     throw new Error(
       `Balance assertion failed for ${recipient.slice(0, 8)}...\n` +
-      `  Expected: ${expectedBalance}\n` +
-      `  Actual:   ${actualBalance}\n` +
-      `  Difference: ${actualBalance - expectedBalance}`
-    );
+        `  Expected: ${expectedBalance}\n` +
+        `  Actual:   ${actualBalance}\n` +
+        `  Difference: ${actualBalance - expectedBalance}`
+    )
   }
 }
 
@@ -56,14 +56,14 @@ export function assertBalanceAtLeast<T>(
   tokenType: TokenType,
   minimumBalance: bigint
 ): void {
-  const actualBalance = simulator.getBalance(recipient, tokenType);
+  const actualBalance = simulator.getBalance(recipient, tokenType)
   if (actualBalance < minimumBalance) {
     throw new Error(
       `Balance assertion failed for ${recipient.slice(0, 8)}...\n` +
-      `  Expected at least: ${minimumBalance}\n` +
-      `  Actual:            ${actualBalance}\n` +
-      `  Shortfall:         ${minimumBalance - actualBalance}`
-    );
+        `  Expected at least: ${minimumBalance}\n` +
+        `  Actual:            ${actualBalance}\n` +
+        `  Shortfall:         ${minimumBalance - actualBalance}`
+    )
   }
 }
 
@@ -80,7 +80,7 @@ export function assertZeroBalance<T>(
   recipient: ocrt.CoinPublicKey,
   tokenType: TokenType
 ): void {
-  assertBalance(simulator, recipient, tokenType, 0n);
+  assertBalance(simulator, recipient, tokenType, 0n)
 }
 
 /**
@@ -96,18 +96,20 @@ export function assertHasOutputs<T>(
   recipient: ocrt.CoinPublicKey,
   expectedCount?: number
 ): void {
-  const outputs = simulator.getOutputsByRecipient(recipient);
+  const outputs = simulator.getOutputsByRecipient(recipient)
 
   if (outputs.length === 0) {
-    throw new Error(`No outputs found for recipient ${recipient.slice(0, 8)}...`);
+    throw new Error(
+      `No outputs found for recipient ${recipient.slice(0, 8)}...`
+    )
   }
 
   if (expectedCount !== undefined && outputs.length !== expectedCount) {
     throw new Error(
       `Output count assertion failed for ${recipient.slice(0, 8)}...\n` +
-      `  Expected: ${expectedCount}\n` +
-      `  Actual:   ${outputs.length}`
-    );
+        `  Expected: ${expectedCount}\n` +
+        `  Actual:   ${outputs.length}`
+    )
   }
 }
 
@@ -122,12 +124,12 @@ export function assertNoOutputs<T>(
   simulator: ContractSimulator<T>,
   recipient: ocrt.CoinPublicKey
 ): void {
-  const outputs = simulator.getOutputsByRecipient(recipient);
+  const outputs = simulator.getOutputsByRecipient(recipient)
 
   if (outputs.length > 0) {
     throw new Error(
       `Expected no outputs for ${recipient.slice(0, 8)}... but found ${outputs.length}`
-    );
+    )
   }
 }
 
@@ -146,17 +148,17 @@ export function assertBalanceChange(
   expectedChange: bigint,
   description?: string
 ): void {
-  const actualChange = afterBalance - beforeBalance;
+  const actualChange = afterBalance - beforeBalance
 
   if (actualChange !== expectedChange) {
-    const prefix = description ? `${description}: ` : '';
+    const prefix = description ? `${description}: ` : ''
     throw new Error(
       `${prefix}Balance change assertion failed\n` +
-      `  Expected change: ${expectedChange}\n` +
-      `  Actual change:   ${actualChange}\n` +
-      `  Before:          ${beforeBalance}\n` +
-      `  After:           ${afterBalance}`
-    );
+        `  Expected change: ${expectedChange}\n` +
+        `  Actual change:   ${actualChange}\n` +
+        `  Before:          ${beforeBalance}\n` +
+        `  After:           ${afterBalance}`
+    )
   }
 }
 
@@ -171,21 +173,24 @@ export function assertBalances<T>(
   simulator: ContractSimulator<T>,
   assertions: BalanceAssertion[]
 ): void {
-  const failures: string[] = [];
+  const failures: string[] = []
 
   for (const assertion of assertions) {
-    const actualBalance = simulator.getBalance(assertion.recipient, assertion.tokenType);
+    const actualBalance = simulator.getBalance(
+      assertion.recipient,
+      assertion.tokenType
+    )
 
     if (actualBalance !== assertion.expected) {
       failures.push(
         `  ${assertion.recipient.slice(0, 8)}...: expected ${assertion.expected}, got ${actualBalance}`
-      );
+      )
     }
   }
 
   if (failures.length > 0) {
     throw new Error(
       `Multiple balance assertions failed:\n${failures.join('\n')}`
-    );
+    )
   }
 }

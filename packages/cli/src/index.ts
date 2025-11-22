@@ -1,58 +1,58 @@
-import { levelPrivateStateProvider } from "@midnight-ntwrk/midnight-js-level-private-state-provider";
-import { stdin as input, stdout as output } from "node:process";
+import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider'
+import { stdin as input, stdout as output } from 'node:process'
 import {
   DeployedStateraOnchainContract,
   DerivedStateraContractState,
   StateraAPI,
   StateraContractProviders,
   stateraPrivateStateId,
-  utils,
-} from "@statera/statera-api";
-import { ContractAddress } from "@midnight-ntwrk/compact-runtime";
-import { createInterface, Interface } from "node:readline/promises";
-import { Logger } from "pino";
+  utils
+} from '@statera/statera-api'
+import { ContractAddress } from '@midnight-ntwrk/compact-runtime'
+import { createInterface, Interface } from 'node:readline/promises'
+import { Logger } from 'pino'
 import {
   type Ledger,
   ledger,
-  StateraPrivateState,
-} from "@statera/ada-statera-protocol";
+  StateraPrivateState
+} from '@statera/ada-statera-protocol'
 import {
   parseCoinPublicKeyToHex,
-  toHex,
-} from "@midnight-ntwrk/midnight-js-utils";
-import { type Config, StandaloneConfig } from "./config.js";
+  toHex
+} from '@midnight-ntwrk/midnight-js-utils'
+import { type Config, StandaloneConfig } from './config.js'
 import {
   getLedgerNetworkId,
-  getZswapNetworkId,
-} from "@midnight-ntwrk/midnight-js-network-id";
-import * as Rx from "rxjs";
-import { type Wallet } from "@midnight-ntwrk/wallet-api";
+  getZswapNetworkId
+} from '@midnight-ntwrk/midnight-js-network-id'
+import * as Rx from 'rxjs'
+import { type Wallet } from '@midnight-ntwrk/wallet-api'
 import type {
   StartedDockerComposeEnvironment,
-  DockerComposeEnvironment,
-} from "testcontainers";
-import { type Resource, WalletBuilder } from "@midnight-ntwrk/wallet";
-import { Transaction as ZswapTransaction } from "@midnight-ntwrk/zswap";
+  DockerComposeEnvironment
+} from 'testcontainers'
+import { type Resource, WalletBuilder } from '@midnight-ntwrk/wallet'
+import { Transaction as ZswapTransaction } from '@midnight-ntwrk/zswap'
 import {
   nativeToken,
   Transaction,
   type CoinInfo,
-  type TransactionId,
-} from "@midnight-ntwrk/ledger";
+  type TransactionId
+} from '@midnight-ntwrk/ledger'
 import {
   type MidnightProvider,
   type WalletProvider,
   type UnbalancedTransaction,
   createBalancedTx,
   type BalancedTransaction,
-  PrivateStateId,
-} from "@midnight-ntwrk/midnight-js-types";
-import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-public-data-provider";
-import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
-import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
-import * as fs from "node:fs";
-import { streamToString } from "testcontainers/build/common/streams.js";
-import { webcrypto } from "node:crypto";
+  PrivateStateId
+} from '@midnight-ntwrk/midnight-js-types'
+import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider'
+import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider'
+import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider'
+import * as fs from 'node:fs'
+import { streamToString } from 'testcontainers/build/common/streams.js'
+import { webcrypto } from 'node:crypto'
 
 /**
  * publicDataProvider is used because it allows us retrieve ledger state variables
@@ -69,45 +69,45 @@ export const getStateraLedgerState = (
     .queryContractState(contractAddress)
     .then((contractState) =>
       contractState != null ? ledger(contractState.data) : null
-    );
+    )
 
 const DEPLOY_OR_JOIN_QUESTION = `
     You can do one of the following:
     1. Deploy a statera stablecoin contract
     2. Join an existing one
     3. Exit
-`;
+`
 
 const resolve = async (
   providers: StateraContractProviders,
   rli: Interface,
   logger: Logger
 ): Promise<StateraAPI | null> => {
-  let api: StateraAPI | null = null;
+  let api: StateraAPI | null = null
 
   while (true) {
-    const choice = await rli.question(DEPLOY_OR_JOIN_QUESTION);
+    const choice = await rli.question(DEPLOY_OR_JOIN_QUESTION)
     switch (choice) {
-      case "1":
-        api = await StateraAPI.deployStateraContract(providers, logger);
+      case '1':
+        api = await StateraAPI.deployStateraContract(providers, logger)
         logger.info(
           `Deployed contract at address: ${api.deployedContractAddress}`
-        );
-        return api;
+        )
+        return api
 
-      case "2":
+      case '2':
         api = await StateraAPI.joinStateraContract(
           providers,
-          await rli.question("What is the contract address (in hex)?"),
+          await rli.question('What is the contract address (in hex)?'),
           logger
-        );
+        )
         logger.info(
           `Joined contract at address: ${api.deployedContractAddress}`
-        );
-        return api;
+        )
+        return api
     }
   }
-};
+}
 
 const displayLedgerState = async (
   providers: StateraContractProviders,
@@ -115,55 +115,55 @@ const displayLedgerState = async (
   logger: Logger
 ): Promise<void> => {
   const contractAddress =
-    deployedStateraContract.deployTxData.public.contractAddress;
-  const ledgerState = await getStateraLedgerState(providers, contractAddress);
+    deployedStateraContract.deployTxData.public.contractAddress
+  const ledgerState = await getStateraLedgerState(providers, contractAddress)
   if (ledgerState === null) {
     logger.info(
       `There is no token mint contract deployed at ${contractAddress}`
-    );
+    )
   } else {
-    logger.info(`Current stablecoin color is: ${ledgerState.sUSDTokenType}`);
-    logger.info(`Depositors count: ${ledgerState.depositors.size()}`);
-    logger.info(`Stakers count: ${ledgerState.stakers.size()}`);
+    logger.info(`Current stablecoin color is: ${ledgerState.sUSDTokenType}`)
+    logger.info(`Depositors count: ${ledgerState.depositors.size()}`)
+    logger.info(`Stakers count: ${ledgerState.stakers.size()}`)
     logger.info(
       `Current liquidation threshold is: ${ledgerState.liquidationThreshold}`
-    );
+    )
   }
-};
+}
 
 const displayDerivedLedgerState = async (
   currentState: DerivedStateraContractState,
   logger: Logger
 ): Promise<void> => {
   // Direct Map storage: display counts
-  console.log(`Current stablecoin color is:`, currentState.sUSDTokenType);
-  console.log(`Depositors count:`, currentState.depositorsCount);
-  console.log(`Stakers count:`, currentState.stakersCount);
-  console.log(`Current trusted oracles:`, currentState.trustedOracles);
+  console.log(`Current stablecoin color is:`, currentState.sUSDTokenType)
+  console.log(`Depositors count:`, currentState.depositorsCount)
+  console.log(`Stakers count:`, currentState.stakersCount)
+  console.log(`Current trusted oracles:`, currentState.trustedOracles)
   console.log(
     `Current liquidation threshold is:`,
     currentState.liquidationThreshold
-  );
-};
+  )
+}
 
 const getUserPrivateState = async (
   providers: StateraContractProviders
 ): Promise<StateraPrivateState | null> =>
   providers.privateStateProvider
     .get(stateraPrivateStateId)
-    .then((privateState) => (privateState != null ? privateState : null));
+    .then((privateState) => (privateState != null ? privateState : null))
 
 const displayUserPrivateState = async (
   providers: StateraContractProviders,
   logger: Logger
 ) => {
-  const privateState = await getUserPrivateState(providers);
+  const privateState = await getUserPrivateState(providers)
 
   if (privateState === null)
-    logger.info(`There is no private state stored at ${stateraPrivateStateId}`);
-  console.log(`Current collateral reserved is:`, privateState?.mint_metadata);
-  logger.info(`Current secret-key is: ${privateState?.secret_key}`);
-};
+    logger.info(`There is no private state stored at ${stateraPrivateStateId}`)
+  console.log(`Current collateral reserved is:`, privateState?.mint_metadata)
+  logger.info(`Current secret-key is: ${privateState?.secret_key}`)
+}
 
 // Updated menu with new option
 const CIRCUIT_MAIN_LOOP_QUESTION = `
@@ -187,7 +187,7 @@ You can do one of the following:
   17. Add new kyc oracle pk (ADMIN ONLY)
   18. Remove kyc oracle pk (ADMIN ONLY)
 
-Which would you like to do? `;
+Which would you like to do? `
 
 const circuit_main_loop = async (
   wallet: Wallet & Resource,
@@ -195,275 +195,275 @@ const circuit_main_loop = async (
   rli: Interface,
   logger: Logger
 ): Promise<void> => {
-  const stateraApi = await resolve(providers, rli, logger);
-  if (stateraApi === null) return;
+  const stateraApi = await resolve(providers, rli, logger)
+  if (stateraApi === null) return
 
-  let currentState: DerivedStateraContractState | undefined;
+  let currentState: DerivedStateraContractState | undefined
   const stateObserver = {
     next: (state: DerivedStateraContractState) => {
-      currentState = state;
-    },
-  };
+      currentState = state
+    }
+  }
 
-  const subscription = stateraApi.state.subscribe(stateObserver);
+  const subscription = stateraApi.state.subscribe(stateObserver)
 
   try {
     while (true) {
-      const choice = await rli.question(CIRCUIT_MAIN_LOOP_QUESTION);
+      const choice = await rli.question(CIRCUIT_MAIN_LOOP_QUESTION)
       switch (choice) {
-        case "1": {
-          await stateraApi.checkStakeReward();
-          break;
+        case '1': {
+          await stateraApi.checkStakeReward()
+          break
         }
-        case "2": {
+        case '2': {
           const amountToDeposit = await rli.question(
             `How much do you want to deposit?`
-          );
-          await stateraApi.depositToCollateralPool(Number(amountToDeposit));
+          )
+          await stateraApi.depositToCollateralPool(Number(amountToDeposit))
 
           // Wait for wallet to sync after deposit
-          logger.info("Waiting for wallet to sync after collateral deposit...");
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+          logger.info('Waiting for wallet to sync after collateral deposit...')
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "3": {
+        case '3': {
           await stateraApi.depositToStakePool(
-            Number(await rli.question("How much do you want to stake:"))
-          );
+            Number(await rli.question('How much do you want to stake:'))
+          )
 
           // Wait for wallet to sync after staking
-          logger.info("Waiting for wallet to sync after staking...");
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+          logger.info('Waiting for wallet to sync after staking...')
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "4": {
+        case '4': {
           await displayLedgerState(
             providers,
             stateraApi.allReadyDeployedContract,
             logger
-          );
-          break;
+          )
+          break
         }
-        case "5": {
+        case '5': {
           await displayDerivedLedgerState(
             currentState as DerivedStateraContractState,
             logger
-          );
-          break;
+          )
+          break
         }
-        case "6": {
-          await displayUserPrivateState(providers, logger);
-          break;
+        case '6': {
+          await displayUserPrivateState(providers, logger)
+          break
         }
-        case "7": {
+        case '7': {
           const mintAmount = Number(
-            await rli.question("How much do you want to mint?")
-          );
-          logger.info("Initiating mint operation...");
-          await stateraApi.mint_sUSD(mintAmount);
+            await rli.question('How much do you want to mint?')
+          )
+          logger.info('Initiating mint operation...')
+          await stateraApi.mint_sUSD(mintAmount)
 
           // Critical: Wait for wallet to sync and reflect minted tokens
-          logger.info("Waiting for wallet to sync after minting...");
-          await waitForWalletSyncAfterOperation(wallet, logger);
+          logger.info('Waiting for wallet to sync after minting...')
+          await waitForWalletSyncAfterOperation(wallet, logger)
 
           // Wait specifically for the sUSD token balance to appear
           if (currentState?.sUSDTokenType) {
             try {
               logger.info(
-                "Waiting for minted sUSD tokens to appear in wallet..."
-              );
+                'Waiting for minted sUSD tokens to appear in wallet...'
+              )
               const newBalance = await waitForTokenBalance(
                 wallet,
                 utils.uint8arraytostring(currentState.sUSDTokenType),
                 BigInt(mintAmount),
                 logger,
                 45000 // 45 second timeout
-              );
+              )
               logger.info(
                 `✅ Minted sUSD tokens confirmed! New balance: ${newBalance}`
-              );
+              )
             } catch (error) {
               logger.warn(
-                "Timeout waiting for minted tokens to appear in wallet"
-              );
-              logger.info("Displaying current wallet state:");
+                'Timeout waiting for minted tokens to appear in wallet'
+              )
+              logger.info('Displaying current wallet state:')
             }
           }
 
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "8": {
+        case '8': {
           await stateraApi.repay(
             Number(
-              await rli.question("How much of your debt do you want to offset:")
+              await rli.question('How much of your debt do you want to offset:')
             )
-          );
+          )
 
           // Wait for wallet to sync after repayment
-          logger.info("Waiting for wallet to sync after repayment...");
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+          logger.info('Waiting for wallet to sync after repayment...')
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "9": {
+        case '9': {
           await stateraApi.withdrawStakeReward(
             Number(
               await rli.question(
-                "How much of your stake reward do you want to withdraw:"
+                'How much of your stake reward do you want to withdraw:'
               )
             )
-          );
+          )
 
           // Wait for wallet to sync after withdrawal
           logger.info(
-            "Waiting for wallet to sync after stake reward withdrawal..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after stake reward withdrawal...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "10": {
+        case '10': {
           const oraclePk =
             process.env.ORACLE_PK ||
-            "0000000000000000000000000000000000000000000000000000000000000000";
+            '0000000000000000000000000000000000000000000000000000000000000000'
           await stateraApi.withdrawCollateral(
             Number(
               await rli.question(
-                "How much of your collateral do you want to withdraw:"
+                'How much of your collateral do you want to withdraw:'
               )
             ),
             Number(
               await rli.question(
-                "What is the current oracl price per collateral asset:"
+                'What is the current oracl price per collateral asset:'
               )
             ),
             oraclePk
-          );
+          )
 
           // Wait for wallet to sync after withdrawal
           logger.info(
-            "Waiting for wallet to sync after collateral withdrawal..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after collateral withdrawal...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "11": {
-          logger.info("Exiting.......");
-          return;
+        case '11': {
+          logger.info('Exiting.......')
+          return
         }
-        case "12": {
+        case '12': {
           // New option to manually check wallet state
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
-        case "13": {
+        case '13': {
           // New option to manually check wallet state
-          logger.info("Setting sUSDTokenType...");
-          await stateraApi.setSUSDColor();
+          logger.info('Setting sUSDTokenType...')
+          await stateraApi.setSUSDColor()
           logger.info(
-            "Waiting for wallet to sync after setting sUSDTokenType..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after setting sUSDTokenType...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
 
-        case "14": {
+        case '14': {
           await stateraApi.liquidatePosition(
             await rli.question(
-              "Enter ID of collateral position you want to liquidate: "
+              'Enter ID of collateral position you want to liquidate: '
             ),
             providers
-          );
+          )
 
-          logger.info("Liquidating collateral...");
+          logger.info('Liquidating collateral...')
           // Wait for wallet to sync after withdrawal
           logger.info(
-            "Waiting for wallet to sync after liquidating collateral..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after liquidating collateral...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
 
-        case "15": {
+        case '15': {
           await stateraApi.withdrawStake(
             Number(
               await rli.question(
-                "How much of your stake balance do you want to withdraw:"
+                'How much of your stake balance do you want to withdraw:'
               )
             )
-          );
+          )
 
           // Wait for wallet to sync after withdrawal
           logger.info(
-            "Waiting for wallet to sync after stake reward withdrawal..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after stake reward withdrawal...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
 
-        case "16": {
+        case '16': {
           const addrss = await rli.question(
-            "Enter coin public key of the new super admin: "
-          );
+            'Enter coin public key of the new super admin: '
+          )
           await stateraApi.transferSuperAdminRole(
             parseCoinPublicKeyToHex(addrss, getZswapNetworkId())
-          );
+          )
 
           // Wait for wallet to sync after withdrawal
           logger.info(
-            "Waiting for wallet to sync after transfering super admin role..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after transfering super admin role...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
 
-        case "17": {
-          const addrss = await rli.question("Enter new oracle public key: ");
-          await stateraApi.addTrustedOracle(addrss);
+        case '17': {
+          const addrss = await rli.question('Enter new oracle public key: ')
+          await stateraApi.addTrustedOracle(addrss)
 
           // Wait for wallet to sync after withdrawal
           logger.info(
-            "Waiting for wallet to sync after adding new oracle pk..."
-          );
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+            'Waiting for wallet to sync after adding new oracle pk...'
+          )
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
 
-        case "18": {
+        case '18': {
           const addrss = await rli.question(
-            "Enter oracle public key to remove: "
-          );
-          await stateraApi.removeTrustedOracle(addrss);
+            'Enter oracle public key to remove: '
+          )
+          await stateraApi.removeTrustedOracle(addrss)
 
           // Wait for wallet to sync after withdrawal
-          logger.info("Waiting for wallet to sync after removing oracle pk...");
-          await waitForWalletSyncAfterOperation(wallet, logger);
-          await displayComprehensiveWalletState(wallet, currentState, logger);
-          break;
+          logger.info('Waiting for wallet to sync after removing oracle pk...')
+          await waitForWalletSyncAfterOperation(wallet, logger)
+          await displayComprehensiveWalletState(wallet, currentState, logger)
+          break
         }
 
         default:
-          logger.error(`Invalid choice: ${choice}`);
+          logger.error(`Invalid choice: ${choice}`)
       }
     }
   } finally {
-    subscription.unsubscribe();
+    subscription.unsubscribe()
   }
-};
+}
 
 export const createWalletAndMidnightProvider = async (
   wallet: Wallet
 ): Promise<WalletProvider & MidnightProvider> => {
-  const state = await Rx.firstValueFrom(wallet.state());
+  const state = await Rx.firstValueFrom(wallet.state())
   return {
     coinPublicKey: state.coinPublicKey,
     encryptionPublicKey: state.encryptionPublicKey,
@@ -486,90 +486,90 @@ export const createWalletAndMidnightProvider = async (
             getLedgerNetworkId()
           )
         )
-        .then(createBalancedTx);
+        .then(createBalancedTx)
     },
     submitTx(tx: BalancedTransaction): Promise<TransactionId> {
-      return wallet.submitTransaction(tx);
-    },
-  };
-};
+      return wallet.submitTransaction(tx)
+    }
+  }
+}
 
 export const waitForSync = (wallet: Wallet, logger: Logger) =>
   Rx.firstValueFrom(
     wallet.state().pipe(
       Rx.throttleTime(5_000),
       Rx.tap((state) => {
-        const applyGap = state.syncProgress?.lag.applyGap ?? 0n;
-        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n;
+        const applyGap = state.syncProgress?.lag.applyGap ?? 0n
+        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n
         logger.info(
           `Waiting for funds. Backend lag: ${sourceGap}, wallet lag: ${applyGap}, transactions=${state.transactionHistory.length}`
-        );
+        )
       }),
       Rx.filter((state) => {
         // Let's allow progress only if wallet is synced fully
-        return state.syncProgress !== undefined && state.syncProgress.synced;
+        return state.syncProgress !== undefined && state.syncProgress.synced
       })
     )
-  );
+  )
 
 export const waitForSyncProgress = async (wallet: Wallet, logger: Logger) =>
   await Rx.firstValueFrom(
     wallet.state().pipe(
       Rx.throttleTime(5_000),
       Rx.tap((state) => {
-        const applyGap = state.syncProgress?.lag.applyGap ?? 0n;
-        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n;
+        const applyGap = state.syncProgress?.lag.applyGap ?? 0n
+        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n
         logger.info(
           `Waiting for funds. Backend lag: ${sourceGap}, wallet lag: ${applyGap}, transactions=${state.transactionHistory.length}`
-        );
+        )
       }),
       Rx.filter((state) => {
         // Let's allow progress only if syncProgress is defined
-        return state.syncProgress !== undefined;
+        return state.syncProgress !== undefined
       })
     )
-  );
+  )
 
 export const waitForFunds = (wallet: Wallet, logger: Logger) =>
   Rx.firstValueFrom(
     wallet.state().pipe(
       Rx.throttleTime(10_000),
       Rx.tap((state) => {
-        const applyGap = state.syncProgress?.lag.applyGap ?? 0n;
-        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n;
+        const applyGap = state.syncProgress?.lag.applyGap ?? 0n
+        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n
         logger.info(
           `Waiting for funds. Backend lag: ${sourceGap}, wallet lag: ${applyGap}, transactions=${state.transactionHistory.length}`
-        );
+        )
       }),
       Rx.filter((state) => {
         // Let's allow progress only if wallet is synced
-        return state.syncProgress?.synced === true;
+        return state.syncProgress?.synced === true
       }),
       Rx.map((s) => s.balances[nativeToken()] ?? 0n),
       Rx.filter((balance) => balance > 0n)
     )
-  );
+  )
 
 export const isAnotherChain = async (
   wallet: Wallet,
   offset: number,
   logger: Logger
 ) => {
-  await waitForSyncProgress(wallet, logger);
+  await waitForSyncProgress(wallet, logger)
   // Here wallet does not expose the offset block it is synced to, that is why this workaround
-  const walletOffset = Number(JSON.parse(await wallet.serializeState()).offset);
+  const walletOffset = Number(JSON.parse(await wallet.serializeState()).offset)
   if (walletOffset < offset - 1) {
     logger.info(
       `Your offset offset is: ${walletOffset} restored offset: ${offset} so it is another chain`
-    );
-    return true;
+    )
+    return true
   } else {
     logger.info(
       `Your offset offset is: ${walletOffset} restored offset: ${offset} ok`
-    );
-    return false;
+    )
+    return false
   }
-};
+}
 
 export const waitForTokenBalance = (
   wallet: Wallet,
@@ -582,21 +582,21 @@ export const waitForTokenBalance = (
     wallet.state().pipe(
       Rx.throttleTime(2_000),
       Rx.tap((state) => {
-        const balance = state.balances[tokenType] ?? 0n;
-        const applyGap = state.syncProgress?.lag.applyGap ?? 0n;
-        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n;
+        const balance = state.balances[tokenType] ?? 0n
+        const applyGap = state.syncProgress?.lag.applyGap ?? 0n
+        const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n
         logger.info(
           `Waiting for ${tokenType} balance. Current: ${balance}, Target: ${minimumAmount}, Backend lag: ${sourceGap}, Wallet lag: ${applyGap}`
-        );
+        )
       }),
       Rx.filter((state) => {
-        const balance = state.balances[tokenType] ?? 0n;
-        return state.syncProgress?.synced === true && balance >= minimumAmount;
+        const balance = state.balances[tokenType] ?? 0n
+        return state.syncProgress?.synced === true && balance >= minimumAmount
       }),
       Rx.map((state) => state.balances[tokenType] ?? 0n),
       Rx.timeout(timeoutMs)
     )
-  );
+  )
 
 // Enhanced function to wait for wallet sync after operations
 export const waitForWalletSyncAfterOperation = async (
@@ -609,23 +609,23 @@ export const waitForWalletSyncAfterOperation = async (
       wallet.state().pipe(
         Rx.throttleTime(1_000),
         Rx.tap((state) => {
-          const applyGap = state.syncProgress?.lag.applyGap ?? 0n;
-          const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n;
+          const applyGap = state.syncProgress?.lag.applyGap ?? 0n
+          const sourceGap = state.syncProgress?.lag.sourceGap ?? 0n
           logger.info(
             `Syncing after operation. Backend lag: ${sourceGap}, Wallet lag: ${applyGap}`
-          );
+          )
         }),
         Rx.filter((state) => {
-          return state.syncProgress?.synced === true;
+          return state.syncProgress?.synced === true
         }),
         Rx.timeout(timeoutMs)
       )
-    );
-    logger.info("Wallet sync completed after operation");
+    )
+    logger.info('Wallet sync completed after operation')
   } catch (error) {
-    logger.warn(`Wallet sync timeout after ${timeoutMs}ms`);
+    logger.warn(`Wallet sync timeout after ${timeoutMs}ms`)
   }
-};
+}
 
 // Function to display comprehensive wallet state including all token types
 const displayComprehensiveWalletState = async (
@@ -633,36 +633,36 @@ const displayComprehensiveWalletState = async (
   currentContractState: DerivedStateraContractState | undefined,
   logger: Logger
 ): Promise<void> => {
-  const state = await Rx.firstValueFrom(wallet.state());
+  const state = await Rx.firstValueFrom(wallet.state())
 
-  logger.info("=== WALLET STATE ===");
-  logger.info(`Address: ${state.address}`);
+  logger.info('=== WALLET STATE ===')
+  logger.info(`Address: ${state.address}`)
   logger.info(
-    `Sync Status: ${state.syncProgress?.synced ? "SYNCED" : "SYNCING"}`
-  );
+    `Sync Status: ${state.syncProgress?.synced ? 'SYNCED' : 'SYNCING'}`
+  )
 
   if (state.syncProgress) {
-    logger.info(`Apply Gap: ${state.syncProgress.lag.applyGap}`);
-    logger.info(`Source Gap: ${state.syncProgress.lag.sourceGap}`);
+    logger.info(`Apply Gap: ${state.syncProgress.lag.applyGap}`)
+    logger.info(`Source Gap: ${state.syncProgress.lag.sourceGap}`)
   }
 
-  logger.info("=== TOKEN BALANCES ===");
+  logger.info('=== TOKEN BALANCES ===')
   Object.entries(state.balances).forEach(([tokenType, balance]) => {
     if (tokenType === nativeToken()) {
-      logger.info(`Native Token (tDUST): ${balance}`);
+      logger.info(`Native Token (tDUST): ${balance}`)
     } else if (
       currentContractState &&
       tokenType === utils.uint8arraytostring(currentContractState.sUSDTokenType)
     ) {
-      logger.info(`Stablecoin (sUSD): ${balance}`);
+      logger.info(`Stablecoin (sUSD): ${balance}`)
     } else {
-      logger.info(`Token ${tokenType}: ${balance}`);
+      logger.info(`Token ${tokenType}: ${balance}`)
     }
-  });
+  })
 
-  logger.info(`Transaction History Count: ${state.transactionHistory.length}`);
-  logger.info("===================");
-};
+  logger.info(`Transaction History Count: ${state.transactionHistory.length}`)
+  logger.info('===================')
+}
 
 export const buildEnhancedWalletAndWaitForFunds = async (
   config: Config,
@@ -676,7 +676,7 @@ export const buildEnhancedWalletAndWaitForFunds = async (
     seed,
     filename,
     logger
-  );
+  )
 
   // Set up continuous state monitoring
   const stateSubscription = wallet
@@ -684,20 +684,20 @@ export const buildEnhancedWalletAndWaitForFunds = async (
     .pipe(Rx.throttleTime(60_000))
     .subscribe({
       next: (state) => {
-        logger.info("Wallet state changed - balances updated");
+        logger.info('Wallet state changed - balances updated')
         Object.entries(state.balances).forEach(([tokenType, balance]) => {
           if (balance > 0n) {
-            logger.info(`${tokenType}: ${balance}`);
+            logger.info(`${tokenType}: ${balance}`)
           }
-        });
-      },
-    });
+        })
+      }
+    })
 
   // Store subscription reference for cleanup
-  (wallet as any).__stateSubscription = stateSubscription;
+  ;(wallet as any).__stateSubscription = stateSubscription
 
-  return wallet;
-};
+  return wallet
+}
 
 export const buildWalletAndWaitForFunds = async (
   { indexer, indexerWS, node, proofServer }: Config,
@@ -705,22 +705,22 @@ export const buildWalletAndWaitForFunds = async (
   filename: string,
   logger: Logger
 ): Promise<Wallet & Resource> => {
-  const directoryPath = process.env.SYNC_CACHE;
-  let wallet: Wallet & Resource;
+  const directoryPath = process.env.SYNC_CACHE
+  let wallet: Wallet & Resource
   if (directoryPath !== undefined) {
     if (fs.existsSync(`${directoryPath}/${filename}`)) {
       logger.info(
         `Attempting to restore state from ${directoryPath}/${filename}`
-      );
+      )
       try {
         const serializedStream = fs.createReadStream(
           `${directoryPath}/${filename}`,
-          "utf-8"
-        );
-        const serialized = await streamToString(serializedStream);
-        serializedStream.on("finish", () => {
-          serializedStream.close();
-        });
+          'utf-8'
+        )
+        const serialized = await streamToString(serializedStream)
+        serializedStream.on('finish', () => {
+          serializedStream.close()
+        })
         wallet = await WalletBuilder.restore(
           indexer,
           indexerWS,
@@ -728,15 +728,15 @@ export const buildWalletAndWaitForFunds = async (
           node,
           seed,
           serialized,
-          "info"
-        );
-        wallet.start();
-        const stateObject = JSON.parse(serialized);
+          'info'
+        )
+        wallet.start()
+        const stateObject = JSON.parse(serialized)
         if (
           (await isAnotherChain(wallet, Number(stateObject.offset), logger)) ===
           true
         ) {
-          logger.warn("The chain was reset, building wallet from scratch");
+          logger.warn('The chain was reset, building wallet from scratch')
           wallet = await WalletBuilder.build(
             indexer,
             indexerWS,
@@ -744,25 +744,25 @@ export const buildWalletAndWaitForFunds = async (
             node,
             seed,
             getZswapNetworkId(),
-            "info"
-          );
-          wallet.start();
+            'info'
+          )
+          wallet.start()
         } else {
-          const newState = await waitForSync(wallet, logger);
+          const newState = await waitForSync(wallet, logger)
           // allow for situations when there's no new index in the network between runs
           if (newState.syncProgress?.synced) {
-            logger.info("Wallet was able to sync from restored state");
+            logger.info('Wallet was able to sync from restored state')
           } else {
-            logger.info(`Offset: ${stateObject.offset}`);
+            logger.info(`Offset: ${stateObject.offset}`)
             logger.info(
               `SyncProgress.lag.applyGap: ${newState.syncProgress?.lag.applyGap}`
-            );
+            )
             logger.info(
               `SyncProgress.lag.sourceGap: ${newState.syncProgress?.lag.sourceGap}`
-            );
+            )
             logger.warn(
-              "Wallet was not able to sync from restored state, building wallet from scratch"
-            );
+              'Wallet was not able to sync from restored state, building wallet from scratch'
+            )
             wallet = await WalletBuilder.build(
               indexer,
               indexerWS,
@@ -770,22 +770,22 @@ export const buildWalletAndWaitForFunds = async (
               node,
               seed,
               getZswapNetworkId(),
-              "info"
-            );
-            wallet.start();
+              'info'
+            )
+            wallet.start()
           }
         }
       } catch (error: unknown) {
-        if (typeof error === "string") {
-          logger.error(error);
+        if (typeof error === 'string') {
+          logger.error(error)
         } else if (error instanceof Error) {
-          logger.error(error.message);
+          logger.error(error.message)
         } else {
-          logger.error(error);
+          logger.error(error)
         }
         logger.warn(
-          "Wallet was not able to restore using the stored state, building wallet from scratch"
-        );
+          'Wallet was not able to restore using the stored state, building wallet from scratch'
+        )
         wallet = await WalletBuilder.build(
           indexer,
           indexerWS,
@@ -793,12 +793,12 @@ export const buildWalletAndWaitForFunds = async (
           node,
           seed,
           getZswapNetworkId(),
-          "info"
-        );
-        wallet.start();
+          'info'
+        )
+        wallet.start()
       }
     } else {
-      logger.info("Wallet save file not found, building wallet from scratch");
+      logger.info('Wallet save file not found, building wallet from scratch')
       wallet = await WalletBuilder.build(
         indexer,
         indexerWS,
@@ -806,14 +806,14 @@ export const buildWalletAndWaitForFunds = async (
         node,
         seed,
         getZswapNetworkId(),
-        "info"
-      );
-      wallet.start();
+        'info'
+      )
+      wallet.start()
     }
   } else {
     logger.info(
-      "File path for save file not found, building wallet from scratch"
-    );
+      'File path for save file not found, building wallet from scratch'
+    )
     wallet = await WalletBuilder.build(
       indexer,
       indexerWS,
@@ -821,27 +821,27 @@ export const buildWalletAndWaitForFunds = async (
       node,
       seed,
       getZswapNetworkId(),
-      "info"
-    );
-    wallet.start();
+      'info'
+    )
+    wallet.start()
   }
 
-  const state = await Rx.firstValueFrom(wallet.state());
-  logger.info(`Your wallet seed is: ${seed}`);
-  logger.info(`Your wallet address is: ${state.address}`);
-  let balance = state.balances[nativeToken()];
+  const state = await Rx.firstValueFrom(wallet.state())
+  logger.info(`Your wallet seed is: ${seed}`)
+  logger.info(`Your wallet address is: ${state.address}`)
+  let balance = state.balances[nativeToken()]
   if (balance === undefined || balance === 0n) {
-    logger.info(`Your wallet balance is: 0`);
-    logger.info(`Waiting to receive tokens...`);
-    balance = await waitForFunds(wallet, logger);
+    logger.info(`Your wallet balance is: 0`)
+    logger.info(`Waiting to receive tokens...`)
+    balance = await waitForFunds(wallet, logger)
   }
-  logger.info(`Your wallet balance is: ${balance}`);
+  logger.info(`Your wallet balance is: ${balance}`)
 
   // Auto-transfer half to Lace wallet for UI testing
   const laceAddress =
-    "mn_shield-addr_undeployed1yax8n6g0mu8zj35zn8lkynw8pyjzxpqm5wtkkajxfl4w8grmn99qxq8n4ecxhu5vs44yqa5sk35qsxnltgfru534qxmf7su440xhuxgr9vj9xnjq";
-  const amountToSend = balance / 2n;
-  logger.info(`Sending ${amountToSend} to Lace wallet: ${laceAddress}`);
+    'mn_shield-addr_undeployed1yax8n6g0mu8zj35zn8lkynw8pyjzxpqm5wtkkajxfl4w8grmn99qxq8n4ecxhu5vs44yqa5sk35qsxnltgfru534qxmf7su440xhuxgr9vj9xnjq'
+  const amountToSend = balance / 2n
+  logger.info(`Sending ${amountToSend} to Lace wallet: ${laceAddress}`)
 
   try {
     // Step 1: Prepare the transfer transaction
@@ -849,42 +849,42 @@ export const buildWalletAndWaitForFunds = async (
       {
         amount: amountToSend,
         type: nativeToken(),
-        receiverAddress: laceAddress,
-      },
-    ]);
+        receiverAddress: laceAddress
+      }
+    ])
 
     // Step 2: Prove the transaction
-    logger.info("Proving transaction (this may take a moment)...");
-    const provenTransaction = await wallet.proveTransaction(transferRecipe);
+    logger.info('Proving transaction (this may take a moment)...')
+    const provenTransaction = await wallet.proveTransaction(transferRecipe)
 
     // Step 3: Submit the transaction
-    const txHash = await wallet.submitTransaction(provenTransaction);
-    logger.info(`Transfer successful! TxHash: ${txHash}`);
+    const txHash = await wallet.submitTransaction(provenTransaction)
+    logger.info(`Transfer successful! TxHash: ${txHash}`)
 
     // Wait a moment and check new balance
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const newState = await Rx.firstValueFrom(wallet.state());
-    const newBalance = newState.balances[nativeToken()];
-    logger.info(`New wallet balance: ${newBalance}`);
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    const newState = await Rx.firstValueFrom(wallet.state())
+    const newBalance = newState.balances[nativeToken()]
+    logger.info(`New wallet balance: ${newBalance}`)
   } catch (error) {
-    logger.error({ error }, "Failed to transfer to Lace wallet");
+    logger.error({ error }, 'Failed to transfer to Lace wallet')
   }
 
-  return wallet;
-};
+  return wallet
+}
 
 export const randomBytes = (length: number): Uint8Array => {
-  const bytes = new Uint8Array(length);
-  webcrypto.getRandomValues(bytes);
-  return bytes;
-};
+  const bytes = new Uint8Array(length)
+  webcrypto.getRandomValues(bytes)
+  return bytes
+}
 
 // Generate a random see and create the wallet with that.
 export const buildFreshWallet = async (
   config: Config,
   logger: Logger
 ): Promise<Wallet & Resource> =>
-  await buildWalletAndWaitForFunds(config, toHex(randomBytes(32)), "", logger);
+  await buildWalletAndWaitForFunds(config, toHex(randomBytes(32)), '', logger)
 
 // Prompt for a seed and create the wallet with that.
 const buildWalletFromSeed = async (
@@ -892,23 +892,23 @@ const buildWalletFromSeed = async (
   rli: Interface,
   logger: Logger
 ): Promise<Wallet & Resource> => {
-  const seed = await rli.question("Enter your wallet seed: ");
-  return await buildWalletAndWaitForFunds(config, seed, "", logger);
-};
+  const seed = await rli.question('Enter your wallet seed: ')
+  return await buildWalletAndWaitForFunds(config, seed, '', logger)
+}
 
 /* ***********************************************************************
  * This seed gives access to tokens minted in the genesis block of a local development node - only
  * used in standalone networks to build a wallet with initial funds.
  */
 const GENESIS_MINT_WALLET_SEED =
-  "0000000000000000000000000000000000000000000000000000000000000001";
+  '0000000000000000000000000000000000000000000000000000000000000001'
 
 const WALLET_LOOP_QUESTION = `
 You can do one of the following:
   1. Build a fresh wallet
   2. Build wallet from a seed
   3. Exit
-Which would you like to do? `;
+Which would you like to do? `
 
 const buildWallet = async (
   config: Config,
@@ -919,76 +919,76 @@ const buildWallet = async (
     return await buildWalletAndWaitForFunds(
       config,
       GENESIS_MINT_WALLET_SEED,
-      "",
+      '',
       logger
-    );
+    )
   }
   while (true) {
-    const choice = await rli.question(WALLET_LOOP_QUESTION);
+    const choice = await rli.question(WALLET_LOOP_QUESTION)
     switch (choice) {
-      case "1":
-        return await buildFreshWallet(config, logger);
-      case "2":
-        return await buildWalletFromSeed(config, rli, logger);
-      case "3":
-        logger.info("Exiting...");
-        return null;
+      case '1':
+        return await buildFreshWallet(config, logger)
+      case '2':
+        return await buildWalletFromSeed(config, rli, logger)
+      case '3':
+        logger.info('Exiting...')
+        return null
       default:
-        logger.error(`Invalid choice: ${choice}`);
+        logger.error(`Invalid choice: ${choice}`)
     }
   }
-};
+}
 
 const mapContainerPort = (
   env: StartedDockerComposeEnvironment,
   url: string,
   containerName: string
 ) => {
-  const mappedUrl = new URL(url);
-  const container = env.getContainer(containerName);
+  const mappedUrl = new URL(url)
+  const container = env.getContainer(containerName)
 
-  mappedUrl.port = String(container.getFirstMappedPort());
+  mappedUrl.port = String(container.getFirstMappedPort())
 
-  return mappedUrl.toString().replace(/\/+$/, "");
-};
+  return mappedUrl.toString().replace(/\/+$/, '')
+}
 
 export const run = async (
   config: Config,
   logger: Logger,
   dockerEnv?: DockerComposeEnvironment
 ): Promise<void> => {
-  const rli = createInterface({ input, output, terminal: true });
-  let env;
+  const rli = createInterface({ input, output, terminal: true })
+  let env
   if (dockerEnv !== undefined) {
-    env = await dockerEnv.up();
+    env = await dockerEnv.up()
 
     if (config instanceof StandaloneConfig) {
       config.indexer = mapContainerPort(
         env,
         config.indexer,
-        "manual-statera-indexer"
-      );
+        'manual-statera-indexer'
+      )
       config.indexerWS = mapContainerPort(
         env,
         config.indexerWS,
-        "manual-statera-indexer"
-      );
-      config.node = mapContainerPort(env, config.node, "manual-statera-node");
+        'manual-statera-indexer'
+      )
+      config.node = mapContainerPort(env, config.node, 'manual-statera-node')
       config.proofServer = mapContainerPort(
         env,
         config.proofServer,
-        "manual-statera-proof-server"
-      );
+        'manual-statera-proof-server'
+      )
     }
   }
-  const wallet = await buildWallet(config, rli, logger);
+  const wallet = await buildWallet(config, rli, logger)
   try {
     if (wallet !== null) {
       const walletAndMidnightProvider =
-        await createWalletAndMidnightProvider(wallet);
+        await createWalletAndMidnightProvider(wallet)
       const providers = {
         privateStateProvider: levelPrivateStateProvider<PrivateStateId>({
-          privateStateStoreName: config.privateStateStoreName as string,
+          privateStateStoreName: config.privateStateStoreName as string
         }),
         publicDataProvider: indexerPublicDataProvider(
           config.indexer,
@@ -997,38 +997,38 @@ export const run = async (
         zkConfigProvider: new NodeZkConfigProvider<never>(config.zkConfigPath),
         proofProvider: httpClientProofProvider(config.proofServer),
         walletProvider: walletAndMidnightProvider,
-        midnightProvider: walletAndMidnightProvider,
-      };
-      await circuit_main_loop(wallet, providers, rli, logger);
+        midnightProvider: walletAndMidnightProvider
+      }
+      await circuit_main_loop(wallet, providers, rli, logger)
     }
   } catch (e) {
     if (e instanceof Error) {
-      logger.error(`Found error '${e.message}'`);
-      logger.info("Exiting...");
-      logger.debug(`${e.stack}`);
+      logger.error(`Found error '${e.message}'`)
+      logger.info('Exiting...')
+      logger.debug(`${e.stack}`)
     } else {
-      throw e;
+      throw e
     }
   } finally {
     try {
-      rli.close();
-      rli.removeAllListeners();
+      rli.close()
+      rli.removeAllListeners()
     } catch (e) {
     } finally {
       try {
         if (wallet !== null) {
-          await wallet.close();
+          await wallet.close()
         }
       } catch (e) {
       } finally {
         try {
           if (env !== undefined) {
-            await env.down();
-            logger.info("Goodbye");
-            process.exit(0);
+            await env.down()
+            logger.info('Goodbye')
+            process.exit(0)
           }
         } catch (e) {}
       }
     }
   }
-};
+}

@@ -82,8 +82,8 @@ export class StateraAPI implements DeployedStateraAPI {
     const txData =
       await this.allReadyDeployedContract.callTx.liquidateDebtPosition(
         BigInt(position.collateral_amount), // _totalCollateral
-        BigInt(position.debt),               // _totalDebt
-        BigInt(position.debt),               // _debtToLiquidate (full liquidation)
+        BigInt(position.debt), // _totalDebt
+        BigInt(position.debt), // _debtToLiquidate (full liquidation)
         utils.hexStringToUint8Array(position.id) // _depositId
       )
 
@@ -108,7 +108,8 @@ export class StateraAPI implements DeployedStateraAPI {
       stateraPrivateStateId
     )
     return (
-      existingPrivateState ?? createPrivateStateraState(utils.randomNonceBytes(32))
+      existingPrivateState ??
+      createPrivateStateraState(utils.randomNonceBytes(32))
     )
   }
 }

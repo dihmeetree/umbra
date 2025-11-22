@@ -5,10 +5,10 @@
  * It eliminates repetitive boilerplate and provides a consistent API for common test scenarios.
  */
 
-import type { ContractSimulator } from '@statera/simulator';
-import type { Wallet } from '@statera/simulator';
-import type { TokenType } from '@midnight-ntwrk/zswap';
-import type { StateraPrivateState } from '../index.js';
+import type { ContractSimulator } from '@statera/simulator'
+import type { Wallet } from '@statera/simulator'
+import type { TokenType } from '@midnight-ntwrk/zswap'
+import type { StateraPrivateState } from '../index.js'
 import {
   createPrivateStateForWallet,
   createCollateralCoin,
@@ -21,7 +21,7 @@ import {
   createUserId,
   asAdmin,
   type StateraTestFixture
-} from './test-utils.js';
+} from './test-utils.js'
 
 /**
  * StateManager - Centralized management of private states for multiple users
@@ -30,7 +30,7 @@ import {
  * across circuit executions, eliminating the need for manual state management in tests.
  */
 export class StateManager {
-  private states: Map<string, StateraPrivateState> = new Map();
+  private states: Map<string, StateraPrivateState> = new Map()
 
   constructor(private simulator: ContractSimulator<StateraPrivateState>) {}
 
@@ -39,28 +39,32 @@ export class StateManager {
    * Automatically preserves admin_secret and admin_metadata from simulator
    */
   getState(wallet: Wallet, key?: string): StateraPrivateState {
-    const stateKey = key || wallet.coinPublicKey;
+    const stateKey = key || wallet.coinPublicKey
 
     if (!this.states.has(stateKey)) {
       // Create new state with proper admin metadata
-      const state = createPrivateStateForWallet(wallet, this.simulator);
-      this.states.set(stateKey, state);
+      const state = createPrivateStateForWallet(wallet, this.simulator)
+      this.states.set(stateKey, state)
     }
 
-    return this.states.get(stateKey)!;
+    return this.states.get(stateKey)!
   }
 
   /**
    * Update a wallet's state with new data
    */
-  updateState(wallet: Wallet, updates: Partial<StateraPrivateState>, key?: string): void {
-    const stateKey = key || wallet.coinPublicKey;
-    const currentState = this.getState(wallet, key);
+  updateState(
+    wallet: Wallet,
+    updates: Partial<StateraPrivateState>,
+    key?: string
+  ): void {
+    const stateKey = key || wallet.coinPublicKey
+    const currentState = this.getState(wallet, key)
 
     this.states.set(stateKey, {
       ...currentState,
       ...updates
-    });
+    })
   }
 
   /**
@@ -68,20 +72,20 @@ export class StateManager {
    * Useful for preserving stake_metadata after deposits
    */
   captureState(wallet: Wallet, key?: string): void {
-    const stateKey = key || wallet.coinPublicKey;
-    const simulatorState = this.simulator.getPrivateState();
+    const stateKey = key || wallet.coinPublicKey
+    const simulatorState = this.simulator.getPrivateState()
 
     this.states.set(stateKey, {
       ...simulatorState,
       secret_key: wallet.secretKey
-    });
+    })
   }
 
   /**
    * Clear all cached states (useful between tests)
    */
   clear(): void {
-    this.states.clear();
+    this.states.clear()
   }
 }
 
@@ -98,9 +102,9 @@ export class StateManager {
  * ```
  */
 export class DepositBuilder {
-  private wallet?: Wallet;
-  private depositAmount: bigint = 1000n;
-  private oraclePk?: Uint8Array;
+  private wallet?: Wallet
+  private depositAmount: bigint = 1000n
+  private oraclePk?: Uint8Array
 
   constructor(
     private simulator: ContractSimulator<StateraPrivateState>,
@@ -108,39 +112,49 @@ export class DepositBuilder {
   ) {}
 
   forUser(wallet: Wallet): this {
-    this.wallet = wallet;
-    return this;
+    this.wallet = wallet
+    return this
   }
 
   amount(amount: bigint): this {
-    this.depositAmount = amount;
-    return this;
+    this.depositAmount = amount
+    return this
   }
 
   withCompliance(oraclePk: Uint8Array): this {
-    this.oraclePk = oraclePk;
-    return this;
+    this.oraclePk = oraclePk
+    return this
   }
 
   execute(): void {
     if (!this.wallet) {
-      throw new Error('Wallet must be specified with forUser()');
+      throw new Error('Wallet must be specified with forUser()')
     }
 
-    const oracle = this.oraclePk || createMockOraclePk();
-    const mockCoin = createCollateralCoin(this.depositAmount);
-    const complianceToken = createMockComplianceToken(this.wallet.coinPublicKey, oracle);
+    const oracle = this.oraclePk || createMockOraclePk()
+    const mockCoin = createCollateralCoin(this.depositAmount)
+    const complianceToken = createMockComplianceToken(
+      this.wallet.coinPublicKey,
+      oracle
+    )
 
-    prepareCoinForReceive(this.simulator, mockCoin, this.fixture.collateralTokenType);
+    prepareCoinForReceive(
+      this.simulator,
+      mockCoin,
+      this.fixture.collateralTokenType
+    )
 
     this.simulator
-      .as(createPrivateStateForWallet(this.wallet, this.simulator), this.wallet.coinPublicKey)
+      .as(
+        createPrivateStateForWallet(this.wallet, this.simulator),
+        this.wallet.coinPublicKey
+      )
       .executeImpureCircuit(
         'depositToCollateralPool',
         mockCoin,
         this.depositAmount,
         complianceToken
-      );
+      )
   }
 }
 
@@ -157,9 +171,9 @@ export class DepositBuilder {
  * ```
  */
 export class MintBuilder {
-  private wallet?: Wallet;
-  private collateralAmount: bigint = 1000n;
-  private mintAmount: bigint = 700n;
+  private wallet?: Wallet
+  private collateralAmount: bigint = 1000n
+  private mintAmount: bigint = 700n
 
   constructor(
     private simulator: ContractSimulator<StateraPrivateState>,
@@ -167,34 +181,34 @@ export class MintBuilder {
   ) {}
 
   forUser(wallet: Wallet): this {
-    this.wallet = wallet;
-    return this;
+    this.wallet = wallet
+    return this
   }
 
   withCollateral(amount: bigint): this {
-    this.collateralAmount = amount;
-    return this;
+    this.collateralAmount = amount
+    return this
   }
 
   amount(amount: bigint): this {
-    this.mintAmount = amount;
-    return this;
+    this.mintAmount = amount
+    return this
   }
 
   execute(): void {
     if (!this.wallet) {
-      throw new Error('Wallet must be specified with forUser()');
+      throw new Error('Wallet must be specified with forUser()')
     }
 
-    const privateState = this.getPrivateStateAfterDeposit();
+    const privateState = this.getPrivateStateAfterDeposit()
 
     this.simulator
       .as(privateState, this.wallet.coinPublicKey)
-      .executeImpureCircuit('mint_sUSD', this.mintAmount);
+      .executeImpureCircuit('mint_sUSD', this.mintAmount)
   }
 
   private getPrivateStateAfterDeposit(): StateraPrivateState {
-    const currentState = this.simulator.getPrivateState();
+    const currentState = this.simulator.getPrivateState()
 
     return {
       ...currentState,
@@ -203,7 +217,7 @@ export class MintBuilder {
         collateral: this.collateralAmount,
         debt: 0n
       }
-    };
+    }
   }
 }
 
@@ -219,8 +233,8 @@ export class MintBuilder {
  * ```
  */
 export class StakeBuilder {
-  private wallet?: Wallet;
-  private stakeAmount: bigint = 10000n;
+  private wallet?: Wallet
+  private stakeAmount: bigint = 10000n
 
   constructor(
     private simulator: ContractSimulator<StateraPrivateState>,
@@ -228,29 +242,39 @@ export class StakeBuilder {
   ) {}
 
   forUser(wallet: Wallet): this {
-    this.wallet = wallet;
-    return this;
+    this.wallet = wallet
+    return this
   }
 
   amount(amount: bigint): this {
-    this.stakeAmount = amount;
-    return this;
+    this.stakeAmount = amount
+    return this
   }
 
   execute(): StateraPrivateState {
     if (!this.wallet) {
-      throw new Error('Wallet must be specified with forUser()');
+      throw new Error('Wallet must be specified with forUser()')
     }
 
-    const stakeCoin = createSUSDCoin(this.stakeAmount, this.fixture.sSUSDTokenType);
-    prepareCoinForReceive(this.simulator, stakeCoin, this.fixture.sSUSDTokenType);
+    const stakeCoin = createSUSDCoin(
+      this.stakeAmount,
+      this.fixture.sSUSDTokenType
+    )
+    prepareCoinForReceive(
+      this.simulator,
+      stakeCoin,
+      this.fixture.sSUSDTokenType
+    )
 
     this.simulator
-      .as(createPrivateStateForWallet(this.wallet, this.simulator), this.wallet.coinPublicKey)
-      .executeImpureCircuit('depositToStabilityPool', stakeCoin);
+      .as(
+        createPrivateStateForWallet(this.wallet, this.simulator),
+        this.wallet.coinPublicKey
+      )
+      .executeImpureCircuit('depositToStabilityPool', stakeCoin)
 
     // Return the updated stake metadata for caller to preserve
-    return this.simulator.getPrivateState();
+    return this.simulator.getPrivateState()
   }
 }
 
@@ -269,11 +293,11 @@ export class StakeBuilder {
  * ```
  */
 export class LiquidationBuilder {
-  private targetWallet?: Wallet;
-  private liquidatorWallet?: Wallet;
-  private totalCollateral: bigint = 1000n;
-  private totalDebt: bigint = 703n;
-  private debtToLiquidate: bigint = 703n;
+  private targetWallet?: Wallet
+  private liquidatorWallet?: Wallet
+  private totalCollateral: bigint = 1000n
+  private totalDebt: bigint = 703n
+  private debtToLiquidate: bigint = 703n
 
   constructor(
     private simulator: ContractSimulator<StateraPrivateState>,
@@ -281,42 +305,44 @@ export class LiquidationBuilder {
   ) {}
 
   forTarget(wallet: Wallet): this {
-    this.targetWallet = wallet;
-    return this;
+    this.targetWallet = wallet
+    return this
   }
 
   byLiquidator(wallet: Wallet): this {
-    this.liquidatorWallet = wallet;
-    return this;
+    this.liquidatorWallet = wallet
+    return this
   }
 
   withCollateral(amount: bigint): this {
-    this.totalCollateral = amount;
-    return this;
+    this.totalCollateral = amount
+    return this
   }
 
   withDebt(amount: bigint): this {
-    this.totalDebt = amount;
-    return this;
+    this.totalDebt = amount
+    return this
   }
 
   liquidateAmount(amount: bigint): this {
-    this.debtToLiquidate = amount;
-    return this;
+    this.debtToLiquidate = amount
+    return this
   }
 
   execute(): void {
     if (!this.targetWallet || !this.liquidatorWallet) {
-      throw new Error('Both target and liquidator wallets must be specified');
+      throw new Error('Both target and liquidator wallets must be specified')
     }
 
-    const depositId = createUserId(this.targetWallet);
+    const depositId = createUserId(this.targetWallet)
 
     const liquidatorState: StateraPrivateState = {
       ...createPrivateStateForWallet(this.liquidatorWallet, this.simulator),
       stake_pool_coin: createMockStakePoolCoin(this.fixture.sSUSDTokenType),
-      reserve_pool_coin: createMockReservePoolCoin(this.fixture.collateralTokenType)
-    };
+      reserve_pool_coin: createMockReservePoolCoin(
+        this.fixture.collateralTokenType
+      )
+    }
 
     this.simulator
       .as(liquidatorState, this.liquidatorWallet.coinPublicKey)
@@ -326,7 +352,7 @@ export class LiquidationBuilder {
         this.totalDebt,
         this.debtToLiquidate,
         depositId
-      );
+      )
   }
 }
 
@@ -348,34 +374,41 @@ export class AdminBuilder {
   ) {}
 
   addOracle(oraclePk: Uint8Array): this {
-    asAdmin(this.simulator, this.adminWallet)
-      .executeImpureCircuit('addTrustedOracle', oraclePk);
-    return this;
+    asAdmin(this.simulator, this.adminWallet).executeImpureCircuit(
+      'addTrustedOracle',
+      oraclePk
+    )
+    return this
   }
 
   resetConfig(liquidationThreshold: bigint, lvt: bigint, mcr: bigint): this {
-    asAdmin(this.simulator, this.adminWallet)
-      .executeImpureCircuit('resetProtocolConfig', liquidationThreshold, lvt, mcr);
-    return this;
+    asAdmin(this.simulator, this.adminWallet).executeImpureCircuit(
+      'resetProtocolConfig',
+      liquidationThreshold,
+      lvt,
+      mcr
+    )
+    return this
   }
 
   togglePause(): this {
-    asAdmin(this.simulator, this.adminWallet)
-      .executeImpureCircuit('togglePause');
-    return this;
+    asAdmin(this.simulator, this.adminWallet).executeImpureCircuit(
+      'togglePause'
+    )
+    return this
   }
 
   withdrawFees(amount: bigint, collateralTokenType: TokenType): this {
     const adminState = {
       ...createPrivateStateForWallet(this.adminWallet, this.simulator),
       reserve_pool_coin: createMockReservePoolCoin(collateralTokenType)
-    };
+    }
 
     this.simulator
       .as(adminState, this.adminWallet.coinPublicKey)
-      .executeImpureCircuit('withdrawProtocolFees', amount);
+      .executeImpureCircuit('withdrawProtocolFees', amount)
 
-    return this;
+    return this
   }
 }
 
@@ -393,23 +426,25 @@ export class AdminBuilder {
  * ```
  */
 export class TestScenarioBuilder {
-  private stateManager: StateManager;
-  private oraclePk?: Uint8Array;
+  private stateManager: StateManager
+  private oraclePk?: Uint8Array
 
   constructor(private fixture: StateraTestFixture) {
-    this.stateManager = new StateManager(fixture.simulator);
+    this.stateManager = new StateManager(fixture.simulator)
   }
 
   /**
    * Setup oracle for the protocol
    */
   setupOracle(oraclePk?: Uint8Array): this {
-    this.oraclePk = oraclePk || createMockOraclePk();
+    this.oraclePk = oraclePk || createMockOraclePk()
 
-    new AdminBuilder(this.fixture.simulator, this.fixture.adminWallet)
-      .addOracle(this.oraclePk);
+    new AdminBuilder(
+      this.fixture.simulator,
+      this.fixture.adminWallet
+    ).addOracle(this.oraclePk)
 
-    return this;
+    return this
   }
 
   /**
@@ -417,7 +452,7 @@ export class TestScenarioBuilder {
    */
   createBorrower(wallet: Wallet, collateral: bigint, mintAmount: bigint): this {
     if (!this.oraclePk) {
-      throw new Error('Oracle must be setup first with setupOracle()');
+      throw new Error('Oracle must be setup first with setupOracle()')
     }
 
     // Deposit
@@ -425,16 +460,16 @@ export class TestScenarioBuilder {
       .forUser(wallet)
       .amount(collateral)
       .withCompliance(this.oraclePk)
-      .execute();
+      .execute()
 
     // Mint
     new MintBuilder(this.fixture.simulator, this.fixture)
       .forUser(wallet)
       .withCollateral(collateral)
       .amount(mintAmount)
-      .execute();
+      .execute()
 
-    return this;
+    return this
   }
 
   /**
@@ -444,29 +479,35 @@ export class TestScenarioBuilder {
     const stakeMetadata = new StakeBuilder(this.fixture.simulator, this.fixture)
       .forUser(wallet)
       .amount(stakeAmount)
-      .execute();
+      .execute()
 
     // Preserve the stake metadata
-    this.stateManager.captureState(wallet);
+    this.stateManager.captureState(wallet)
 
-    return this;
+    return this
   }
 
   /**
    * Setup admin configuration changes
    */
-  adminResetConfig(liquidationThreshold: bigint, lvt: bigint, mcr: bigint): this {
-    new AdminBuilder(this.fixture.simulator, this.fixture.adminWallet)
-      .resetConfig(liquidationThreshold, lvt, mcr);
+  adminResetConfig(
+    liquidationThreshold: bigint,
+    lvt: bigint,
+    mcr: bigint
+  ): this {
+    new AdminBuilder(
+      this.fixture.simulator,
+      this.fixture.adminWallet
+    ).resetConfig(liquidationThreshold, lvt, mcr)
 
-    return this;
+    return this
   }
 
   /**
    * Get the state manager for accessing preserved states
    */
   getStateManager(): StateManager {
-    return this.stateManager;
+    return this.stateManager
   }
 
   /**
@@ -476,6 +517,6 @@ export class TestScenarioBuilder {
     return {
       stateManager: this.stateManager,
       fixture: this.fixture
-    };
+    }
   }
 }

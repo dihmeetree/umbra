@@ -28,15 +28,15 @@ export type DerivedStateraContractState = {
   readonly sUSDTokenType: Uint8Array
   readonly liquidationThreshold: bigint
   // Direct Map storage: count depositors and stakers
-  readonly depositorsCount: bigint  // Number of depositors in Map
-  readonly stakersCount: bigint      // Number of stakers in Map
+  readonly depositorsCount: bigint // Number of depositors in Map
+  readonly stakersCount: bigint // Number of stakers in Map
   readonly LVT: bigint
   readonly MCR: bigint
   readonly liquidationCount: bigint
   readonly validCollateralType: Uint8Array
   readonly trustedOracles: DerivedTrustedOracle[]
-  readonly mintMetadata?: any  // Added from private state
-  readonly secret_key?: Uint8Array  // Added from private state
+  readonly mintMetadata?: any // Added from private state
+  readonly secret_key?: Uint8Array // Added from private state
 }
 
 export type DerivedDepositor = {

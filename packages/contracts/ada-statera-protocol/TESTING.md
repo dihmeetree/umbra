@@ -23,40 +23,39 @@ The test suite has been refactored to provide a clean, maintainable, and reusabl
 ### Basic Test Setup
 
 ```typescript
-import { createStateraTestFixture } from './test-utils.js';
-import { DepositBuilder, MintBuilder } from './test-builders.js';
+import { createStateraTestFixture } from './test-utils.js'
+import { DepositBuilder, MintBuilder } from './test-builders.js'
 
 describe('My Test', () => {
-  let fixture: StateraTestFixture;
+  let fixture: StateraTestFixture
 
   beforeEach(() => {
-    fixture = createStateraTestFixture(3); // Create fixture with 3 user wallets
-  });
+    fixture = createStateraTestFixture(3) // Create fixture with 3 user wallets
+  })
 
   it('should deposit and mint', () => {
-    const { simulator, adminWallet, userWallets } = fixture;
-    const user = userWallets[0];
-    const oraclePk = createMockOraclePk();
+    const { simulator, adminWallet, userWallets } = fixture
+    const user = userWallets[0]
+    const oraclePk = createMockOraclePk()
 
     // Setup
-    new AdminBuilder(simulator, adminWallet)
-      .addOracle(oraclePk);
+    new AdminBuilder(simulator, adminWallet).addOracle(oraclePk)
 
     // Deposit
     new DepositBuilder(simulator, fixture)
       .forUser(user)
       .amount(1000n)
       .withCompliance(oraclePk)
-      .execute();
+      .execute()
 
     // Mint
     new MintBuilder(simulator, fixture)
       .forUser(user)
       .withCollateral(1000n)
       .amount(700n)
-      .execute();
-  });
-});
+      .execute()
+  })
+})
 ```
 
 ## Builders
@@ -66,15 +65,17 @@ describe('My Test', () => {
 Simplifies collateral deposit operations.
 
 **Example:**
+
 ```typescript
 new DepositBuilder(simulator, fixture)
   .forUser(wallet)
   .amount(1000n)
   .withCompliance(oraclePk)
-  .execute();
+  .execute()
 ```
 
 **What it handles:**
+
 - Creates collateral coin with proper SPECK conversion
 - Creates compliance (KYC) token
 - Prepares coin for `receive()`
@@ -86,15 +87,17 @@ new DepositBuilder(simulator, fixture)
 Simplifies sUSD minting operations.
 
 **Example:**
+
 ```typescript
 new MintBuilder(simulator, fixture)
   .forUser(wallet)
   .withCollateral(1000n)
   .amount(700n)
-  .execute();
+  .execute()
 ```
 
 **What it handles:**
+
 - Creates private state with correct `mint_metadata`
 - Preserves `admin_secret` and `admin_metadata`
 - Handles state transitions after deposit
@@ -104,14 +107,16 @@ new MintBuilder(simulator, fixture)
 Simplifies stability pool staking operations.
 
 **Example:**
+
 ```typescript
 const stakeMetadata = new StakeBuilder(simulator, fixture)
   .forUser(wallet)
   .amount(10000n)
-  .execute();
+  .execute()
 ```
 
 **What it handles:**
+
 - Creates sUSD coin with correct token type
 - Prepares coin for `receive()`
 - Returns updated stake metadata for preservation
@@ -121,6 +126,7 @@ const stakeMetadata = new StakeBuilder(simulator, fixture)
 Simplifies liquidation operations.
 
 **Example:**
+
 ```typescript
 new LiquidationBuilder(simulator, fixture)
   .forTarget(borrower)
@@ -128,10 +134,11 @@ new LiquidationBuilder(simulator, fixture)
   .withCollateral(1000n)
   .withDebt(703n)
   .liquidateAmount(300n)
-  .execute();
+  .execute()
 ```
 
 **What it handles:**
+
 - Creates user ID for target position
 - Adds required pool coins to liquidator state
 - Preserves admin metadata
@@ -142,15 +149,17 @@ new LiquidationBuilder(simulator, fixture)
 Simplifies admin operations with chainable methods.
 
 **Example:**
+
 ```typescript
 new AdminBuilder(simulator, adminWallet)
   .addOracle(oraclePk)
   .resetConfig(70n, 68n, 120n)
   .togglePause()
-  .withdrawFees(5n, collateralTokenType);
+  .withdrawFees(5n, collateralTokenType)
 ```
 
 **What it handles:**
+
 - Automatic admin authentication
 - Proper state management for each operation
 - Chainable API for multiple admin actions
@@ -160,20 +169,22 @@ new AdminBuilder(simulator, adminWallet)
 High-level builder for complex multi-step scenarios.
 
 **Example:**
+
 ```typescript
 const scenario = new TestScenarioBuilder(fixture)
   .setupOracle()
   .createStaker(staker, 10000n)
   .createBorrower(borrower, 1000n, 700n)
   .adminResetConfig(70n, 68n, 120n)
-  .build();
+  .build()
 
 // Access state manager
-const { stateManager } = scenario;
-const stakerState = stateManager.getState(staker);
+const { stateManager } = scenario
+const stakerState = stateManager.getState(staker)
 ```
 
 **What it provides:**
+
 - Complete scenario setup with one chain
 - Automatic state preservation
 - Built-in state manager for accessing preserved states
@@ -187,19 +198,21 @@ The `StateManager` class automatically tracks and preserves private states acros
 **Key Methods:**
 
 ```typescript
-const stateManager = new StateManager(simulator);
+const stateManager = new StateManager(simulator)
 
 // Get or create state for a wallet
-const state = stateManager.getState(wallet);
+const state = stateManager.getState(wallet)
 
 // Update state with new data
-stateManager.updateState(wallet, { mint_metadata: { collateral: 1000n, debt: 0n } });
+stateManager.updateState(wallet, {
+  mint_metadata: { collateral: 1000n, debt: 0n }
+})
 
 // Capture current simulator state for a wallet
-stateManager.captureState(wallet, 'after-deposit');
+stateManager.captureState(wallet, 'after-deposit')
 
 // Clear all cached states
-stateManager.clear();
+stateManager.clear()
 ```
 
 **Why it's important:**
@@ -218,11 +231,11 @@ Without StateManager, you'd need to manually preserve these states everywhere. W
 
 ```typescript
 // Deposit
-const user = userWallets[0];
-const oraclePk = createMockOraclePk();
-const mockCoin = createCollateralCoin(1000n);
-const complianceToken = createMockComplianceToken(user.coinPublicKey, oraclePk);
-prepareCoinForReceive(simulator, mockCoin, collateralTokenType);
+const user = userWallets[0]
+const oraclePk = createMockOraclePk()
+const mockCoin = createCollateralCoin(1000n)
+const complianceToken = createMockComplianceToken(user.coinPublicKey, oraclePk)
+prepareCoinForReceive(simulator, mockCoin, collateralTokenType)
 
 simulator
   .as(createPrivateStateForWallet(user, simulator), user.coinPublicKey)
@@ -231,42 +244,43 @@ simulator
     mockCoin,
     1000n,
     complianceToken
-  );
+  )
 
 // Mint
 const privateState = {
   ...simulator.getPrivateState(),
   secret_key: user.secretKey,
   mint_metadata: { collateral: 1000n, debt: 0n }
-};
+}
 
 simulator
   .as(privateState, user.coinPublicKey)
-  .executeImpureCircuit('mint_sUSD', 700n);
+  .executeImpureCircuit('mint_sUSD', 700n)
 ```
 
 ### After (With Builders)
 
 ```typescript
-const user = userWallets[0];
-const oraclePk = createMockOraclePk();
+const user = userWallets[0]
+const oraclePk = createMockOraclePk()
 
 // Deposit
 new DepositBuilder(simulator, fixture)
   .forUser(user)
   .amount(1000n)
   .withCompliance(oraclePk)
-  .execute();
+  .execute()
 
 // Mint
 new MintBuilder(simulator, fixture)
   .forUser(user)
   .withCollateral(1000n)
   .amount(700n)
-  .execute();
+  .execute()
 ```
 
 **Benefits:**
+
 - 70% less code
 - No manual state management
 - More readable and maintainable
@@ -281,16 +295,19 @@ Always prefer builders over manual setup:
 
 ```typescript
 // ❌ Don't do this
-const mockCoin = createCollateralCoin(1000n);
-prepareCoinForReceive(simulator, mockCoin, collateralTokenType);
-simulator.as(createPrivateStateForWallet(user, simulator), user.coinPublicKey)
-  .executeImpureCircuit('depositToCollateralPool', mockCoin, 1000n, complianceToken);
+const mockCoin = createCollateralCoin(1000n)
+prepareCoinForReceive(simulator, mockCoin, collateralTokenType)
+simulator
+  .as(createPrivateStateForWallet(user, simulator), user.coinPublicKey)
+  .executeImpureCircuit(
+    'depositToCollateralPool',
+    mockCoin,
+    1000n,
+    complianceToken
+  )
 
 // ✅ Do this
-new DepositBuilder(simulator, fixture)
-  .forUser(user)
-  .amount(1000n)
-  .execute();
+new DepositBuilder(simulator, fixture).forUser(user).amount(1000n).execute()
 ```
 
 ### 2. Use StateManager for Complex Scenarios
@@ -298,19 +315,16 @@ new DepositBuilder(simulator, fixture)
 When you need to preserve state across multiple operations:
 
 ```typescript
-const stateManager = new StateManager(simulator);
+const stateManager = new StateManager(simulator)
 
 // Stake
-new StakeBuilder(simulator, fixture)
-  .forUser(staker)
-  .amount(10000n)
-  .execute();
+new StakeBuilder(simulator, fixture).forUser(staker).amount(10000n).execute()
 
 // Preserve stake metadata immediately
-stateManager.captureState(staker, 'after-stake');
+stateManager.captureState(staker, 'after-stake')
 
 // Later, use the preserved state
-const stakerState = stateManager.getState(staker, 'after-stake');
+const stakerState = stateManager.getState(staker, 'after-stake')
 ```
 
 ### 3. Use TestScenarioBuilder for Multi-Step Tests
@@ -324,7 +338,7 @@ const scenario = new TestScenarioBuilder(fixture)
   .createBorrower(borrower1, 1000n, 700n)
   .createBorrower(borrower2, 2000n, 1400n)
   .adminResetConfig(70n, 68n, 120n)
-  .build();
+  .build()
 ```
 
 ### 4. Keep Test Data Consistent
@@ -332,14 +346,14 @@ const scenario = new TestScenarioBuilder(fixture)
 Use constants for common values:
 
 ```typescript
-const DEFAULT_DEPOSIT = 1000n;
-const DEFAULT_MINT = 700n;
-const DEFAULT_STAKE = 10000n;
+const DEFAULT_DEPOSIT = 1000n
+const DEFAULT_MINT = 700n
+const DEFAULT_STAKE = 10000n
 
 new DepositBuilder(simulator, fixture)
   .forUser(user)
   .amount(DEFAULT_DEPOSIT)
-  .execute();
+  .execute()
 ```
 
 ### 5. Test Both Happy and Sad Paths
@@ -348,10 +362,7 @@ Use builders for setup, then test edge cases:
 
 ```typescript
 // Setup (happy path)
-new DepositBuilder(simulator, fixture)
-  .forUser(user)
-  .amount(1000n)
-  .execute();
+new DepositBuilder(simulator, fixture).forUser(user).amount(1000n).execute()
 
 // Test edge case (sad path)
 expect(() => {
@@ -359,8 +370,8 @@ expect(() => {
     .forUser(user)
     .withCollateral(1000n)
     .amount(10000n) // Way too much
-    .execute();
-}).toThrow();
+    .execute()
+}).toThrow()
 ```
 
 ## Troubleshooting
@@ -377,9 +388,7 @@ createPrivateStateForWallet(user)
 createPrivateStateForWallet(user, simulator)
 
 // ✅ Better - use builders (they handle this automatically)
-new DepositBuilder(simulator, fixture)
-  .forUser(user)
-  .execute();
+new DepositBuilder(simulator, fixture).forUser(user).execute()
 ```
 
 ### "Unauthorized" errors in admin operations
@@ -388,16 +397,20 @@ This means the admin's `coinPublicKey` wasn't passed correctly. Solution:
 
 ```typescript
 // ❌ Wrong
-simulator.as(createAdminPrivateState(simulator, adminWallet))
-  .executeImpureCircuit('addTrustedOracle', oraclePk);
+simulator
+  .as(createAdminPrivateState(simulator, adminWallet))
+  .executeImpureCircuit('addTrustedOracle', oraclePk)
 
 // ✅ Correct
-simulator.as(createAdminPrivateState(simulator, adminWallet), adminWallet.coinPublicKey)
-  .executeImpureCircuit('addTrustedOracle', oraclePk);
+simulator
+  .as(
+    createAdminPrivateState(simulator, adminWallet),
+    adminWallet.coinPublicKey
+  )
+  .executeImpureCircuit('addTrustedOracle', oraclePk)
 
 // ✅ Better - use AdminBuilder
-new AdminBuilder(simulator, adminWallet)
-  .addOracle(oraclePk);
+new AdminBuilder(simulator, adminWallet).addOracle(oraclePk)
 ```
 
 ### "Invalid stake metadata" after liquidations
@@ -406,22 +419,22 @@ Stake metadata must be preserved from the initial deposit. Solution:
 
 ```typescript
 // Deposit and capture metadata
-new StakeBuilder(simulator, fixture)
-  .forUser(staker)
-  .amount(10000n)
-  .execute();
+new StakeBuilder(simulator, fixture).forUser(staker).amount(10000n).execute()
 
-const stakerMetadata = simulator.getPrivateState().stake_metadata;
+const stakerMetadata = simulator.getPrivateState().stake_metadata
 
 // ... other operations (liquidation, etc.) ...
 
 // Use preserved metadata
 simulator
-  .as({
-    ...createPrivateStateForWallet(staker, simulator),
-    stake_metadata: stakerMetadata
-  }, staker.coinPublicKey)
-  .executeCircuit('checkStakeReward');
+  .as(
+    {
+      ...createPrivateStateForWallet(staker, simulator),
+      stake_metadata: stakerMetadata
+    },
+    staker.coinPublicKey
+  )
+  .executeCircuit('checkStakeReward')
 ```
 
 ## Migration Guide
@@ -429,54 +442,80 @@ simulator
 To migrate existing tests to use the new builders:
 
 1. **Replace deposit operations:**
+
    ```typescript
    // Before
-   const mockCoin = createCollateralCoin(depositAmount);
-   const complianceToken = createMockComplianceToken(user.coinPublicKey, oraclePk);
-   prepareCoinForReceive(simulator, mockCoin, collateralTokenType);
-   simulator.as(createPrivateStateForWallet(user, simulator), user.coinPublicKey)
-     .executeImpureCircuit('depositToCollateralPool', mockCoin, depositAmount, complianceToken);
+   const mockCoin = createCollateralCoin(depositAmount)
+   const complianceToken = createMockComplianceToken(
+     user.coinPublicKey,
+     oraclePk
+   )
+   prepareCoinForReceive(simulator, mockCoin, collateralTokenType)
+   simulator
+     .as(createPrivateStateForWallet(user, simulator), user.coinPublicKey)
+     .executeImpureCircuit(
+       'depositToCollateralPool',
+       mockCoin,
+       depositAmount,
+       complianceToken
+     )
 
    // After
    new DepositBuilder(simulator, fixture)
      .forUser(user)
      .amount(depositAmount)
      .withCompliance(oraclePk)
-     .execute();
+     .execute()
    ```
 
 2. **Replace mint operations:**
+
    ```typescript
    // Before
-   simulator.as(getPrivateStateAfterDeposit(simulator, user, depositAmount), user.coinPublicKey)
-     .executeImpureCircuit('mint_sUSD', mintAmount);
+   simulator
+     .as(
+       getPrivateStateAfterDeposit(simulator, user, depositAmount),
+       user.coinPublicKey
+     )
+     .executeImpureCircuit('mint_sUSD', mintAmount)
 
    // After
    new MintBuilder(simulator, fixture)
      .forUser(user)
      .withCollateral(depositAmount)
      .amount(mintAmount)
-     .execute();
+     .execute()
    ```
 
 3. **Replace admin operations:**
+
    ```typescript
    // Before
-   asAdmin(simulator, adminWallet)
-     .executeImpureCircuit('addTrustedOracle', oraclePk);
-   asAdmin(simulator, adminWallet)
-     .executeImpureCircuit('resetProtocolConfig', 70n, 68n, 120n);
+   asAdmin(simulator, adminWallet).executeImpureCircuit(
+     'addTrustedOracle',
+     oraclePk
+   )
+   asAdmin(simulator, adminWallet).executeImpureCircuit(
+     'resetProtocolConfig',
+     70n,
+     68n,
+     120n
+   )
 
    // After
    new AdminBuilder(simulator, adminWallet)
      .addOracle(oraclePk)
-     .resetConfig(70n, 68n, 120n);
+     .resetConfig(70n, 68n, 120n)
    ```
 
 4. **Use TestScenarioBuilder for complex setups:**
+
    ```typescript
    // Before (many lines of setup code)
-   asAdmin(simulator, adminWallet).executeImpureCircuit('addTrustedOracle', oraclePk);
+   asAdmin(simulator, adminWallet).executeImpureCircuit(
+     'addTrustedOracle',
+     oraclePk
+   )
    // ... deposit ...
    // ... mint ...
    // ... stake ...
@@ -486,7 +525,7 @@ To migrate existing tests to use the new builders:
      .setupOracle(oraclePk)
      .createBorrower(user, 1000n, 700n)
      .createStaker(staker, 10000n)
-     .build();
+     .build()
    ```
 
 ## Running Tests

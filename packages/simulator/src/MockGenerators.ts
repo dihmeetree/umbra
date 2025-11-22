@@ -1,46 +1,46 @@
-import { randomBytes, toHex, pad, generateSecretKey } from './utils.js';
+import { randomBytes, toHex, pad, generateSecretKey } from './utils.js'
 
 /**
  * Configuration for generating a mock oracle
  */
 export interface MockOracleConfig {
-  name?: string;
-  publicKey?: Uint8Array;
+  name?: string
+  publicKey?: Uint8Array
 }
 
 /**
  * Configuration for generating a mock compliance token
  */
 export interface MockComplianceConfig {
-  did?: string;
-  validUntil?: bigint;
-  issuer?: string;
+  did?: string
+  validUntil?: bigint
+  issuer?: string
 }
 
 /**
  * A mock oracle public key
  */
 export interface MockOracle {
-  name: string;
-  publicKey: Uint8Array;
-  publicKeyHex: string;
+  name: string
+  publicKey: Uint8Array
+  publicKeyHex: string
 }
 
 /**
  * A mock compliance token
  */
 export interface MockComplianceToken {
-  did: string;
-  validUntil: bigint;
-  issuer: string;
-  signature: Uint8Array;
+  did: string
+  validUntil: bigint
+  issuer: string
+  signature: Uint8Array
   // The actual token data that gets passed to circuits
   token: {
-    holder: string;
-    did: Uint8Array;
-    validUntil: bigint;
-    issuerSignature: Uint8Array;
-  };
+    holder: string
+    did: Uint8Array
+    validUntil: bigint
+    issuerSignature: Uint8Array
+  }
 }
 
 /**
@@ -69,15 +69,18 @@ export class MockGenerators {
    * @param config - Optional configuration
    * @returns Mock oracle object
    */
-  static createOracle(name: string = 'TestOracle', config?: MockOracleConfig): MockOracle {
-    const publicKey = config?.publicKey || generateSecretKey(); // Using secretKey as publicKey for simplicity
-    const publicKeyHex = toHex(publicKey);
+  static createOracle(
+    name: string = 'TestOracle',
+    config?: MockOracleConfig
+  ): MockOracle {
+    const publicKey = config?.publicKey || generateSecretKey() // Using secretKey as publicKey for simplicity
+    const publicKeyHex = toHex(publicKey)
 
     return {
       name,
       publicKey,
-      publicKeyHex,
-    };
+      publicKeyHex
+    }
   }
 
   /**
@@ -87,7 +90,7 @@ export class MockGenerators {
    * @returns Array of mock oracles
    */
   static createOracles(names: string[]): MockOracle[] {
-    return names.map(name => MockGenerators.createOracle(name));
+    return names.map((name) => MockGenerators.createOracle(name))
   }
 
   /**
@@ -97,11 +100,11 @@ export class MockGenerators {
    * @returns Map of oracle name to oracle object
    */
   static createOracleMap(names: string[]): Map<string, MockOracle> {
-    const map = new Map<string, MockOracle>();
+    const map = new Map<string, MockOracle>()
     for (const name of names) {
-      map.set(name, MockGenerators.createOracle(name));
+      map.set(name, MockGenerators.createOracle(name))
     }
-    return map;
+    return map
   }
 
   /**
@@ -115,10 +118,11 @@ export class MockGenerators {
     holderPublicKey: string,
     config?: MockComplianceConfig
   ): MockComplianceToken {
-    const did = config?.did || `did:mock:${toHex(randomBytes(16))}`;
-    const validUntil = config?.validUntil || BigInt(Date.now() + 365 * 24 * 60 * 60 * 1000); // 1 year
-    const issuer = config?.issuer || 'MockComplianceIssuer';
-    const signature = randomBytes(64); // Mock signature
+    const did = config?.did || `did:mock:${toHex(randomBytes(16))}`
+    const validUntil =
+      config?.validUntil || BigInt(Date.now() + 365 * 24 * 60 * 60 * 1000) // 1 year
+    const issuer = config?.issuer || 'MockComplianceIssuer'
+    const signature = randomBytes(64) // Mock signature
 
     return {
       did,
@@ -129,9 +133,9 @@ export class MockGenerators {
         holder: holderPublicKey,
         did: pad(did, 32),
         validUntil,
-        issuerSignature: signature,
-      },
-    };
+        issuerSignature: signature
+      }
+    }
   }
 
   /**
@@ -145,7 +149,9 @@ export class MockGenerators {
     holderPublicKeys: string[],
     config?: MockComplianceConfig
   ): MockComplianceToken[] {
-    return holderPublicKeys.map(key => MockGenerators.createComplianceToken(key, config));
+    return holderPublicKeys.map((key) =>
+      MockGenerators.createComplianceToken(key, config)
+    )
   }
 
   /**
@@ -159,11 +165,11 @@ export class MockGenerators {
     holderPublicKeys: string[],
     config?: MockComplianceConfig
   ): Map<string, MockComplianceToken> {
-    const map = new Map<string, MockComplianceToken>();
+    const map = new Map<string, MockComplianceToken>()
     for (const key of holderPublicKeys) {
-      map.set(key, MockGenerators.createComplianceToken(key, config));
+      map.set(key, MockGenerators.createComplianceToken(key, config))
     }
-    return map;
+    return map
   }
 
   /**
@@ -174,7 +180,7 @@ export class MockGenerators {
    * @returns Price value as bigint
    */
   static createPrice(price: number, decimals: number = 6): bigint {
-    return BigInt(Math.floor(price * Math.pow(10, decimals)));
+    return BigInt(Math.floor(price * Math.pow(10, decimals)))
   }
 
   /**
@@ -184,7 +190,7 @@ export class MockGenerators {
    * @returns Timestamp as bigint
    */
   static createTimestamp(offsetSeconds: number = 0): bigint {
-    return BigInt(Math.floor(Date.now() / 1000) + offsetSeconds);
+    return BigInt(Math.floor(Date.now() / 1000) + offsetSeconds)
   }
 
   /**
@@ -196,15 +202,15 @@ export class MockGenerators {
   static createMetadataHash(seed?: string): Uint8Array {
     if (seed) {
       // Deterministic hash based on seed
-      const seedBytes = new TextEncoder().encode(seed);
-      const hash = new Uint8Array(32);
+      const seedBytes = new TextEncoder().encode(seed)
+      const hash = new Uint8Array(32)
       for (let i = 0; i < 32; i++) {
-        hash[i] = seedBytes[i % seedBytes.length] ^ (i * 7);
+        hash[i] = seedBytes[i % seedBytes.length] ^ (i * 7)
       }
-      return hash;
+      return hash
     }
     // Random hash
-    return randomBytes(32);
+    return randomBytes(32)
   }
 
   /**
@@ -214,7 +220,7 @@ export class MockGenerators {
    * @returns 32-byte nullifier
    */
   static createNullifier(seed?: string): Uint8Array {
-    return MockGenerators.createMetadataHash(seed);
+    return MockGenerators.createMetadataHash(seed)
   }
 
   /**
@@ -224,7 +230,7 @@ export class MockGenerators {
    * @returns 32-byte commitment
    */
   static createCommitment(seed?: string): Uint8Array {
-    return MockGenerators.createMetadataHash(seed);
+    return MockGenerators.createMetadataHash(seed)
   }
 
   /**
@@ -235,8 +241,8 @@ export class MockGenerators {
    * @returns DID string
    */
   static createDID(method: string = 'mock', identifier?: string): string {
-    const id = identifier || toHex(randomBytes(16));
-    return `did:${method}:${id}`;
+    const id = identifier || toHex(randomBytes(16))
+    return `did:${method}:${id}`
   }
 
   /**
@@ -246,7 +252,7 @@ export class MockGenerators {
    * @returns Signature bytes
    */
   static createSignature(length: number = 64): Uint8Array {
-    return randomBytes(length);
+    return randomBytes(length)
   }
 
   /**
@@ -256,7 +262,7 @@ export class MockGenerators {
    * @returns Address as hex string
    */
   static createAddress(prefix: string = ''): string {
-    return prefix + toHex(randomBytes(20));
+    return prefix + toHex(randomBytes(20))
   }
 
   /**
@@ -270,14 +276,14 @@ export class MockGenerators {
     tokenSymbols: string[],
     baseAmount: bigint = 1000n
   ): Map<string, bigint> {
-    const balances = new Map<string, bigint>();
+    const balances = new Map<string, bigint>()
     for (const symbol of tokenSymbols) {
       // Add some randomness (±20%)
-      const randomFactor = 0.8 + Math.random() * 0.4;
-      const amount = BigInt(Math.floor(Number(baseAmount) * randomFactor));
-      balances.set(symbol, amount);
+      const randomFactor = 0.8 + Math.random() * 0.4
+      const amount = BigInt(Math.floor(Number(baseAmount) * randomFactor))
+      balances.set(symbol, amount)
     }
-    return balances;
+    return balances
   }
 
   /**
@@ -288,9 +294,9 @@ export class MockGenerators {
    * @returns Random bigint
    */
   static randomBigInt(min: bigint, max: bigint): bigint {
-    const range = max - min + 1n;
-    const randomBytes = Math.floor(Math.random() * Number(range));
-    return min + BigInt(randomBytes);
+    const range = max - min + 1n
+    const randomBytes = Math.floor(Math.random() * Number(range))
+    return min + BigInt(randomBytes)
   }
 
   /**
@@ -301,15 +307,15 @@ export class MockGenerators {
    */
   static createId(prefix?: string): Uint8Array {
     if (prefix) {
-      const id = new Uint8Array(32);
-      const prefixBytes = new TextEncoder().encode(prefix);
-      id.set(prefixBytes.slice(0, 32));
+      const id = new Uint8Array(32)
+      const prefixBytes = new TextEncoder().encode(prefix)
+      id.set(prefixBytes.slice(0, 32))
       // Fill remaining with random
-      const random = randomBytes(32 - prefixBytes.length);
-      id.set(random, prefixBytes.length);
-      return id;
+      const random = randomBytes(32 - prefixBytes.length)
+      id.set(random, prefixBytes.length)
+      return id
     }
-    return randomBytes(32);
+    return randomBytes(32)
   }
 }
 
@@ -317,14 +323,21 @@ export class MockGenerators {
  * Convenience functions that can be imported directly
  */
 
-export const createOracle = MockGenerators.createOracle.bind(MockGenerators);
-export const createOracles = MockGenerators.createOracles.bind(MockGenerators);
-export const createComplianceToken = MockGenerators.createComplianceToken.bind(MockGenerators);
-export const createComplianceTokens = MockGenerators.createComplianceTokens.bind(MockGenerators);
-export const createPrice = MockGenerators.createPrice.bind(MockGenerators);
-export const createTimestamp = MockGenerators.createTimestamp.bind(MockGenerators);
-export const createMetadataHash = MockGenerators.createMetadataHash.bind(MockGenerators);
-export const createNullifier = MockGenerators.createNullifier.bind(MockGenerators);
-export const createCommitment = MockGenerators.createCommitment.bind(MockGenerators);
-export const createDID = MockGenerators.createDID.bind(MockGenerators);
-export const createSignature = MockGenerators.createSignature.bind(MockGenerators);
+export const createOracle = MockGenerators.createOracle.bind(MockGenerators)
+export const createOracles = MockGenerators.createOracles.bind(MockGenerators)
+export const createComplianceToken =
+  MockGenerators.createComplianceToken.bind(MockGenerators)
+export const createComplianceTokens =
+  MockGenerators.createComplianceTokens.bind(MockGenerators)
+export const createPrice = MockGenerators.createPrice.bind(MockGenerators)
+export const createTimestamp =
+  MockGenerators.createTimestamp.bind(MockGenerators)
+export const createMetadataHash =
+  MockGenerators.createMetadataHash.bind(MockGenerators)
+export const createNullifier =
+  MockGenerators.createNullifier.bind(MockGenerators)
+export const createCommitment =
+  MockGenerators.createCommitment.bind(MockGenerators)
+export const createDID = MockGenerators.createDID.bind(MockGenerators)
+export const createSignature =
+  MockGenerators.createSignature.bind(MockGenerators)

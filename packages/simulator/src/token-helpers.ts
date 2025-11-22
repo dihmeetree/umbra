@@ -1,5 +1,9 @@
-import { tokenType, TokenType, sampleContractAddress } from '@midnight-ntwrk/compact-runtime';
-import { pad } from './utils.js';
+import {
+  tokenType,
+  TokenType,
+  sampleContractAddress
+} from '@midnight-ntwrk/compact-runtime'
+import { pad } from './utils.js'
 
 /**
  * Helper utilities for working with TokenTypes in tests
@@ -16,8 +20,8 @@ export function createTokenType(
   domainSeparator: string,
   contractAddress?: ReturnType<typeof sampleContractAddress>
 ): TokenType {
-  const address = contractAddress || sampleContractAddress();
-  return tokenType(pad(domainSeparator, 32), address);
+  const address = contractAddress || sampleContractAddress()
+  return tokenType(pad(domainSeparator, 32), address)
 }
 
 /**
@@ -27,8 +31,8 @@ export function createTokenType(
  */
 export function createNativeTokenType(): TokenType {
   // Native token uses a special contract address of all zeros
-  const zeroAddress = sampleContractAddress(); // This gives us a sample address structure
-  return tokenType(new Uint8Array(32), zeroAddress);
+  const zeroAddress = sampleContractAddress() // This gives us a sample address structure
+  return tokenType(new Uint8Array(32), zeroAddress)
 }
 
 /**
@@ -39,14 +43,14 @@ export function createNativeTokenType(): TokenType {
  * @returns True if the types are equal
  */
 export function areTokenTypesEqual(a: TokenType, b: TokenType): boolean {
-  return a.toString() === b.toString();
+  return a.toString() === b.toString()
 }
 
 /**
  * Creates a registry of named token types for easy reference in tests
  */
 export class TokenRegistry {
-  private tokens: Map<string, TokenType> = new Map();
+  private tokens: Map<string, TokenType> = new Map()
 
   /**
    * Registers a token type with a name
@@ -55,7 +59,7 @@ export class TokenRegistry {
    * @param tokenType - The TokenType instance
    */
   register(name: string, tokenType: TokenType): void {
-    this.tokens.set(name, tokenType);
+    this.tokens.set(name, tokenType)
   }
 
   /**
@@ -65,7 +69,7 @@ export class TokenRegistry {
    * @returns The TokenType, or undefined if not found
    */
   get(name: string): TokenType | undefined {
-    return this.tokens.get(name);
+    return this.tokens.get(name)
   }
 
   /**
@@ -76,42 +80,42 @@ export class TokenRegistry {
    * @throws If the token is not registered
    */
   require(name: string): TokenType {
-    const token = this.tokens.get(name);
+    const token = this.tokens.get(name)
     if (!token) {
-      throw new Error(`Token '${name}' not found in registry`);
+      throw new Error(`Token '${name}' not found in registry`)
     }
-    return token;
+    return token
   }
 
   /**
    * Gets all registered token names
    */
   getAllNames(): string[] {
-    return Array.from(this.tokens.keys());
+    return Array.from(this.tokens.keys())
   }
 
   /**
    * Gets all registered tokens
    */
   getAllTokens(): Map<string, TokenType> {
-    return new Map(this.tokens);
+    return new Map(this.tokens)
   }
 
   /**
    * Clears all registered tokens
    */
   clear(): void {
-    this.tokens.clear();
+    this.tokens.clear()
   }
 
   /**
    * Creates a name-to-string mapping for display purposes
    */
   createDisplayMap(): Map<string, string> {
-    const map = new Map<string, string>();
+    const map = new Map<string, string>()
     this.tokens.forEach((tokenType, name) => {
-      map.set(tokenType.toString(), name);
-    });
-    return map;
+      map.set(tokenType.toString(), name)
+    })
+    return map
   }
 }
