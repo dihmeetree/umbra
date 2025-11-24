@@ -7,6 +7,7 @@
 import type { ContractSimulator } from '@statera/simulator'
 import { LegacyCoinBuilder } from '@statera/simulator'
 import type { TokenType } from '@midnight-ntwrk/zswap'
+import { encodeTokenType } from '@midnight-ntwrk/ledger'
 import type { StateraPrivateState } from '../../index.js'
 import { TestData } from '../test-data.js'
 
@@ -14,10 +15,7 @@ import { TestData } from '../test-data.js'
  * Creates a generic mock coin
  */
 export function createMockCoin(value: bigint, tokenType: TokenType) {
-  return new LegacyCoinBuilder()
-    .withValue(value)
-    .withTokenType(tokenType)
-    .build()
+  return LegacyCoinBuilder.create(encodeTokenType(tokenType), value)
 }
 
 /**
@@ -36,10 +34,7 @@ export function createCollateralCoin(tdust: bigint) {
  * Creates an sUSD coin
  */
 export function createSUSDCoin(amount: bigint, sSUSDTokenType: TokenType) {
-  return new LegacyCoinBuilder()
-    .withValue(amount)
-    .withTokenType(sSUSDTokenType)
-    .build()
+  return LegacyCoinBuilder.create(encodeTokenType(sSUSDTokenType), amount)
 }
 
 /**
@@ -67,27 +62,17 @@ export function createMockReservePoolCoin(collateralTokenType: TokenType) {
 }
 
 /**
- * Prepares a coin to be received by adding it to simulator's ZSwap local state
+ * Prepares a coin to be received by adding it to simulator's coin inputs
  */
 export function prepareCoinForReceive<T>(
   simulator: ContractSimulator<T>,
   coin: any,
   tokenType: TokenType
 ): void {
-  const zswapState = simulator.getZswapLocalState()
-  const existingInputs = zswapState.coins_received.inputs || []
-
-  simulator['circuitContext'].currentZswapLocalState = {
-    ...zswapState,
-    coins_received: {
-      ...zswapState.coins_received,
-      inputs: [
-        ...existingInputs,
-        {
-          ...coin,
-          token_type: tokenType
-        }
-      ]
-    }
+  const runtimeCoin: any = {
+    type: tokenType,
+    nonce: coin.nonce,
+    value: coin.value
   }
+  simulator.addCoinInput(runtimeCoin)
 }

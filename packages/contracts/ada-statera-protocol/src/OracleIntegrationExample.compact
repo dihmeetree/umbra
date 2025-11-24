@@ -1,0 +1,394 @@
+// Example: Integrating TLSNotary Oracle into Statera Protocol
+// This shows how to modify your existing contract to use TLSNotary attestations
+
+pragma language_version 0.18;
+
+import CompactStandardLibrary;
+import TLSNotaryOracle;
+
+// Import existing Statera types
+// (In real implementation, this would be in adaStateraProtocol.compact)
+
+// ============================================================================
+// LEDGER STATE - Add to your existing contract
+// ============================================================================
+
+/**
+ * Set of trusted TLSNotary notary public keys
+ * Admin can add/remove notaries similar to current oracle management
+ */
+export ledger trustedNotaries: Set<Bytes<32>>;
+
+/**
+ * Configuration for oracle attestation validation
+ */
+export ledger oracleConfig: OracleConfig;
+
+export struct OracleConfig {
+    // Maximum age of attestation in seconds (e.g., 3600 = 1 hour)
+    maxAgeSeconds: Uint<64>;
+
+    // Minimum acceptable price (6 decimals: $0.10 = 100000)
+    minPrice: Uint<64>;
+
+    // Maximum acceptable price (6 decimals: $10.00 = 10000000)
+    maxPrice: Uint<64>;
+}
+
+// ============================================================================
+// ADMIN FUNCTIONS - Managing Trusted Notaries
+// ============================================================================
+
+/**
+ * Add a new trusted TLSNotary notary
+ * Only admin can call this
+ */
+export circuit addTrustedNotary(notaryPkBytes: Bytes<32>): [] {
+    // Get admin metadata and verify authorization
+    // (Use your existing admin auth pattern)
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert(
+        hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash,
+        "Invalid admin metadata"
+    );
+    assert(
+        isAdmin(adminMetadata),
+        "Unauthorized: Only admin can add notaries"
+    );
+
+    const disclosedNotaryPk = disclose(notaryPkBytes);
+    assert(
+        !trustedNotaries.member(disclosedNotaryPk),
+        "Notary already exists in trusted set"
+    );
+
+    trustedNotaries.insert(disclosedNotaryPk);
+}
+
+/**
+ * Remove a trusted notary
+ * Only admin can call this
+ */
+export circuit removeTrustedNotary(notaryPkBytes: Bytes<32>): [] {
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert(
+        hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash,
+        "Invalid admin metadata"
+    );
+    assert(
+        isAdmin(adminMetadata),
+        "Unauthorized: Only admin can remove notaries"
+    );
+
+    const disclosedNotaryPk = disclose(notaryPkBytes);
+    assert(
+        trustedNotaries.member(disclosedNotaryPk),
+        "Notary does not exist in trusted set"
+    );
+
+    trustedNotaries.remove(disclosedNotaryPk);
+}
+
+/**
+ * Update oracle configuration
+ * Only admin can call this
+ */
+export circuit updateOracleConfig(config: OracleConfig): [] {
+    // Get admin metadata and verify authorization
+    const adminMetadata = getAdminMetadata();
+    const secret = disclose(admin_secret());
+    assert(
+        hashAdminMetadata(adminMetadata, secret) == adminState.metadataHash,
+        "Invalid admin metadata"
+    );
+    assert(
+        isAdmin(adminMetadata),
+        "Unauthorized: Only admin can update oracle config"
+    );
+
+    // Validate config parameters
+    assert(config.maxAgeSeconds > 0, "Max age must be positive");
+    assert(config.maxAgeSeconds <= 86400, "Max age cannot exceed 24 hours");
+    assert(config.minPrice > 0, "Min price must be positive");
+    assert(config.maxPrice > config.minPrice, "Max price must exceed min price");
+
+    oracleConfig = config;
+}
+
+// ============================================================================
+// EXAMPLE: Withdrawal with TLSNotary Oracle
+// ============================================================================
+
+/**
+ * Withdraw collateral using TLSNotary-verified oracle price
+ *
+ * This replaces your current withdrawCollateral function signature:
+ * OLD: withdrawCollateral(coin, _withdraw_amt, _oraclePrice, _oraclePk)
+ * NEW: Uses TLSNotary attestation instead of raw price + pubkey
+ */
+export circuit withdrawCollateralWithAttestation(
+    coin: CoinInfo,
+    _withdraw_amt: Uint<64>,
+    attestation: TLSAttestation,
+    oracleData: OracleData,
+    merkleProof: MerkleProof,
+    notaryPk: CurvePoint
+): [] {
+
+    // 1. Get current timestamp from blockchain
+    const currentTimestamp = getCurrentBlockTimestamp();
+
+    // 2. Verify the oracle attestation and extract verified price
+    const verifiedPrice = verifyOracleAttestation(
+        attestation,
+        oracleData,
+        merkleProof,
+        notaryPk,
+        trustedNotaries,
+        oracleConfig.maxAgeSeconds,
+        oracleConfig.minPrice,
+        oracleConfig.maxPrice,
+        currentTimestamp
+    );
+
+    // 3. Proceed with withdrawal using verified price
+    const withdrawAmt = disclose(_withdraw_amt);
+
+    // Get user's position metadata
+    const mintMetadata = getMintMetadata();
+    const userSecret = secret_key();
+    const depositorsId = generateUserId(userSecret);
+    const metadataHash = hashMintMetadata(mintMetadata, depositorsId);
+
+    // Verify user has a position
+    assert(
+        depositors.member(depositorsId),
+        "No deposit position found"
+    );
+
+    const depositPosition = depositors.lookup(depositorsId);
+
+    // Verify metadata matches
+    assert(
+        metadataHash == depositPosition.metadataHash,
+        "Invalid deposit metadata"
+    );
+
+    // Verify position is active
+    assert(
+        depositPosition.position == DebtPositionStatus.active,
+        "Position is not active"
+    );
+
+    // Calculate maximum withdrawable amount based on MCR
+    // collateral_ratio = (collateral_value / debt_value) * 100
+    // MCR = Minimum Collateral Ratio (e.g., 150%)
+    //
+    // max_withdrawable = collateral - (debt * MCR / 100 * oracle_price)
+
+    const totalCollateral = mintMetadata.collateral_balance;
+    const totalDebt = mintMetadata.debt_balance;
+
+    // Convert to same units: collateral is in lovelace (6 decimals for ADA)
+    // debt is in sUSD (6 decimals), price is in sUSD per ADA (6 decimals)
+    const requiredCollateralValue = (totalDebt * MCR * SPECK_per_tDUST) / (100 * verifiedPrice);
+
+    assert(
+        totalCollateral > requiredCollateralValue,
+        "Insufficient collateral to withdraw"
+    );
+
+    const maxWithdrawable = totalCollateral - requiredCollateralValue;
+
+    assert(
+        withdrawAmt <= maxWithdrawable,
+        "Withdrawal amount exceeds maximum allowed"
+    );
+
+    // Update position metadata
+    mintMetadata.collateral_balance = totalCollateral - withdrawAmt;
+    const newMetadataHash = hashMintMetadata(mintMetadata, depositorsId);
+
+    depositors.insert(depositorsId, Depositor {
+        ...depositPosition,
+        metadataHash: newMetadataHash
+    });
+
+    // Update private state
+    set_mint_metadata(mintMetadata);
+
+    // Send collateral to user
+    const withdrawCoin = disclose(coin);
+    assert(
+        withdrawCoin.color == depositPosition.coinType,
+        "Coin type mismatch"
+    );
+    assert(
+        withdrawCoin.value == withdrawAmt,
+        "Coin value mismatch"
+    );
+
+    receive(withdrawCoin);
+    sendImmediate(
+        withdrawCoin,
+        left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()),
+        withdrawAmt
+    );
+}
+
+// ============================================================================
+// EXAMPLE: Redemption with TLSNotary Oracle
+// ============================================================================
+
+/**
+ * Redeem sUSD for ADA using TLSNotary-verified oracle price
+ */
+export circuit redeemSUSDWithAttestation(
+    sUSDCoin: CoinInfo,
+    _redeem_amt: Uint<64>,
+    attestation: TLSAttestation,
+    oracleData: OracleData,
+    merkleProof: MerkleProof,
+    notaryPk: CurvePoint
+): [] {
+
+    // 1. Verify the oracle attestation
+    const currentTimestamp = getCurrentBlockTimestamp();
+    const verifiedPrice = verifyOracleAttestation(
+        attestation,
+        oracleData,
+        merkleProof,
+        notaryPk,
+        trustedNotaries,
+        oracleConfig.maxAgeSeconds,
+        oracleConfig.minPrice,
+        oracleConfig.maxPrice,
+        currentTimestamp
+    );
+
+    // 2. Calculate redemption amount
+    // Formula: ADA_to_send = (sUSD_amount * SPECK_per_tDUST) / oracle_price
+    const redeemAmt = disclose(_redeem_amt);
+    const adaToSend = (redeemAmt * SPECK_per_tDUST) / verifiedPrice;
+
+    // 3. Apply redemption fee
+    const feeRate = redemptionFee;  // e.g., 0.5% = 500 basis points
+    const fee = (adaToSend * feeRate) / 10000;
+    const adaAfterFee = adaToSend - fee;
+
+    // 4. Verify sUSD token
+    const sUSDToken = disclose(sUSDCoin);
+    assert(
+        sUSDToken.color == sUSDTokenType,
+        "Invalid sUSD token"
+    );
+    assert(
+        sUSDToken.value == redeemAmt,
+        "sUSD amount mismatch"
+    );
+
+    // 5. Burn sUSD
+    receive(sUSDToken);
+    // (sUSD is implicitly burned by not re-minting)
+
+    // 6. Send ADA from reserve pool
+    const reserveCoin = get_reservepoolcoin_private_state();
+    assert(
+        reserveCoin.value >= adaAfterFee,
+        "Insufficient reserve pool balance"
+    );
+
+    const sendResult = send(
+        reserveCoin,
+        left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()),
+        adaAfterFee
+    );
+
+    // Handle change
+    if (sendResult.change.is_some) {
+        receive(sendResult.change.value);
+        // Update reserve pool
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Get current blockchain timestamp
+ * This would be implemented as a witness function in practice
+ */
+circuit getCurrentBlockTimestamp(): Uint<64> {
+    // In real implementation, this would come from the blockchain
+    // For now, use a witness function
+    return current_timestamp();
+}
+
+// Placeholder witness functions (implement in TypeScript)
+witness current_timestamp(): Uint<64>;
+witness getAdminMetadata(): AdminMetadata;
+witness admin_secret(): Bytes<32>;
+witness getMintMetadata(): MintMetadata;
+witness secret_key(): Bytes<32>;
+witness get_reservepoolcoin_private_state(): QualifiedCoinInfo;
+witness set_mint_metadata(metadata: MintMetadata): [];
+
+// Placeholder circuits (import from your existing contract)
+circuit hashAdminMetadata(metadata: AdminMetadata, secret: Bytes<32>): Bytes<32> {
+    return persistentCommit<AdminMetadata>(metadata, secret);
+}
+
+circuit isAdmin(metadata: AdminMetadata): Boolean {
+    return true; // Implement your existing logic
+}
+
+circuit generateUserId(sk: Bytes<32>): Bytes<32> {
+    return persistentCommit<Bytes<32>>(ownPublicKey().bytes, sk);
+}
+
+circuit hashMintMetadata(metadata: MintMetadata, randomizer: Bytes<32>): Bytes<32> {
+    return persistentCommit<MintMetadata>(metadata, randomizer);
+}
+
+// Placeholder types (import from your existing contract)
+struct AdminMetadata {
+    super_admin: Bytes<32>;
+    admins: Vector<10, Bytes<32>>;
+    admin_count: Uint<8>;
+}
+
+struct MintMetadata {
+    collateral_balance: Uint<64>;
+    debt_balance: Uint<64>;
+}
+
+struct Depositor {
+    id: Bytes<32>;
+    metadataHash: Bytes<32>;
+    position: DebtPositionStatus;
+    coinType: Bytes<32>;
+    mintCounterCommitment: Bytes<32>;
+}
+
+enum DebtPositionStatus {
+    inactive,
+    active,
+    closed
+}
+
+// Constants (from your existing contract)
+const MCR: Uint<8> = 150;
+const SPECK_per_tDUST: Uint<64> = 1000000;
+
+ledger depositors: Map<Bytes<32>, Depositor>;
+ledger adminState: AdminState;
+ledger sUSDTokenType: Bytes<32>;
+ledger redemptionFee: Uint<16>;
+
+struct AdminState {
+    metadataHash: Bytes<32>;
+}

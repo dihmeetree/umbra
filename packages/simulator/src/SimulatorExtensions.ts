@@ -57,6 +57,9 @@ export class SimulatorHistoryTracker<TPrivateState> {
 
   constructor(private simulator: ContractSimulator<TPrivateState>) {
     this.startTime = Date.now()
+    console.log(
+      `SimulatorHistoryTracker initialized at ${new Date(this.startTime).toISOString()}`
+    )
   }
 
   /**

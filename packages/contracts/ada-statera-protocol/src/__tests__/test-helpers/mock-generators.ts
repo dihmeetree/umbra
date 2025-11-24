@@ -5,7 +5,10 @@
  */
 
 import { randomBytes, pad } from '@statera/simulator'
-import { persistentCommit } from '@midnight-ntwrk/compact-runtime'
+import {
+  persistentCommit,
+  CompactTypeBytes
+} from '@midnight-ntwrk/compact-runtime'
 import type { Wallet } from '@statera/simulator'
 
 /**
@@ -33,7 +36,8 @@ export function createMockComplianceToken(
  */
 export function createUserId(wallet: Wallet): Uint8Array {
   const pkBytes = Buffer.from(wallet.coinPublicKey, 'hex')
-  return persistentCommit(pkBytes, wallet.secretKey)
+  const descriptor = new CompactTypeBytes(32)
+  return persistentCommit(descriptor, pkBytes, wallet.secretKey)
 }
 
 /**
