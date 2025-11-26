@@ -1,0 +1,110 @@
+// Cryptographic primitives for signature verification
+// Based on Schnorr signatures using Midnight's native JubJub curve
+// Uses persistentHash (SHA-256) for compatibility with external signers
+pragma language_version >= 0.17.0;
+
+module Crypto {
+import CompactStandardLibrary;
+
+// Challenge input structure for Schnorr signature
+// Contains r point, public key, and credential hash
+export struct ChallengeInput {
+    r_x: Field;           // x-coordinate of r point
+    r_y: Field;           // y-coordinate of r point
+    pk_x: Field;          // x-coordinate of public key
+    pk_y: Field;          // y-coordinate of public key
+    credentialHash: Bytes<32>;  // SHA-256 hash of credential
+}
+
+// Nonce input structure for deterministic k generation
+export struct NonceInput {
+    sk: Bytes<32>;        // Secret key as bytes (for SHA-256 hashing)
+    credentialHash: Bytes<32>;  // SHA-256 hash of credential
+}
+
+// Schnorr signature (r, s)
+export struct Signature {
+    r: CurvePoint;
+    s: Field;
+}
+
+// Signed credential containing the data, signature, and public key
+export struct SignedCredential<T> {
+    credential: T;
+    signature: Signature;
+    pk: CurvePoint;
+}
+
+// Derive public key from secret key: pk = sk * G
+export pure circuit derive_pk(sk: Field): CurvePoint {
+    const pk: CurvePoint = ecMulGenerator(sk);
+    return pk;
+}
+
+// Convert a Field to Bytes<32> for hashing
+// Note: This is a simplification - in production you'd need proper field serialization
+pure circuit fieldToBytes(f: Field): Bytes<32> {
+    // For now, use persistentHash as a way to convert Field to Bytes
+    // This is a workaround - ideally we'd have direct serialization
+    return persistentHash<Field>(f);
+}
+
+// Compute the challenge hash: c = SHA256(r || pk || SHA256(credential))
+// Uses persistentHash (SHA-256) for compatibility with external signers
+export pure circuit computeChallenge<T>(r: CurvePoint, pk: CurvePoint, credential: T): Field {
+    const credentialHash: Bytes<32> = persistentHash<T>(credential);
+    const challengeInput: ChallengeInput = ChallengeInput {
+        r_x: r.x,
+        r_y: r.y,
+        pk_x: pk.x,
+        pk_y: pk.y,
+        credentialHash: credentialHash
+    };
+    const c: Bytes<32> = persistentHash<ChallengeInput>(challengeInput);
+    return degradeToTransient(c);
+}
+
+// Compute deterministic k value for signing
+// k = SHA256(sk || SHA256(credential)) mod n
+export pure circuit computeK<T>(sk: Field, credential: T): Field {
+    const credentialHash: Bytes<32> = persistentHash<T>(credential);
+    const nonceInput: NonceInput = NonceInput {
+        sk: fieldToBytes(sk),
+        credentialHash: credentialHash
+    };
+    const k: Bytes<32> = persistentHash<NonceInput>(nonceInput);
+    return degradeToTransient(k);
+}
+
+// Sign a credential with a secret key
+// Returns SignedCredential containing the credential, signature (r, s), and public key
+export pure circuit sign<T>(credential: T, sk: Field): SignedCredential<T> {
+    const pk: CurvePoint = ecMulGenerator(sk);
+    const k: Field = computeK<T>(sk, credential);
+    const r: CurvePoint = ecMulGenerator(k);
+    const c: Field = computeChallenge<T>(r, pk, credential);
+    const s: Field = k + (c * sk);
+    return SignedCredential<T> { credential: credential, signature: Signature { r: r, s: s }, pk: pk };
+}
+
+// Verify a Schnorr signature
+// Checks: s * G == r + c * pk
+// Where c is the challenge computed from (r, pk, credential)
+export pure circuit verify<T>(credential: SignedCredential<T>, challenge: Field): Boolean {
+    const c: Field = challenge;
+    const lhs: CurvePoint = ecMulGenerator(credential.signature.s);
+    const c_pk: CurvePoint = ecMul(credential.pk, c);
+    const rhs: CurvePoint = ecAdd(credential.signature.r, c_pk);
+    return lhs == rhs;
+}
+
+// Verify a signed credential (computes challenge internally)
+export pure circuit verifySignedCredential<T>(signedCredential: SignedCredential<T>): Boolean {
+    const challenge: Field = computeChallenge<T>(
+        signedCredential.signature.r,
+        signedCredential.pk,
+        signedCredential.credential
+    );
+    return verify<T>(signedCredential, challenge);
+}
+}

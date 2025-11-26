@@ -1,0 +1,20 @@
+{
+  "name": "@statera/oracle-ui",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "solid-js": "^1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0",
+    "vite-plugin-solid": "^2.10.0"
+  }
+}

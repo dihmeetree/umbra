@@ -1,10 +1,16 @@
-import { randomBytes as cryptoRandomBytes } from 'crypto'
-
 /**
  * Generates cryptographically secure random bytes
+ * Works in both browser (Web Crypto API) and Node.js environments
  */
 export function randomBytes(length: number): Uint8Array {
-  return new Uint8Array(cryptoRandomBytes(length))
+  const bytes = new Uint8Array(length)
+  // Use Web Crypto API (works in browsers and modern Node.js)
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes)
+    return bytes
+  }
+  // Fallback for older Node.js environments
+  throw new Error('No cryptographic random number generator available')
 }
 
 /**

@@ -13,11 +13,16 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js"
+    },
+    "./bitcoin-oracle": {
+      "default": "./src/managed/bitcoinPriceOracle/contract/index.cjs",
+      "require": "./src/managed/bitcoinPriceOracle/contract/index.cjs"
     }
   },
   "scripts": {
     "compact": "compact compile src/adaStateraProtocol.compact ./src/managed/adaStateraProtocol",
     "compact-dev": "compact compile src/adaStateraProtocol.compact ./src/managed/adaStateraProtocol",
+    "compact:oracle": "compact compile src/BitcoinPriceOracle.compact ./src/managed/bitcoinPriceOracle",
     "build": "rm -rf dist && tsc --project tsconfig.build.json && cp -R ./src/managed ./dist/managed && cp ./src/adaStateraProtocol.compact dist",
     "prebuild": "rm -rf dist && tsc --project tsconfig.build.json && cp -R ./src/managed ./dist/managed && cp ./src/adaStateraProtocol.compact dist",
     "lint": "eslint src",
@@ -27,6 +32,7 @@
     "prepack": "yarn build"
   },
   "dependencies": {
+    "@statera/prover-client": "workspace:*",
     "@statera/simulator": "workspace:*"
   },
   "devDependencies": {

@@ -1,0 +1,107 @@
+// Bitcoin Price Oracle Contract
+// Uses TLSNotary attestations to provide verified Bitcoin price data on-chain
+pragma language_version >= 0.17.0;
+
+import CompactStandardLibrary;
+import "./TLSNotaryOracle";
+
+// ============ Ledger State ============
+
+// Trusted notary public keys (identified by x-coordinate)
+export ledger trustedNotaries: Set<Field>;
+
+// Admin public key for managing notaries
+export ledger adminPk: CurvePoint;
+
+// Latest verified Bitcoin price (in cents to avoid decimals)
+export ledger latestPriceCents: Uint<64>;
+
+// Timestamp of latest price update
+export ledger latestPriceTimestamp: Uint<64>;
+
+// Constructor: initialize with admin's secret key
+constructor(adminSecretKey: Field) {
+    adminPk = disclose(ecMulGenerator(adminSecretKey));
+    latestPriceCents = 0;
+    latestPriceTimestamp = 0;
+}
+
+// ============ Admin Functions ============
+
+// Add a trusted notary (admin only)
+export circuit addTrustedNotary(
+    notaryPkX: Field,
+    adminSk: Field
+): [] {
+    const computedAdminPk: CurvePoint = ecMulGenerator(adminSk);
+    assert(computedAdminPk == adminPk, "Unauthorized: not admin");
+    trustedNotaries.insert(disclose(notaryPkX));
+}
+
+// Remove a trusted notary (admin only)
+export circuit removeTrustedNotary(
+    notaryPkX: Field,
+    adminSk: Field
+): [] {
+    const computedAdminPk: CurvePoint = ecMulGenerator(adminSk);
+    assert(computedAdminPk == adminPk, "Unauthorized: not admin");
+    trustedNotaries.remove(disclose(notaryPkX));
+}
+
+// ============ Oracle Functions ============
+
+// Verify attested data from a trusted notary
+// Returns the verified raw bytes (can be parsed off-chain)
+export circuit verifyAttestedData(signedData: SignedBytes): Bytes<512> {
+    // Check notary is trusted
+    assert(
+        trustedNotaries.member(disclose(signedData.pk.x)),
+        "Notary not trusted"
+    );
+
+    // Verify signature and return data
+    return verifyAndExtract(signedData);
+}
+
+// Update the Bitcoin price with attested data
+// priceCents: the price in cents (e.g., 8700000 for $87,000.00)
+// timestamp: Unix timestamp of the price
+export circuit updatePrice(
+    signedData: SignedBytes,
+    priceCents: Uint<64>,
+    timestamp: Uint<64>
+): [] {
+    // Verify the attestation is from a trusted notary
+    assert(
+        trustedNotaries.member(disclose(signedData.pk.x)),
+        "Notary not trusted"
+    );
+
+    // Verify the signature
+    assertValidSignature(signedData);
+
+    // Update ledger state
+    // Note: In production, you'd want to verify priceCents/timestamp match the signed data
+    // This requires parsing JSON in the circuit or using a more structured data format
+    latestPriceCents = disclose(priceCents);
+    latestPriceTimestamp = disclose(timestamp);
+}
+
+// Get the current Bitcoin price
+// Returns price in cents
+export circuit getPrice(): Uint<64> {
+    return latestPriceCents;
+}
+
+// Get the timestamp of the latest price update
+export circuit getPriceTimestamp(): Uint<64> {
+    return latestPriceTimestamp;
+}
+
+// ============ Pure Circuits (Off-chain) ============
+
+// Verify a signature without checking trusted notaries
+// Useful for off-chain validation before submitting
+export pure circuit verifyNotarySignature(signedData: SignedBytes): Boolean {
+    return verifySignature(signedData);
+}

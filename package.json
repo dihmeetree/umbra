@@ -76,6 +76,9 @@
     "packages/api",
     "packages/cli",
     "packages/simulator",
+    "packages/prover-client",
+    "packages/oracle-ui",
+    "packages/oracle-server",
     "packages/contracts/ada-statera-protocol"
   ]
 }
