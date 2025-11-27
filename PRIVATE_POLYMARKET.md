@@ -20,7 +20,7 @@ User deposits USDM → Converts to $POLY (private) → Trades/balances in $POLY
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                              ARCHITECTURE                        │
+│                           ARCHITECTURE                           │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │      POLYGON (Public)                    MIDNIGHT (Private)      │
@@ -108,7 +108,7 @@ User deposits USDM → Converts to $POLY (private) → Trades/balances in $POLY
 ### Selling Positions
 
 ```
-User wants to sell 1000 KC tokens
+ User wants to sell 1000 KC tokens
               │
               ▼
      ┌────────────────────┐
@@ -123,8 +123,8 @@ User wants to sell 1000 KC tokens
      └─────────┬──────────┘
                │
                ▼
-     Pool: -1000 KC, +USDC
-User on Midnight: -1000 KC, +$POLY
+      Pool: -1000 KC, +USDC
+ User on Midnight: -1000 KC, +$POLY
 ```
 
 ### Market Resolution
@@ -321,7 +321,7 @@ Three levels of recovery, depending on what's still working:
 ### Level 1: Normal Withdrawal
 
 ```
- User                       Relayer                   Pool Contract
+ User                       Relayer                  Pool Contract
   │                            │                           │
   │──── Request withdrawal ───►│                           │
   │                            │──── Batch with others ───►│
@@ -335,7 +335,7 @@ Three levels of recovery, depending on what's still working:
 ### Level 2: Direct Withdrawal (Relayer Down)
 
 ```
- User                       Midnight                  Pool Contract
+ User                       Midnight                 Pool Contract
   │                            │                           │
   │─── Request withdrawal ────►│                           │
   │   (direct to Midnight)     │                           │
