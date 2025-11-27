@@ -1,0 +1,251 @@
+// Price Prediction Game Contract
+// Players predict if Bitcoin price will go up or down between two verified price attestations
+// Uses TLSNotary attestations for cryptographically verified price data
+pragma language_version >= 0.17.0;
+
+import CompactStandardLibrary;
+import "./TLSNotaryOracle";
+
+// ============ Types ============
+
+// Prediction direction
+enum Direction {
+    Up,
+    Down
+}
+
+// Bet state
+enum BetState {
+    Open,       // Bet placed, waiting for resolution
+    Won,        // Player won
+    Lost,       // Player lost
+    Push        // Price unchanged, bet returned
+}
+
+// A price attestation with extracted price and timestamp
+struct PriceAttestation {
+    signedData: SignedBytes;
+    priceCents: Uint<64>;      // Price in cents (e.g., 8700000 for $87,000.00)
+    timestamp: Uint<64>;       // Unix timestamp in seconds
+}
+
+// A bet placed by a player
+struct Bet {
+    player: Bytes<32>;         // Player identifier (could be public key hash)
+    prediction: Direction;     // Up or Down
+    startAttestation: PriceAttestation;
+    amount: Uint<64>;          // Bet amount
+    state: BetState;
+}
+
+// ============ Ledger State ============
+
+// Trusted notary public keys (identified by x-coordinate)
+export ledger trustedNotaries: Set<Field>;
+
+// Admin public key for managing notaries
+export ledger adminPk: CurvePoint;
+
+// Minimum time between start and end attestations (in seconds)
+export ledger minTimeDelta: Uint<64>;
+
+// Maximum time between start and end attestations (in seconds)
+export ledger maxTimeDelta: Uint<64>;
+
+// Total bets placed
+export ledger totalBets: Uint<64>;
+
+// Total wins
+export ledger totalWins: Uint<64>;
+
+// Total losses
+export ledger totalLosses: Uint<64>;
+
+// ============ Constructor ============
+
+constructor(adminSecretKey: Field, minTime: Uint<64>, maxTime: Uint<64>) {
+    adminPk = disclose(ecMulGenerator(adminSecretKey));
+    minTimeDelta = disclose(minTime);
+    maxTimeDelta = disclose(maxTime);
+    totalBets = 0;
+    totalWins = 0;
+    totalLosses = 0;
+}
+
+// ============ Admin Functions ============
+
+// Add a trusted notary (admin only)
+export circuit addTrustedNotary(
+    notaryPkX: Field,
+    adminSk: Field
+): [] {
+    const computedAdminPk: CurvePoint = ecMulGenerator(adminSk);
+    assert(computedAdminPk == adminPk, "Unauthorized: not admin");
+    trustedNotaries.insert(disclose(notaryPkX));
+}
+
+// Remove a trusted notary (admin only)
+export circuit removeTrustedNotary(
+    notaryPkX: Field,
+    adminSk: Field
+): [] {
+    const computedAdminPk: CurvePoint = ecMulGenerator(adminSk);
+    assert(computedAdminPk == adminPk, "Unauthorized: not admin");
+    trustedNotaries.remove(disclose(notaryPkX));
+}
+
+// Update time constraints (admin only)
+export circuit updateTimeConstraints(
+    newMinTime: Uint<64>,
+    newMaxTime: Uint<64>,
+    adminSk: Field
+): [] {
+    const computedAdminPk: CurvePoint = ecMulGenerator(adminSk);
+    assert(computedAdminPk == adminPk, "Unauthorized: not admin");
+    assert(newMinTime < newMaxTime, "Min time must be less than max time");
+    minTimeDelta = disclose(newMinTime);
+    maxTimeDelta = disclose(newMaxTime);
+}
+
+// ============ Game Functions ============
+
+// Verify a price attestation is from a trusted notary
+circuit verifyAttestation(attestation: PriceAttestation): [] {
+    // Check notary is trusted
+    assert(
+        trustedNotaries.member(disclose(attestation.signedData.pk.x)),
+        "Notary not trusted"
+    );
+
+    // Verify signature
+    assertValidSignature(attestation.signedData);
+}
+
+// Resolve a bet with two verified price attestations
+// Returns the result: Won, Lost, or Push
+export circuit resolveBet(
+    prediction: Direction,
+    startAttestation: PriceAttestation,
+    endAttestation: PriceAttestation
+): BetState {
+    // Verify both attestations are from trusted notaries
+    verifyAttestation(startAttestation);
+    verifyAttestation(endAttestation);
+
+    // Verify time constraints
+    const timeDelta: Uint<64> = endAttestation.timestamp - startAttestation.timestamp;
+    assert(
+        timeDelta >= minTimeDelta,
+        "End attestation too soon after start"
+    );
+    assert(
+        timeDelta <= maxTimeDelta,
+        "End attestation too late after start"
+    );
+
+    // Ensure end is after start
+    assert(
+        endAttestation.timestamp > startAttestation.timestamp,
+        "End timestamp must be after start timestamp"
+    );
+
+    // Determine result - disclose prices since game results are public
+    const startPrice: Uint<64> = disclose(startAttestation.priceCents);
+    const endPrice: Uint<64> = disclose(endAttestation.priceCents);
+    const predictedDirection: Direction = disclose(prediction);
+
+    // Track stats
+    totalBets = (totalBets + 1) as Uint<64>;
+
+    // Check for push (price unchanged)
+    if (startPrice == endPrice) {
+        return BetState.Push;
+    }
+
+    // Determine if price went up or down
+    const priceWentUp: Boolean = endPrice > startPrice;
+
+    // Check if prediction matches reality
+    const predictedUp: Boolean = predictedDirection == Direction.Up;
+
+    if (predictedUp == priceWentUp) {
+        totalWins = (totalWins + 1) as Uint<64>;
+        return BetState.Won;
+    } else {
+        totalLosses = (totalLosses + 1) as Uint<64>;
+        return BetState.Lost;
+    }
+}
+
+// Validate a bet can be placed (checks start attestation only)
+// Call this before placing a bet to ensure the start attestation is valid
+export circuit validateBetStart(
+    startAttestation: PriceAttestation
+): Boolean {
+    // Verify attestation is from a trusted notary
+    assert(
+        trustedNotaries.member(disclose(startAttestation.signedData.pk.x)),
+        "Notary not trusted"
+    );
+
+    // Verify signature
+    assertValidSignature(startAttestation.signedData);
+
+    return true;
+}
+
+// ============ View Functions ============
+
+// Get minimum time delta
+export circuit getMinTimeDelta(): Uint<64> {
+    return minTimeDelta;
+}
+
+// Get maximum time delta
+export circuit getMaxTimeDelta(): Uint<64> {
+    return maxTimeDelta;
+}
+
+// Get total bets count
+export circuit getTotalBets(): Uint<64> {
+    return totalBets;
+}
+
+// Get total wins count
+export circuit getTotalWins(): Uint<64> {
+    return totalWins;
+}
+
+// Get total losses count
+export circuit getTotalLosses(): Uint<64> {
+    return totalLosses;
+}
+
+// ============ Pure Utility Functions ============
+
+// Check if price went up
+export pure circuit didPriceGoUp(
+    startPriceCents: Uint<64>,
+    endPriceCents: Uint<64>
+): Boolean {
+    return endPriceCents > startPriceCents;
+}
+
+// Check if price went down
+export pure circuit didPriceGoDown(
+    startPriceCents: Uint<64>,
+    endPriceCents: Uint<64>
+): Boolean {
+    return endPriceCents < startPriceCents;
+}
+
+// Get absolute price difference
+export pure circuit getPriceDifference(
+    startPriceCents: Uint<64>,
+    endPriceCents: Uint<64>
+): Uint<64> {
+    if (endPriceCents > startPriceCents) {
+        return endPriceCents - startPriceCents;
+    }
+    return startPriceCents - endPriceCents;
+}

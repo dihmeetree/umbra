@@ -88,3 +88,81 @@ export function formatBigInt(value: string | undefined | null, maxLen: number = 
     return '0x0'
   }
 }
+
+// ============ Game API ============
+
+export interface GameStats {
+  totalBets: string
+  totalWins: string
+  totalLosses: string
+}
+
+export interface GameConstraints {
+  minTimeDelta: string
+  maxTimeDelta: string
+}
+
+export interface GameResult {
+  result: 'Won' | 'Lost' | 'Push' | 'Open'
+  startPrice: string
+  endPrice: string
+  priceDiff: string
+}
+
+/**
+ * Initialize the prediction game contract
+ */
+export async function initializeGame(): Promise<ApiResponse<{
+  adminPublicKey: { x: string; y: string }
+  contractAddress: string
+  minTimeDelta: string
+  maxTimeDelta: string
+}>> {
+  const response = await fetch(`${API_BASE}/api/game/init`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' }
+  })
+  return response.json()
+}
+
+/**
+ * Get game statistics
+ */
+export async function getGameStats(): Promise<ApiResponse<GameStats>> {
+  const response = await fetch(`${API_BASE}/api/game/stats`)
+  return response.json()
+}
+
+/**
+ * Get game time constraints
+ */
+export async function getGameConstraints(): Promise<ApiResponse<GameConstraints>> {
+  const response = await fetch(`${API_BASE}/api/game/constraints`)
+  return response.json()
+}
+
+/**
+ * Resolve a bet using the contract
+ */
+export async function resolveBet(
+  prediction: 'up' | 'down',
+  startAttestation: VerifiedPrice,
+  endAttestation: VerifiedPrice
+): Promise<ApiResponse<GameResult>> {
+  const response = await fetch(`${API_BASE}/api/game/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prediction,
+      startAttestation: {
+        ...startAttestation,
+        dataLen: startAttestation.rawData.length
+      },
+      endAttestation: {
+        ...endAttestation,
+        dataLen: endAttestation.rawData.length
+      }
+    })
+  })
+  return response.json()
+}

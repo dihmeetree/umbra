@@ -6,6 +6,7 @@ import {
   type VerifiedPrice,
   type OracleStatus
 } from './api'
+import { PredictionGame, GameHistory, type GameHistoryEntry } from './PredictionGame'
 
 function App() {
   const [oracleStatus, setOracleStatus] = createSignal<OracleStatus | null>(null)
@@ -14,6 +15,12 @@ function App() {
   const [initializing, setInitializing] = createSignal(true)
   const [error, setError] = createSignal<string | null>(null)
   const [proverUrl, setProverUrl] = createSignal('http://localhost:3000')
+  const [gameInProgress, setGameInProgress] = createSignal(false)
+  const [gameHistory, setGameHistory] = createSignal<GameHistoryEntry[]>([])
+
+  const addGameResult = (entry: GameHistoryEntry) => {
+    setGameHistory(prev => [entry, ...prev])
+  }
 
   // Initialize contract on mount via backend API
   onMount(async () => {
@@ -76,10 +83,10 @@ function App() {
   }
 
   return (
-    <div class="container">
+    <div class="app-layout">
       <header class="header">
         <h1>Bitcoin Price Oracle</h1>
-        <p>Cryptographically verified prices using Umbra</p>
+        <p>Cryptographically verified real-time prices</p>
       </header>
 
       <Show when={error()}>
@@ -112,7 +119,7 @@ function App() {
           when={price()}
           fallback={
             <div class="price-value loading">
-              {loading() ? 'Fetching verified price...' : 'Click "Fetch Price" to get started'}
+              {loading() ? 'Fetching verified price...' : 'Click fetch price to get current Bitcoin price'}
             </div>
           }
         >
@@ -130,7 +137,7 @@ function App() {
           <button
             class="btn btn-primary"
             onClick={fetchPrice}
-            disabled={loading() || !oracleStatus()?.initialized || initializing()}
+            disabled={loading() || !oracleStatus()?.initialized || initializing() || gameInProgress()}
           >
             <Show when={initializing()}>
               <span class="spinner"></span>
@@ -138,13 +145,25 @@ function App() {
             </Show>
             <Show when={!initializing() && loading()}>
               <span class="spinner"></span>
-              <span>Verifying...</span>
+              <span>Fetching...</span>
             </Show>
             <Show when={!initializing() && !loading()}>
-              <span>Fetch Verified Price</span>
+              <span>Fetch Bitcoin Price</span>
             </Show>
           </button>
         </div>
+      </div>
+
+      <div class="game-section">
+        <PredictionGame
+          currentPrice={price()}
+          onFetchPrice={fetchPrice}
+          loading={loading()}
+          disabled={!oracleStatus()?.initialized || initializing()}
+          onGameStateChange={setGameInProgress}
+          onGameResult={addGameResult}
+        />
+        <GameHistory history={gameHistory()} />
       </div>
 
       <Show when={price()}>
@@ -217,16 +236,6 @@ function App() {
           </span>
         </div>
       </div>
-
-      <footer class="footer">
-        <p>
-          Powered by <a href="https://umbra.network" target="_blank">Umbra</a> and{' '}
-          <a href="https://midnight.network" target="_blank">Midnight</a>
-        </p>
-        <p style={{ 'margin-top': '0.5rem' }}>
-          Price data from <a href="https://diadata.org" target="_blank">DIA Data</a>
-        </p>
-      </footer>
     </div>
   )
 }
