@@ -16,5 +16,9 @@
   },
   "typescript.tsdk": "node_modules/typescript/lib",
   "terminal.integrated.defaultProfile.windows": "Command Prompt",
-  "rust-analyzer.linkedProjects": ["tlsn/Cargo.toml"]
+  "rust-analyzer.linkedProjects": [
+    "tlsn/Cargo.toml",
+    "crates/notary/Cargo.toml",
+    "crates/prover/Cargo.toml"
+  ]
 }

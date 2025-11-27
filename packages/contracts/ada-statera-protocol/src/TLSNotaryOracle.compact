@@ -1,286 +1,90 @@
-// TLSNotary Oracle Integration for Statera Protocol
-// Enables verifiable off-chain oracle data using TLSNotary proofs + Schnorr signatures
+// TLSNotary Oracle Library
+// Provides reusable verification logic for TLSNotary attestations with Schnorr signatures
+// Contract builders can import this module to build their own oracle contracts
+//
+// Usage:
+//   import "./TLSNotaryOracle";
+//
+//   // Your contract needs to define its own ledger state:
+//   export ledger trustedNotaries: Set<Field>;
+//   export ledger adminPk: CurvePoint;
+//
+//   // Then use the verification circuits from this module
+pragma language_version >= 0.17.0;
 
-pragma language_version 0.18;
-
+module TLSNotaryOracle {
 import CompactStandardLibrary;
-import Crypto;
 
-export { TLSAttestation };
-export { AttestationHeader };
-export { OracleData };
-export { MerkleProof };
-export { verifyOracleAttestation };
-export { verifyMerkleProof };
+// Export all public types and circuits
+export {
+    SignedBytes,
+    ChallengeInput,
+    Signature,
+    verifySignature,
+    assertValidSignature,
+    verifyAndExtract
+};
 
-// ============================================================================
-// DATA STRUCTURES
-// ============================================================================
-
-/**
- * Complete TLSNotary attestation with Schnorr signature
- * This is the main structure submitted by users to prove oracle data
- */
-export struct TLSAttestation {
-    // Header containing metadata about the TLS session
-    header: AttestationHeader;
-
-    // Merkle root of all session data (from TLSNotary)
-    merkleRoot: Bytes<32>;
-
-    // Schnorr signature credential
-    credential: SignedCredential<AttestationHeader>;
+// Challenge input structure for Schnorr signature verification
+struct ChallengeInput {
+    r_x: Field;
+    r_y: Field;
+    pk_x: Field;
+    pk_y: Field;
+    credentialHash: Bytes<32>;
 }
 
-/**
- * Header of the attestation - this is what gets signed by the notary
- */
-export struct AttestationHeader {
-    // Unique identifier for this specific attestation
-    attestationId: Bytes<32>;
-
-    // TLSNotary protocol version (e.g., 2 for 2025 version)
-    protocolVersion: Uint<16>;
-
-    // Unix timestamp when the TLS session was notarized
-    timestamp: Uint<64>;
-
-    // Domain name of the server (e.g., "api.coinpaprika.com")
-    serverIdentity: Bytes<64>;
-
-    // TLS session ephemeral public key (proves it was a real TLS session)
-    ephemeralKey: Bytes<32>;
-
-    // Merkle root of all body fields (selective disclosure)
-    bodyMerkleRoot: Bytes<32>;
+// Schnorr signature (r point, s scalar)
+struct Signature {
+    r: CurvePoint;
+    s: Field;
 }
 
-/**
- * Oracle price data extracted from the API response
- */
-export struct OracleData {
-    // Price with 6 decimals (e.g., 1.23 USD = 1230000)
-    price: Uint<64>;
-
-    // Asset pair identifier (e.g., "ADA/USD")
-    assetPair: Bytes<16>;
-
-    // When the data was fetched from the API
-    fetchTimestamp: Uint<64>;
-
-    // Source API endpoint
-    source: Bytes<64>;
+// Signed raw bytes from the notary
+// The signature is over persistentHash(data)
+struct SignedBytes {
+    data: Bytes<512>;     // Raw attested data (padded to 512 bytes)
+    dataLen: Uint<16>;    // Actual length of data before padding
+    signature: Signature;
+    pk: CurvePoint;       // Notary's public key
 }
 
-/**
- * Merkle proof to show oracle data is included in the attestation
- */
-export struct MerkleProof {
-    // Hash of the oracle data leaf
-    leaf: Bytes<32>;
+// ============ Pure Verification Functions ============
 
-    // Merkle tree siblings for the proof path
-    siblings: Vector<8, Bytes<32>>;
+// Verify a Schnorr signature over SignedBytes
+// Returns true if signature is valid, false otherwise
+pure circuit verifySignature(signedData: SignedBytes): Boolean {
+    // Compute credential hash: SHA256(data)
+    const dataHash: Bytes<32> = persistentHash<Bytes<512>>(signedData.data);
 
-    // Bit vector: 0 = left sibling, 1 = right sibling
-    pathIndices: Uint<8>;
+    // Build challenge input: (r, pk, dataHash)
+    const challengeInput: ChallengeInput = ChallengeInput {
+        r_x: signedData.signature.r.x,
+        r_y: signedData.signature.r.y,
+        pk_x: signedData.pk.x,
+        pk_y: signedData.pk.y,
+        credentialHash: dataHash
+    };
+
+    // Compute challenge: c = SHA256(challengeInput) mod field_order
+    const c: Field = degradeToTransient(persistentHash<ChallengeInput>(challengeInput));
+
+    // Verify Schnorr equation: s * G == r + c * pk
+    const lhs: CurvePoint = ecMulGenerator(signedData.signature.s);
+    const c_pk: CurvePoint = ecMul(signedData.pk, c);
+    const rhs: CurvePoint = ecAdd(signedData.signature.r, c_pk);
+
+    return lhs == rhs;
 }
 
-// ============================================================================
-// VERIFICATION CIRCUITS
-// ============================================================================
-
-/**
- * Main verification circuit for oracle attestations
- *
- * This circuit:
- * 1. Verifies the notary is trusted
- * 2. Checks the attestation is recent
- * 3. Verifies the Schnorr signature on the attestation header
- * 4. Verifies the Merkle proof that oracleData is in the attestation
- * 5. Validates price is within reasonable bounds
- *
- * @param attestation - The TLSNotary attestation with signature
- * @param oracleData - The price data to verify
- * @param merkleProof - Proof that oracleData is in the attestation
- * @param notaryPk - Public key of the trusted notary
- * @param trustedNotaries - Set of trusted notary public keys
- * @param maxAgeSeconds - Maximum age of attestation in seconds
- * @param minPrice - Minimum allowed price
- * @param maxPrice - Maximum allowed price
- * @param currentTimestamp - Current blockchain timestamp
- * @returns The verified price data
- */
-export circuit verifyOracleAttestation(
-    attestation: TLSAttestation,
-    oracleData: OracleData,
-    merkleProof: MerkleProof,
-    notaryPk: CurvePoint,
-    trustedNotaries: Set<Bytes<32>>,
-    maxAgeSeconds: Uint<64>,
-    minPrice: Uint<64>,
-    maxPrice: Uint<64>,
-    currentTimestamp: Uint<64>
-): Uint<64> {
-
-    // 1. Verify notary is in trusted set
-    // Convert CurvePoint to bytes for set membership check
-    const notaryPkBytes = curvePointToBytes(notaryPk);
-    const disclosedNotaryPk = disclose(notaryPkBytes);
-    assert(
-        trustedNotaries.member(disclosedNotaryPk),
-        "Notary public key not in trusted set"
-    );
-
-    // 2. Verify attestation timestamp is recent enough
-    const attestationAge = currentTimestamp - attestation.header.timestamp;
-    assert(
-        attestationAge < maxAgeSeconds,
-        "Attestation is too old"
-    );
-
-    // 3. Verify Schnorr signature on the attestation header
-    // The credential contains the header and signature from the notary
-    assert(
-        attestation.credential.pk == notaryPk,
-        "Credential public key does not match notary public key"
-    );
-
-    // Compute challenge for the signature verification
-    const challenge = computeChallengeForAttestation(
-        attestation.credential.signature.r,
-        attestation.credential.pk,
-        attestation.header
-    );
-
-    // Verify the signature using Midnight's built-in verify function
-    assert(
-        verify<AttestationHeader>(attestation.credential, challenge),
-        "Invalid Schnorr signature on attestation"
-    );
-
-    // 4. Verify the header's bodyMerkleRoot matches the attestation's merkleRoot
-    assert(
-        attestation.header.bodyMerkleRoot == attestation.merkleRoot,
-        "Header Merkle root does not match attestation Merkle root"
-    );
-
-    // 5. Verify Merkle proof that oracleData is in the attestation
-    const oracleDataHash = hashOracleData(oracleData);
-    assert(
-        verifyMerkleProof(merkleProof, oracleDataHash, attestation.merkleRoot),
-        "Invalid Merkle proof for oracle data"
-    );
-
-    // 6. Verify price is within acceptable bounds
-    const disclosedPrice = disclose(oracleData.price);
-    assert(
-        disclosedPrice >= minPrice,
-        "Oracle price below minimum threshold"
-    );
-    assert(
-        disclosedPrice <= maxPrice,
-        "Oracle price above maximum threshold"
-    );
-
-    // 7. Return the verified price
-    return disclosedPrice;
+// Assert that a signature is valid (throws if invalid)
+pure circuit assertValidSignature(signedData: SignedBytes): [] {
+    assert(verifySignature(signedData), "Invalid notary signature");
 }
 
-/**
- * Verifies a Merkle proof
- *
- * @param proof - The Merkle proof with siblings and path
- * @param leaf - The leaf hash to prove inclusion of
- * @param root - The expected Merkle root
- * @returns true if the proof is valid
- */
-export circuit verifyMerkleProof(
-    proof: MerkleProof,
-    leaf: Bytes<32>,
-    root: Bytes<32>
-): Boolean {
-    let currentHash = leaf;
-
-    // Traverse the Merkle tree from leaf to root
-    for (let i = 0; i < 8; i = i + 1) {
-        const isRightSibling = (proof.pathIndices >> i) & 1;
-
-        if (isRightSibling == 1) {
-            // Current node is on the left, sibling on the right
-            currentHash = persistentHash<[Bytes<32>, Bytes<32>]>([
-                currentHash,
-                proof.siblings[i]
-            ]);
-        } else {
-            // Current node is on the right, sibling on the left
-            currentHash = persistentHash<[Bytes<32>, Bytes<32>]>([
-                proof.siblings[i],
-                currentHash
-            ]);
-        }
-    }
-
-    return currentHash == root;
+// Verify signature and return the verified data
+pure circuit verifyAndExtract(signedData: SignedBytes): Bytes<512> {
+    assertValidSignature(signedData);
+    return signedData.data;
 }
-
-// ============================================================================
-// HELPER CIRCUITS
-// ============================================================================
-
-/**
- * Hash oracle data for Merkle tree inclusion
- */
-circuit hashOracleData(data: OracleData): Bytes<32> {
-    return persistentHash<OracleData>(data);
 }
-
-/**
- * Convert CurvePoint to bytes representation
- * This is a simplified version - actual implementation depends on
- * Midnight's CurvePoint format
- */
-circuit curvePointToBytes(point: CurvePoint): Bytes<32> {
-    // This is a placeholder - actual implementation would depend on
-    // how Midnight represents CurvePoint internally
-    // You may need to use point.x or serialize both x and y coordinates
-    return persistentHash<CurvePoint>(point);
-}
-
-/**
- * Compute challenge for attestation signature verification
- * Follows Schnorr signature protocol
- */
-circuit computeChallengeForAttestation(
-    r: CurvePoint,
-    pk: CurvePoint,
-    header: AttestationHeader
-): Field {
-    // This follows the same pattern as the RWA example
-    // Challenge = Hash(R || PK || message)
-    const messageHash = persistentHash<AttestationHeader>(header);
-
-    // Combine r, pk, and message for challenge
-    return persistentHash<[CurvePoint, CurvePoint, Bytes<32>]>([r, pk, messageHash]) as Field;
-}
-
-// ============================================================================
-// WITNESS FUNCTIONS (to be implemented in TypeScript)
-// ============================================================================
-
-/**
- * Witness function to reduce challenge to proper field element
- * Needed due to field arithmetic constraints
- */
-witness reduceAttestationChallenge(r: Field): Field;
-
-/**
- * Witness function to fetch trusted notaries set
- * This would typically read from the contract's ledger
- */
-witness getTrustedNotaries(): Set<Bytes<32>>;
-
-/**
- * Witness function to get current blockchain timestamp
- */
-witness getCurrentTimestamp(): Uint<64>;

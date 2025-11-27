@@ -45,3 +45,7 @@ yarn-error.log*
 
 # Documentation (embedded git repo)
 docs/
+
+# Rust build artifacts
+target/
+Cargo.lock

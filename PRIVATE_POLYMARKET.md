@@ -15,7 +15,7 @@ A privacy layer for Polymarket that enables anonymous trading while maintaining 
 
 ```
 User deposits USDM → Converts to $POLY (private) → Trades/balances in $POLY
-                                                  → Bridge converts $POLY to USDC for Polymarket
+                                                 → Bridge converts $POLY to USDC for Polymarket
 ```
 
 ```
@@ -37,8 +37,8 @@ User deposits USDM → Converts to $POLY (private) → Trades/balances in $POLY
 │            │                                      │              │
 │            ▼                                      │              │
 │   ┌─────────────────────┐              ┌─────────────────────┐   │
-│   │    Polymarket       │              │        Users        │   │
-│   │    (CLOB/AMM)       │              │   (Private keys)    │   │
+│   │     Polymarket      │              │        Users        │   │
+│   │     (CLOB/AMM)      │              │    (Private keys)   │   │
 │   └─────────────────────┘              └─────────────────────┘   │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
