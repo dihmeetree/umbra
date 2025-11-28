@@ -43,9 +43,6 @@ yarn-error.log*
 .DS_Store
 *.pem
 
-# Documentation (embedded git repo)
-docs/
-
 # Rust build artifacts
 target/
 Cargo.lock

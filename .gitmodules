@@ -1,0 +1,12 @@
+[submodule "clob-client"]
+	path = clob-client
+	url = https://github.com/Polymarket/clob-client
+[submodule "midnight-docs"]
+	path = midnight-docs
+	url = https://github.com/midnightntwrk/midnight-docs
+[submodule "midnight-ledger"]
+	path = midnight-ledger
+	url = https://github.com/midnightntwrk/midnight-ledger
+[submodule "tlsn"]
+	path = tlsn
+	url = https://github.com/tlsnotary/tlsn

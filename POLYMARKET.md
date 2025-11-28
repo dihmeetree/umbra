@@ -33,9 +33,9 @@ User deposits USDM → Converts to $POLY (private) → Trades/balances in $POLY
 │   │   - Outcome tokens  │   Relayer    │   - Positions       │   │
 │   │   - All markets     │              │   - Order book      │   │
 │   └─────────────────────┘              └─────────────────────┘   │
-│            │                                      ▲              │
-│            │                                      │              │
-│            ▼                                      │              │
+│             │                                     ▲              │
+│             │                                     │              │
+│             ▼                                     │              │
 │   ┌─────────────────────┐              ┌─────────────────────┐   │
 │   │     Polymarket      │              │        Users        │   │
 │   │     (CLOB/AMM)      │              │    (Private keys)   │   │
@@ -89,7 +89,7 @@ User deposits USDM → Converts to $POLY (private) → Trades/balances in $POLY
   │                            │                           │                         │
   │─── Buy 1000 KC @ $0.25 ───►│                           │                         │
   │    (signed, encrypted)     │                           │                         │
-  │                            │──── Verify balance ──────►│                         │
+  │                            │────── Verify balance ────►│                         │
   │                            │   (ZK proof: user has     │                         │
   │                            │    sufficient $POLY)      │                         │
   │                            │                           │───── Execute trade ────►│
