@@ -1,0 +1,15 @@
+{
+  "name": "@statera/polyzk-extension",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun run scripts/dev.ts",
+    "build": "bun run scripts/build.ts && bun build src/content.ts --outfile=dist/content.js --target=browser && bun build src/popup.ts --outfile=dist/popup.js --target=browser && bun build src/background.ts --outfile=dist/background.js --target=browser",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "chokidar": "^5.0.0",
+    "typescript": "^5.0.0"
+  }
+}

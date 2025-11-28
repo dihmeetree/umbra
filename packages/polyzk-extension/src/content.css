@@ -1,0 +1,931 @@
+/* Polynight - Modern Dark Theme */
+
+/* Hide Polymarket's dialog overlay when Polynight is active */
+[data-slot="dialog-overlay"],
+[data-slot="dialog-content"],
+#authentication-modal,
+div[data-state="open"][data-slot="dialog-overlay"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* ============================================
+   CSS Variables
+   ============================================ */
+:root {
+  --pn-bg-primary: #0a0a0b;
+  --pn-bg-secondary: #121214;
+  --pn-bg-tertiary: #1a1a1d;
+  --pn-bg-hover: #222225;
+  --pn-border: #2a2a2e;
+  --pn-border-light: #3a3a3e;
+  --pn-text-primary: #ffffff;
+  --pn-text-secondary: #a1a1aa;
+  --pn-text-muted: #71717a;
+  --pn-accent: #8b5cf6;
+  --pn-accent-light: #a78bfa;
+  --pn-green: #10b981;
+  --pn-green-light: #34d399;
+  --pn-red: #ef4444;
+  --pn-red-light: #f87171;
+  --pn-radius-sm: 6px;
+  --pn-radius-md: 10px;
+  --pn-radius-lg: 14px;
+  --pn-radius-xl: 20px;
+}
+
+/* ============================================
+   Overlay
+   ============================================ */
+.polyzk-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pn-fadeIn 0.2s ease-out;
+  overscroll-behavior: contain;
+}
+
+.polyzk-overlay.closing {
+  animation: pn-fadeOut 0.15s ease-out forwards;
+}
+
+@keyframes pn-fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pn-fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ============================================
+   Modal Panel
+   ============================================ */
+.polyzk-trade-panel {
+  width: 680px;
+  max-width: 95vw;
+  max-height: 90vh;
+  background: var(--pn-bg-primary);
+  border: 1px solid var(--pn-border);
+  border-radius: var(--pn-radius-xl);
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 20px 50px -10px rgba(0, 0, 0, 0.7),
+    0 0 80px -10px rgba(139, 92, 246, 0.25);
+  animation: pn-slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pn-slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============================================
+   Header
+   ============================================ */
+.polyzk-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--pn-bg-secondary);
+  border-bottom: 1px solid var(--pn-border);
+}
+
+.polyzk-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.polyzk-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5b21b6 0%, var(--pn-accent) 100%);
+  flex-shrink: 0;
+}
+
+.polyzk-header-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--pn-text-primary);
+  letter-spacing: -0.02em;
+}
+
+.polyzk-version {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--pn-text-muted);
+  background: var(--pn-bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.polyzk-header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.polyzk-header-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--pn-radius-sm);
+  background: transparent;
+  color: var(--pn-text-muted);
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.polyzk-header-link:hover {
+  background: var(--pn-bg-tertiary);
+  color: var(--pn-accent-light);
+}
+
+.polyzk-panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--pn-radius-sm);
+  background: transparent;
+  color: var(--pn-text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.polyzk-panel-close:hover {
+  background: var(--pn-bg-tertiary);
+  color: var(--pn-text-primary);
+}
+
+/* ============================================
+   Content
+   ============================================ */
+.polyzk-panel-content {
+  padding: 20px;
+  overflow-y: auto;
+  max-height: calc(90vh - 65px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Market Header */
+.polyzk-market-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--pn-border);
+}
+
+.polyzk-image-wrapper {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex-shrink: 0;
+  padding: 8px;
+  background: var(--pn-bg-secondary);
+  border-radius: 12px;
+}
+
+.polyzk-image-bar {
+  width: 4px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #5b21b6 0%, var(--pn-accent) 100%);
+  flex-shrink: 0;
+}
+
+.polyzk-market-image {
+  width: 80px;
+  height: 80px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+  margin-left: 10px;
+}
+
+.polyzk-market-image.skeleton {
+  border-radius: 8px;
+}
+
+.polyzk-market-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 80px;
+}
+
+.polyzk-market-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--pn-text-primary);
+  line-height: 1.25;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  letter-spacing: -0.02em;
+}
+
+.polyzk-market-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.polyzk-market-meta .meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  height: 26px;
+  box-sizing: border-box;
+  background: var(--pn-bg-tertiary);
+  border-radius: var(--pn-radius-sm);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.polyzk-market-meta .meta-label {
+  color: var(--pn-text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.polyzk-market-meta .meta-value {
+  color: var(--pn-text-primary);
+  font-weight: 600;
+}
+
+.polyzk-market-meta .skeleton-meta {
+  min-width: 70px;
+}
+
+.polyzk-market-meta .skeleton-meta-text {
+  display: block;
+  width: 50px;
+  height: 13px;
+}
+
+/* ============================================
+   Two Column Layout
+   ============================================ */
+.polyzk-two-column {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.polyzk-left-column,
+.polyzk-right-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.polyzk-left-column {
+  flex: 1;
+  overflow: visible;
+}
+
+.polyzk-right-column {
+  overflow: hidden;
+}
+
+/* ============================================
+   Outcome Selector
+   ============================================ */
+.polyzk-outcome-selector {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.polyzk-outcome-selector .selector-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+
+.polyzk-outcome-selector .outcome-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 350px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--pn-border-light) transparent;
+}
+
+.polyzk-outcome-selector .outcome-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.polyzk-outcome-selector .outcome-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.polyzk-outcome-selector .outcome-list::-webkit-scrollbar-thumb {
+  background: var(--pn-border-light);
+  border-radius: 4px;
+}
+
+.polyzk-outcome-selector .outcome-list::-webkit-scrollbar-thumb:hover {
+  background: var(--pn-text-muted);
+}
+
+.polyzk-outcome-selector .outcome-option {
+  display: flex !important;
+  align-items: center !important;
+  padding: 0 14px !important;
+  height: 48px !important;
+  min-height: 48px !important;
+  box-sizing: border-box !important;
+  background: var(--pn-bg-secondary) !important;
+  border: 2px solid var(--pn-border) !important;
+  border-radius: var(--pn-radius-sm) !important;
+  cursor: pointer !important;
+  transition: none !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  scroll-margin: 0 !important;
+  outline: none !important;
+}
+
+.polyzk-outcome-selector .outcome-option:hover:not(.selected) {
+  background: var(--pn-bg-tertiary) !important;
+}
+
+.polyzk-outcome-selector .outcome-option.selected {
+  background: rgba(139, 92, 246, 0.1) !important;
+  border-color: var(--pn-accent) !important;
+}
+
+.polyzk-outcome-selector .outcome-option .outcome-name {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--pn-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.polyzk-outcome-selector .outcome-option.selected .outcome-name {
+  color: var(--pn-accent-light);
+}
+
+/* Skeleton states */
+.polyzk-outcome-selector .outcome-option.skeleton-option {
+  cursor: default;
+  pointer-events: none;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--pn-bg-tertiary) 0%, var(--pn-bg-hover) 50%, var(--pn-bg-tertiary) 100%);
+  background-size: 200% 100%;
+  animation: pn-shimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+
+@keyframes pn-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.polyzk-outcome-selector .skeleton-text {
+  height: 20px;
+  display: block;
+}
+
+/* ============================================
+   Side Selector (Buy Yes / Buy No)
+   ============================================ */
+.polyzk-side-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.polyzk-side-selector .side-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 12px 8px;
+  background: var(--pn-bg-secondary);
+  border: 2px solid var(--pn-border);
+  border-radius: var(--pn-radius-md);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.polyzk-side-selector .side-option:hover:not(.selected) {
+  background: var(--pn-bg-tertiary);
+}
+
+.polyzk-side-selector .side-option .side-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.polyzk-side-selector .side-option .side-price {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--pn-text-secondary);
+  font-variant-numeric: tabular-nums;
+  line-height: 27px;
+  height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.polyzk-side-selector .skeleton-price {
+  display: inline-block;
+  width: 48px;
+  height: 27px;
+}
+
+.polyzk-side-selector .side-option.selected {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: var(--pn-green);
+}
+
+.polyzk-side-selector .side-option.selected .side-label {
+  color: var(--pn-green);
+}
+
+.polyzk-side-selector .side-option.selected .side-price {
+  color: var(--pn-green-light);
+}
+
+.polyzk-side-selector .side-option.selected .skeleton-price {
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.2) 0%, rgba(52, 211, 153, 0.3) 50%, rgba(16, 185, 129, 0.2) 100%);
+  background-size: 200% 100%;
+  animation: pn-shimmer 1.5s ease-in-out infinite;
+}
+
+.polyzk-side-selector .side-option.selected[data-side="SELL"] {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--pn-red);
+}
+
+.polyzk-side-selector .side-option.selected[data-side="SELL"] .side-label {
+  color: var(--pn-red);
+}
+
+.polyzk-side-selector .side-option.selected[data-side="SELL"] .side-price {
+  color: var(--pn-red-light);
+}
+
+.polyzk-side-selector .side-option.selected[data-side="SELL"] .skeleton-price {
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.2) 0%, rgba(248, 113, 113, 0.3) 50%, rgba(239, 68, 68, 0.2) 100%);
+  background-size: 200% 100%;
+  animation: pn-shimmer 1.5s ease-in-out infinite;
+}
+
+/* ============================================
+   Amount Input
+   ============================================ */
+.polyzk-amount-input {
+  display: flex;
+  flex-direction: column;
+}
+
+.polyzk-amount-input .amount-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+
+.polyzk-amount-input .amount-input-wrapper {
+  display: flex;
+  align-items: center;
+  background: var(--pn-bg-secondary);
+  border: 2px solid var(--pn-border);
+  border-radius: var(--pn-radius-md);
+  padding: 0 14px;
+  transition: all 0.15s ease;
+}
+
+.polyzk-amount-input .amount-input-wrapper:focus-within {
+  border-color: var(--pn-accent);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+}
+
+.polyzk-amount-input .amount-prefix {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--pn-text-muted);
+}
+
+.polyzk-amount-input .amount-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--pn-text-primary);
+  padding: 14px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.polyzk-amount-input .amount-input::placeholder {
+  color: var(--pn-text-muted);
+}
+
+.polyzk-amount-input .amount-input::-webkit-outer-spin-button,
+.polyzk-amount-input .amount-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.polyzk-amount-input .amount-input[type=number] {
+  -moz-appearance: textfield;
+}
+
+.polyzk-amount-input .amount-presets {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.polyzk-amount-input .preset-btn {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--pn-bg-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--pn-radius-sm);
+  color: var(--pn-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.polyzk-amount-input .preset-btn:hover {
+  background: var(--pn-bg-tertiary);
+  color: var(--pn-text-secondary);
+}
+
+/* ============================================
+   Trade Stats Card
+   ============================================ */
+.polyzk-trade-card {
+  background: var(--pn-bg-secondary);
+  border-radius: var(--pn-radius-md);
+  padding: 14px;
+}
+
+.polyzk-trade-card .trade-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.polyzk-trade-card .trade-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.polyzk-trade-card .item-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.polyzk-trade-card .item-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--pn-text-primary);
+  font-variant-numeric: tabular-nums;
+  min-height: 22px;
+}
+
+.polyzk-trade-card .item-value.highlight {
+  color: var(--pn-green-light);
+}
+
+.polyzk-trade-card .trade-divider {
+  height: 1px;
+  background: var(--pn-border);
+  margin: 12px 0;
+}
+
+.polyzk-trade-card .item-value .skeleton-value {
+  display: inline-block;
+  height: 16px;
+  width: 60px;
+  vertical-align: middle;
+}
+
+/* ============================================
+   Privacy Banner
+   ============================================ */
+.polyzk-privacy-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  margin-top: auto;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(139, 92, 246, 0.03) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: var(--pn-radius-md);
+}
+
+.polyzk-privacy-banner .privacy-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: rgba(139, 92, 246, 0.15);
+  border-radius: var(--pn-radius-sm);
+  color: var(--pn-accent);
+  flex-shrink: 0;
+}
+
+.polyzk-privacy-banner .privacy-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.polyzk-privacy-banner .privacy-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.polyzk-privacy-banner .privacy-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--pn-text-primary);
+}
+
+.polyzk-privacy-banner .privacy-desc {
+  font-size: 13px;
+  color: var(--pn-text-muted);
+}
+
+/* ============================================
+   Actions
+   ============================================ */
+.polyzk-actions {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.polyzk-cancel-btn {
+  padding: 14px 24px;
+  border: 1px solid transparent;
+  border-radius: var(--pn-radius-sm);
+  background: var(--pn-bg-secondary);
+  color: var(--pn-text-muted);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.polyzk-cancel-btn:hover {
+  background: var(--pn-bg-tertiary);
+  color: var(--pn-text-secondary);
+}
+
+.polyzk-submit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 24px;
+  border: 1px solid transparent;
+  border-radius: var(--pn-radius-sm);
+  background: var(--pn-bg-secondary);
+  color: var(--pn-text-muted);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: not-allowed;
+  transition: all 0.12s ease;
+}
+
+.polyzk-submit-btn .btn-icon {
+  font-size: 16px;
+}
+
+.polyzk-submit-btn:not(:disabled) {
+  cursor: pointer;
+}
+
+.polyzk-submit-btn.buy {
+  background: var(--pn-green);
+  color: white;
+}
+
+.polyzk-submit-btn.buy:hover:not(:disabled) {
+  background: var(--pn-green-light);
+}
+
+.polyzk-submit-btn.sell {
+  background: var(--pn-red);
+  color: white;
+}
+
+.polyzk-submit-btn.sell:hover:not(:disabled) {
+  background: var(--pn-red-light);
+}
+
+
+/* ============================================
+   Notification Toast
+   ============================================ */
+.polyzk-notification {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999999;
+  padding: 14px 20px;
+  background: var(--pn-bg-secondary);
+  border: 1px solid var(--pn-border);
+  border-radius: var(--pn-radius-md);
+  color: var(--pn-text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: all 0.2s ease;
+}
+
+.polyzk-notification.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ============================================
+   Utility Classes (Legacy Support)
+   ============================================ */
+.polyzk-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--pn-accent);
+  border: none;
+  border-radius: var(--pn-radius-md);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+
+.polyzk-floating-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  background: var(--pn-accent);
+  border: none;
+  border-radius: 50px;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(139, 92, 246, 0.4);
+  transition: all 0.2s ease;
+}
+
+
+/* Legacy panel support */
+.polyzk-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 360px;
+  height: 100vh;
+  background: var(--pn-bg-primary);
+  border-left: 1px solid var(--pn-border);
+  z-index: 10000;
+  transform: translateX(100%);
+  transition: transform 0.3s ease;
+}
+
+.polyzk-panel.open {
+  transform: translateX(0);
+}
+
+.polyzk-panel-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--pn-text-primary);
+}
+
+.polyzk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.polyzk-badge.buy {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--pn-green);
+}
+
+.polyzk-badge.sell {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--pn-red);
+}
+
+.polyzk-outcome-display {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.polyzk-outcome-display .outcome-name {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--pn-text-primary);
+}
+
+.polyzk-outcome-display .outcome-price {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--pn-text-muted);
+}
+
+.polyzk-icon {
+  font-size: 16px;
+}
