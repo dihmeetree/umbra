@@ -1,0 +1,1103 @@
+pragma language_version >= 0.17.0;
+
+import CompactStandardLibrary;
+
+export { Listing, ListingStatus };
+
+// ============ ENUMS ============
+// Active -> Sold (buyer purchases) -> Completed (buyer confirms receipt) -> Claimed (seller claims payment)
+//                                  -> Refunded (seller refunds buyer) -> Cancelled (buyer claimed refund)
+// Seller can also claim after timeout if buyer doesn't confirm
+enum ListingStatus { Active, Sold, Completed, Claimed, Cancelled, Refunded }
+
+// ============ STRUCTS ============
+
+// Public listing commitment stored on-chain (minimal data)
+// The actual listing details are stored privately by the seller
+export struct Listing {
+    // Commitment to the listing details (hash of ListingDetails + randomizer)
+    commitment: Bytes<32>;
+    // Status of the listing
+    status: ListingStatus;
+    // Unix timestamp deadline for buyer to confirm receipt
+    // After this time, seller can claim without buyer confirmation
+    // Set by seller when creating listing (0 = no timeout, buyer must always confirm)
+    escrowDeadline: Uint<64>;
+    // Remaining quantity available for purchase
+    remainingQuantity: Uint<64>;
+    // Total amount held in escrow (from all purchases pending confirmation)
+    escrowedAmount: Uint<128>;
+    // Total amount ready to claim (from confirmed purchases)
+    claimableAmount: Uint<128>;
+}
+
+// On-chain purchase record (tracks each buyer's purchase)
+export struct Purchase {
+    // Buyer's commitment - hash(buyerSk, listingHash, nonce) - identifies the buyer
+    buyerCommitment: Bytes<32>;
+    // Quantity purchased
+    quantity: Uint<64>;
+    // Amount paid (price * quantity)
+    amountPaid: Uint<128>;
+    // Status of this specific purchase
+    status: PurchaseStatus;
+}
+
+// Purchase status enum
+enum PurchaseStatus { Pending, Confirmed, Refunded }
+
+// ============ LEDGER STATE ============
+
+// Map from public listing key -> Listing
+// The public key is derived from the private listing hash
+export ledger listings: Map<Bytes<32>, Listing>;
+
+// Map from purchase key -> Purchase
+// Purchase key is hash(publicListingKey, buyerCommitment)
+export ledger purchases: Map<Bytes<32>, Purchase>;
+
+// Set of nullifiers to prevent double-spending of listings (seller claims)
+export ledger usedNullifiers: Set<Bytes<32>>;
+
+// Set of buyer nullifiers to prevent double refund claims
+export ledger usedBuyerNullifiers: Set<Bytes<32>>;
+
+// Platform token type for payments (the public USDM token)
+export ledger platformTokenType: Bytes<32>;
+
+// Map from user ID (commitment to their public key) -> balance commitment
+// Balance commitment = persistentCommit(balance, randomizer)
+// This hides the actual balance while allowing ZK verification
+export ledger userBalances: Map<Bytes<32>, Bytes<32>>;
+
+// ============ WITNESSES ============
+
+// Get user's secret key for generating commitments
+witness secret_key(): Bytes<32>;
+
+// Get listing details by listing hash (supports multiple listings)
+witness get_listing_details_by_hash(listingHash: Bytes<32>): ListingDetails;
+
+// Set listing details by listing hash (supports multiple listings)
+witness set_listing_details_by_hash(listingHash: Bytes<32>, details: ListingDetails): [];
+
+// Get purchase details by listing hash (supports multiple purchases)
+witness get_purchase_details_by_hash(listingHash: Bytes<32>): PurchaseDetails;
+
+// Set purchase details by listing hash (supports multiple purchases)
+witness set_purchase_details_by_hash(listingHash: Bytes<32>, details: PurchaseDetails): [];
+
+// Get seller's listing nullifier by listing hash
+witness get_listing_nullifier_by_hash(listingHash: Bytes<32>): Bytes<32>;
+
+// Set seller's listing nullifier by listing hash
+witness set_listing_nullifier_by_hash(listingHash: Bytes<32>, nullifier: Bytes<32>): [];
+
+// ============ SHIELDED COIN WITNESSES ============
+
+// Get a coin from the contract's coin pool (for sending payments out)
+// This returns a QualifiedCoinInfo that the contract owns
+witness get_contract_coin(): QualifiedCoinInfo;
+
+// ============ BALANCE WITNESSES ============
+
+// Get user's current private balance and randomizer
+// Returns (balance, randomizer) for ZK verification against on-chain commitment
+witness get_user_balance(): UserBalance;
+
+// Set user's balance after update (stored privately, commitment goes on-chain)
+witness set_user_balance(balance: UserBalance): [];
+
+// ============ PRIVATE STRUCTS (stored off-chain via witnesses) ============
+
+// User's private balance - stored off-chain, commitment stored on-chain
+struct UserBalance {
+    // The actual balance amount
+    balance: Uint<128>;
+    // Randomizer for the commitment (ensures hiding property)
+    randomizer: Bytes<32>;
+}
+
+// Full listing details - stored privately by seller
+struct ListingDetails {
+    // Unique identifier for this listing
+    listingId: Bytes<32>;
+    // Item description hash (actual description stored elsewhere)
+    itemHash: Bytes<32>;
+    // Price per unit in smallest token units
+    pricePerUnit: Uint<64>;
+    // Total quantity available
+    quantity: Uint<64>;
+    // Seller's secret randomizer for the commitment
+    sellerRandomizer: Bytes<32>;
+}
+
+// Purchase details - stored privately by buyer
+struct PurchaseDetails {
+    listingHash: Bytes<32>;
+    quantity: Uint<64>;
+    amountPaid: Uint<128>;
+    buyerCommitment: Bytes<32>;
+    buyerRandomizer: Bytes<32>;
+}
+
+// ============ CONSTRUCTOR ============
+
+constructor(initialTokenType: Bytes<32>) {
+    platformTokenType = disclose(initialTokenType);
+}
+
+// ============ CIRCUITS ============
+
+// ==================== SHIELDED TOKEN OPERATIONS ====================
+
+/**
+ * Deposit tokens into the contract and credit user's private balance
+ *
+ * User sends a shielded coin. The contract receives it and updates the user's
+ * balance commitment on-chain. The actual balance is stored in user's private state.
+ *
+ * For new users: Creates initial balance commitment
+ * For existing users: Updates balance commitment with new total
+ *
+ * @param depositCoin - The coin to deposit (must be platformTokenType)
+ */
+export circuit deposit(depositCoin: CoinInfo): [] {
+    // Get user's secret key FIRST (before disclosures)
+    const sk = secret_key();
+
+    // Disclose and verify the coin
+    const coin = disclose(depositCoin);
+
+    // Verify it's the correct token type
+    assert(coin.color == platformTokenType, "Wrong token type");
+
+    // Contract receives the coin - it now holds these tokens
+    receive(coin);
+
+    // Compute user ID for on-chain balance lookup
+    const userId = computeUserId(disclose(sk));
+
+    // Get user's current balance from private state and disclose it
+    const currentBalanceWitness = get_user_balance();
+    const currentBalance = disclose(currentBalanceWitness);
+
+    // Check if user already has a balance registered
+    if (userBalances.member(userId)) {
+        // Verify the stored commitment matches what we have in private state
+        const storedCommitment = userBalances.lookup(userId);
+        const computedCommitment = computeBalanceCommitment(
+            currentBalance.balance,
+            currentBalance.randomizer
+        );
+        assert(storedCommitment == computedCommitment, "Balance commitment mismatch");
+
+        // Calculate new balance
+        const newBalance: Uint<128> = (currentBalance.balance + coin.value) as Uint<128>;
+
+        // Generate new randomizer for the updated commitment
+        const newRandomizer = generateNewBalanceRandomizer(disclose(sk), currentBalance.randomizer);
+
+        // Compute and store new commitment
+        const newCommitment = computeBalanceCommitment(newBalance, newRandomizer);
+        userBalances.insert(userId, newCommitment);
+
+        // Update private state
+        set_user_balance(UserBalance {
+            balance: newBalance,
+            randomizer: newRandomizer
+        });
+    } else {
+        // New user - create initial balance
+        const newBalance: Uint<128> = coin.value as Uint<128>;
+
+        // Generate initial randomizer from secret key
+        const initialRandomizer = persistentHash<Vector<2, Bytes<32>>>([
+            pad(32, "init_rand"),
+            disclose(sk)
+        ]);
+
+        // Compute and store initial commitment
+        const newCommitment = computeBalanceCommitment(newBalance, initialRandomizer);
+        userBalances.insert(userId, newCommitment);
+
+        // Update private state
+        set_user_balance(UserBalance {
+            balance: newBalance,
+            randomizer: initialRandomizer
+        });
+    }
+}
+
+/**
+ * Withdraw tokens from user's private balance
+ *
+ * User proves they have sufficient balance (via ZK verification against on-chain commitment)
+ * and receives actual shielded tokens from the contract's pool.
+ *
+ * @param amount - Amount to withdraw
+ */
+export circuit withdraw(amount: Uint<128>): [] {
+    // Get user's secret key FIRST
+    const sk = secret_key();
+    const withdrawAmount = disclose(amount);
+
+    // Compute user ID
+    const userId = computeUserId(disclose(sk));
+
+    // Verify user has a balance
+    assert(userBalances.member(userId), "No balance found");
+
+    // Get user's current balance from private state and disclose it
+    const currentBalanceWitness = get_user_balance();
+    const currentBalance = disclose(currentBalanceWitness);
+
+    // Verify the stored commitment matches what we have in private state
+    const storedCommitment = userBalances.lookup(userId);
+    const computedCommitment = computeBalanceCommitment(
+        currentBalance.balance,
+        currentBalance.randomizer
+    );
+    assert(storedCommitment == computedCommitment, "Balance commitment mismatch");
+
+    // Verify sufficient balance
+    assert(currentBalance.balance >= withdrawAmount, "Insufficient balance");
+
+    // Get a coin from the contract's pool
+    const contractCoin = disclose(get_contract_coin());
+    assert(contractCoin.value >= withdrawAmount, "Insufficient contract balance");
+    assert(contractCoin.color == platformTokenType, "Invalid contract coin type");
+
+    // Send tokens to user
+    const sendResult = send(contractCoin, left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey()), withdrawAmount);
+    if (sendResult.change.is_some) {
+        receive(sendResult.change.value);
+    }
+
+    // Calculate new balance
+    const newBalance: Uint<128> = (currentBalance.balance - withdrawAmount) as Uint<128>;
+
+    // Generate new randomizer
+    const newRandomizer = generateNewBalanceRandomizer(disclose(sk), currentBalance.randomizer);
+
+    // Compute and store new commitment
+    const newCommitment = computeBalanceCommitment(newBalance, newRandomizer);
+    userBalances.insert(userId, newCommitment);
+
+    // Update private state
+    set_user_balance(UserBalance {
+        balance: newBalance,
+        randomizer: newRandomizer
+    });
+}
+
+// ==================== MARKETPLACE ====================
+
+/**
+ * Create a new anonymous listing
+ *
+ * The seller provides listing details privately. Only a commitment is stored on-chain.
+ * The listing hash is derived from the details and serves as the "access key" for buyers.
+ *
+ * @param itemHash - Hash of the item description (stored off-chain)
+ * @param pricePerUnit - Price per unit in smallest token units
+ * @param quantity - Total quantity available for sale
+ * @param escrowDeadline - Unix timestamp after which seller can claim without buyer confirmation
+ *                         Set to 0 to require buyer confirmation always (no timeout)
+ * @returns The listing hash that buyers need to access this listing
+ */
+export circuit createListing(
+    itemHash: Bytes<32>,
+    pricePerUnit: Uint<64>,
+    quantity: Uint<64>,
+    escrowDeadline: Uint<64>
+): Bytes<32> {
+    // Validate quantity
+    assert(quantity > 0, "Quantity must be greater than 0");
+
+    // Get seller's secret key for randomization
+    const sellerSk = secret_key();
+
+    // Generate a unique listing ID using seller's key and item
+    const listingId = persistentHash<Vector<3, Bytes<32>>>([
+        disclose(sellerSk),
+        itemHash,
+        ownPublicKey().bytes
+    ]);
+
+    // Create seller's randomizer for the commitment
+    const sellerRandomizer = persistentHash<Vector<2, Bytes<32>>>([
+        disclose(sellerSk),
+        listingId
+    ]);
+
+    // Create the listing details struct
+    const details = ListingDetails {
+        listingId: listingId,
+        itemHash: itemHash,
+        pricePerUnit: pricePerUnit,
+        quantity: quantity,
+        sellerRandomizer: sellerRandomizer
+    };
+
+    // Compute the listing hash (this is what seller shares privately with buyers)
+    const listingHash = computeListingHash(details);
+
+    // Store listing details in seller's private state (keyed by listing hash)
+    set_listing_details_by_hash(listingHash, details);
+
+    // Compute the PUBLIC key - a commitment of the listing hash
+    // This is what gets stored on-chain, and cannot be reversed to get listingHash
+    const publicListingKey = computePublicListingKey(listingHash);
+
+    // Compute the commitment (hides the details but can be verified)
+    const commitment = persistentCommit<ListingDetails>(details, sellerRandomizer);
+
+    // Create the public listing entry
+    const listing = Listing {
+        commitment: commitment,
+        status: ListingStatus.Active,
+        escrowDeadline: escrowDeadline,
+        remainingQuantity: quantity,
+        escrowedAmount: 0 as Uint<128>,
+        claimableAmount: 0 as Uint<128>
+    };
+
+    // Store on-chain using the PUBLIC key (not the listing hash!)
+    assert(!listings.member(disclose(publicListingKey)), "Listing already exists");
+    listings.insert(disclose(publicListingKey), disclose(listing));
+
+    // Generate and store the nullifier for claiming payment later (keyed by listing hash)
+    const nullifier = generateNullifier(sellerSk, listingId);
+    set_listing_nullifier_by_hash(listingHash, nullifier);
+
+    // Return the listing hash - seller shares this privately with potential buyers
+    return listingHash;
+}
+
+/**
+ * Purchase an item using private balance
+ *
+ * The buyer must know the listing hash (shared privately by seller).
+ * Payment is deducted from buyer's private balance (verified via ZK against on-chain commitment).
+ * The payment amount is tracked in escrow until seller claims.
+ *
+ * SECURITY: The listing details are NOT disclosed on-chain to prevent front-running.
+ * Instead, we verify the details match the on-chain commitment using zero-knowledge proof.
+ * The buyer's commitment is stored on-chain to cryptographically bind the buyer.
+ *
+ * @param listingHash - The hash of the listing to purchase
+ * @param listingDetails - The full listing details (buyer must have received these from seller)
+ * @param purchaseQuantity - How many units to purchase
+ * @param nonce - Unique nonce for this purchase (allows same buyer to make multiple purchases)
+ */
+export circuit purchase(
+    listingHash: Bytes<32>,
+    listingDetails: ListingDetails,
+    purchaseQuantity: Uint<64>,
+    nonce: Bytes<32>
+): Bytes<32> {
+    // Validate quantity
+    assert(purchaseQuantity > 0, "Quantity must be greater than 0");
+
+    // Get buyer's secret key FIRST (before any disclosures to prevent front-running)
+    const buyerSk = secret_key();
+
+    // Compute buyer commitment - includes nonce to allow multiple purchases
+    // Only the real buyer can reproduce this commitment later
+    const buyerCommitment = computeBuyerCommitment(buyerSk, listingHash, nonce);
+
+    // Compute the listing hash from details (kept private)
+    const computedListingHash = computeListingHash(listingDetails);
+    assert(computedListingHash == listingHash, "Invalid listing details");
+
+    // Compute the public listing key from the listing hash
+    const publicListingKey = computePublicListingKey(listingHash);
+
+    // Disclose only the public listing key (not the listing hash or details!)
+    const disclosedPublicKey = disclose(publicListingKey);
+
+    // Verify the listing exists and is active
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+    const listing = listings.lookup(disclosedPublicKey);
+    assert(listing.status == ListingStatus.Active, "Listing not active");
+
+    // Verify enough quantity remaining
+    assert(listing.remainingQuantity >= disclose(purchaseQuantity), "Insufficient quantity available");
+
+    // Verify the listing details match the on-chain commitment (ZK verification)
+    const computedCommitment = persistentCommit<ListingDetails>(
+        listingDetails,
+        listingDetails.sellerRandomizer
+    );
+    assert(computedCommitment == listing.commitment, "Listing details don't match commitment");
+
+    // Calculate total price (pricePerUnit * quantity) and disclose it
+    // Use Field for safe multiplication then cast back
+    const totalPriceComputed: Uint<128> = ((listingDetails.pricePerUnit as Field) * (purchaseQuantity as Field)) as Uint<128>;
+    const totalPrice = disclose(totalPriceComputed);
+
+    // ===== BUYER BALANCE VERIFICATION AND UPDATE =====
+
+    // Compute buyer's user ID
+    const buyerId = computeUserId(disclose(buyerSk));
+
+    // Verify buyer has a balance registered
+    assert(userBalances.member(buyerId), "No balance found - deposit first");
+
+    // Get buyer's current balance from private state and disclose it
+    const buyerBalanceWitness = get_user_balance();
+    const buyerBalance = disclose(buyerBalanceWitness);
+
+    // Verify the stored commitment matches what we have in private state
+    const storedBuyerCommitment = userBalances.lookup(buyerId);
+    const computedBuyerBalanceCommitment = computeBalanceCommitment(
+        buyerBalance.balance,
+        buyerBalance.randomizer
+    );
+    assert(storedBuyerCommitment == computedBuyerBalanceCommitment, "Balance commitment mismatch");
+
+    // Verify sufficient balance
+    assert(buyerBalance.balance >= totalPrice, "Insufficient balance");
+
+    // Calculate new balance after deducting payment
+    const newBuyerBalance: Uint<128> = (buyerBalance.balance - totalPrice) as Uint<128>;
+
+    // Generate new randomizer for updated balance commitment
+    const newBuyerRandomizer = generateNewBalanceRandomizer(disclose(buyerSk), buyerBalance.randomizer);
+
+    // Compute and store new balance commitment
+    const newBuyerBalanceCommitment = computeBalanceCommitment(newBuyerBalance, newBuyerRandomizer);
+    userBalances.insert(buyerId, newBuyerBalanceCommitment);
+
+    // Update buyer's private state
+    set_user_balance(UserBalance {
+        balance: newBuyerBalance,
+        randomizer: newBuyerRandomizer
+    });
+
+    // ===== END BUYER BALANCE UPDATE =====
+
+    // Generate buyer randomizer for private state storage
+    const purchaseBuyerRandomizer = persistentHash<Vector<3, Bytes<32>>>([
+        disclose(buyerSk),
+        disclose(listingHash),
+        disclose(nonce)
+    ]);
+
+    // Compute purchase key for on-chain storage
+    const purchaseKey = computePurchaseKey(disclosedPublicKey, disclose(buyerCommitment));
+
+    // Ensure this exact purchase doesn't already exist
+    assert(!purchases.member(purchaseKey), "Purchase already exists");
+
+    // Store purchase on-chain
+    const onChainPurchase = Purchase {
+        buyerCommitment: disclose(buyerCommitment),
+        quantity: disclose(purchaseQuantity),
+        amountPaid: disclose(totalPrice),
+        status: PurchaseStatus.Pending
+    };
+    purchases.insert(purchaseKey, onChainPurchase);
+
+    // Store purchase details in buyer's private state (keyed by buyer commitment for uniqueness)
+    const purchaseDetails = PurchaseDetails {
+        listingHash: disclose(listingHash),
+        quantity: disclose(purchaseQuantity),
+        amountPaid: disclose(totalPrice),
+        buyerCommitment: disclose(buyerCommitment),
+        buyerRandomizer: purchaseBuyerRandomizer
+    };
+    set_purchase_details_by_hash(disclose(buyerCommitment), purchaseDetails);
+
+    // Update listing: decrease remaining quantity, increase escrowed amount
+    const newRemainingQuantity = listing.remainingQuantity - disclose(purchaseQuantity);
+    const newEscrowedAmount: Uint<128> = (listing.escrowedAmount + disclose(totalPrice)) as Uint<128>;
+
+    // If quantity reaches 0, mark as Sold (no more available), otherwise keep Active
+    if (newRemainingQuantity == 0) {
+        const updatedListing = Listing {
+            commitment: listing.commitment,
+            status: ListingStatus.Sold,
+            escrowDeadline: listing.escrowDeadline,
+            remainingQuantity: newRemainingQuantity,
+            escrowedAmount: newEscrowedAmount,
+            claimableAmount: listing.claimableAmount
+        };
+        listings.insert(disclosedPublicKey, disclose(updatedListing));
+    } else {
+        const updatedListing = Listing {
+            commitment: listing.commitment,
+            status: ListingStatus.Active,
+            escrowDeadline: listing.escrowDeadline,
+            remainingQuantity: newRemainingQuantity,
+            escrowedAmount: newEscrowedAmount,
+            claimableAmount: listing.claimableAmount
+        };
+        listings.insert(disclosedPublicKey, disclose(updatedListing));
+    }
+
+    // Return the buyer commitment (buyer needs this to confirm receipt or claim refund)
+    // Already disclosed above when stored on-chain, so safe to return
+    return disclose(buyerCommitment);
+}
+
+/**
+ * Buyer confirms receipt of item (releases funds to seller)
+ *
+ * Only the buyer who made the purchase can confirm.
+ * This moves the purchase amount from escrow to claimable.
+ *
+ * SECURITY: Uses cryptographic buyer commitment verification.
+ * The buyer must prove they know the secret key that produced the on-chain buyerCommitment.
+ *
+ * @param listingHash - The hash of the purchased listing
+ * @param nonce - The nonce used when making the purchase
+ */
+export circuit confirmReceipt(
+    listingHash: Bytes<32>,
+    nonce: Bytes<32>
+): [] {
+    // Get buyer's secret key FIRST
+    const buyerSk = secret_key();
+
+    // Compute the buyer commitment from secret key, listing hash, and nonce
+    const computedBuyerCommitment = computeBuyerCommitment(buyerSk, listingHash, nonce);
+
+    // Compute the public listing key
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+
+    // Verify the listing exists
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+    const listing = listings.lookup(disclosedPublicKey);
+
+    // Compute purchase key
+    const purchaseKey = computePurchaseKey(disclosedPublicKey, disclose(computedBuyerCommitment));
+
+    // Verify the purchase exists and is pending
+    assert(purchases.member(purchaseKey), "Purchase not found");
+    const purchase = purchases.lookup(purchaseKey);
+    assert(purchase.status == PurchaseStatus.Pending, "Purchase not pending");
+
+    // Cryptographically verify the caller is the actual buyer
+    assert(disclose(computedBuyerCommitment) == purchase.buyerCommitment, "Not the buyer - invalid commitment");
+
+    // Update purchase status to Confirmed
+    const updatedPurchase = Purchase {
+        buyerCommitment: purchase.buyerCommitment,
+        quantity: purchase.quantity,
+        amountPaid: purchase.amountPaid,
+        status: PurchaseStatus.Confirmed
+    };
+    purchases.insert(purchaseKey, updatedPurchase);
+
+    // Update listing: move amount from escrow to claimable
+    const newEscrowedAmount: Uint<128> = (listing.escrowedAmount - purchase.amountPaid) as Uint<128>;
+    const newClaimableAmount: Uint<128> = (listing.claimableAmount + purchase.amountPaid) as Uint<128>;
+
+    const updatedListing = Listing {
+        commitment: listing.commitment,
+        status: listing.status,
+        escrowDeadline: listing.escrowDeadline,
+        remainingQuantity: listing.remainingQuantity,
+        escrowedAmount: newEscrowedAmount,
+        claimableAmount: newClaimableAmount
+    };
+    listings.insert(disclosedPublicKey, disclose(updatedListing));
+}
+
+/**
+ * Seller claims payment for a listing
+ *
+ * Uses a nullifier to prove ownership without revealing identity.
+ * The payment is credited to the seller's private balance.
+ *
+ * Seller can claim:
+ * - claimableAmount (from confirmed purchases) immediately
+ * - escrowedAmount (from pending purchases) after timeout has passed
+ *
+ * SECURITY: Listing details are NOT disclosed to prevent information leakage.
+ * Verification is done via ZK proof against the on-chain commitment.
+ *
+ * @param listingHash - The hash of the listing
+ * @param listingDetails - The original listing details
+ */
+export circuit claimPayment(
+    listingHash: Bytes<32>,
+    listingDetails: ListingDetails
+): [] {
+    // Get seller's secret key FIRST
+    const sellerSk = secret_key();
+
+    // Verify listing details match the provided hash (kept private)
+    const computedHash = computeListingHash(listingDetails);
+    assert(computedHash == listingHash, "Invalid listing details");
+
+    // Compute the public listing key
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+
+    // Verify the listing exists
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+    const listing = listings.lookup(disclosedPublicKey);
+
+    // Verify the listing details match the on-chain commitment (ZK verification)
+    const computedCommitment = persistentCommit<ListingDetails>(
+        listingDetails,
+        listingDetails.sellerRandomizer
+    );
+    assert(computedCommitment == listing.commitment, "Listing details don't match commitment");
+
+    // Verify caller is the seller via nullifier
+    const nullifier = generateNullifier(sellerSk, listingDetails.listingId);
+    const storedNullifier = get_listing_nullifier_by_hash(disclose(listingHash));
+    assert(nullifier == storedNullifier, "Invalid nullifier - not the seller");
+
+    // Calculate claimable amount:
+    // - Always can claim claimableAmount (confirmed by buyers)
+    // - Can claim escrowedAmount if timeout has passed
+    const timeoutPassed = listing.escrowDeadline > 0 && blockTimeGte(listing.escrowDeadline);
+
+    // Handle claim based on timeout status
+    if (timeoutPassed) {
+        // Claim both confirmed and escrowed amounts
+        const amountToClaim: Uint<128> = (listing.claimableAmount + listing.escrowedAmount) as Uint<128>;
+        assert(amountToClaim > 0 as Uint<128>, "Nothing to claim");
+
+        // Credit seller's balance
+        creditSellerBalance(sellerSk, amountToClaim);
+
+        // Update listing: clear both escrow and claimable
+        if (listing.remainingQuantity == 0) {
+            const updatedListing = Listing {
+                commitment: listing.commitment,
+                status: ListingStatus.Claimed,
+                escrowDeadline: listing.escrowDeadline,
+                remainingQuantity: listing.remainingQuantity,
+                escrowedAmount: 0 as Uint<128>,
+                claimableAmount: 0 as Uint<128>
+            };
+            listings.insert(disclosedPublicKey, disclose(updatedListing));
+        } else {
+            const updatedListing = Listing {
+                commitment: listing.commitment,
+                status: listing.status,
+                escrowDeadline: listing.escrowDeadline,
+                remainingQuantity: listing.remainingQuantity,
+                escrowedAmount: 0 as Uint<128>,
+                claimableAmount: 0 as Uint<128>
+            };
+            listings.insert(disclosedPublicKey, disclose(updatedListing));
+        }
+    } else {
+        // Only claim confirmed amounts
+        const amountToClaim: Uint<128> = listing.claimableAmount;
+        assert(amountToClaim > 0 as Uint<128>, "Nothing to claim");
+
+        // Credit seller's balance
+        creditSellerBalance(sellerSk, amountToClaim);
+
+        // Update listing: only clear claimable, keep escrow
+        const updatedListing = Listing {
+            commitment: listing.commitment,
+            status: listing.status,
+            escrowDeadline: listing.escrowDeadline,
+            remainingQuantity: listing.remainingQuantity,
+            escrowedAmount: listing.escrowedAmount,
+            claimableAmount: 0 as Uint<128>
+        };
+        listings.insert(disclosedPublicKey, disclose(updatedListing));
+    }
+}
+
+/**
+ * Seller refunds a specific purchase
+ *
+ * If seller cannot deliver the item after it was purchased,
+ * they can refund the buyer. This marks the purchase as refunded
+ * and allows the buyer to claim their funds back.
+ *
+ * SECURITY: Listing details are NOT disclosed to prevent information leakage.
+ * Verification is done via ZK proof against the on-chain commitment.
+ *
+ * @param listingHash - The hash of the listing
+ * @param listingDetails - The original listing details
+ * @param buyerCommitment - The buyer's commitment for the specific purchase to refund
+ */
+export circuit refundPurchase(
+    listingHash: Bytes<32>,
+    listingDetails: ListingDetails,
+    buyerCommitment: Bytes<32>
+): [] {
+    // Get seller's secret key FIRST
+    const sellerSk = secret_key();
+
+    // Verify listing details match the provided hash (kept private)
+    const computedHash = computeListingHash(listingDetails);
+    assert(computedHash == listingHash, "Invalid listing details");
+
+    // Compute the public listing key
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+
+    // Verify the listing exists
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+    const listing = listings.lookup(disclosedPublicKey);
+
+    // Verify the listing details match the on-chain commitment (ZK verification)
+    const computedCommitment = persistentCommit<ListingDetails>(
+        listingDetails,
+        listingDetails.sellerRandomizer
+    );
+    assert(computedCommitment == listing.commitment, "Listing details don't match commitment");
+
+    // Verify caller is the seller via nullifier
+    const nullifier = generateNullifier(sellerSk, listingDetails.listingId);
+    const storedNullifier = get_listing_nullifier_by_hash(disclose(listingHash));
+    assert(nullifier == storedNullifier, "Not the seller");
+
+    // Compute purchase key
+    const disclosedBuyerCommitment = disclose(buyerCommitment);
+    const purchaseKey = computePurchaseKey(disclosedPublicKey, disclosedBuyerCommitment);
+
+    // Verify the purchase exists and is pending
+    assert(purchases.member(purchaseKey), "Purchase not found");
+    const purchase = purchases.lookup(purchaseKey);
+    assert(purchase.status == PurchaseStatus.Pending, "Purchase not pending");
+
+    // Update purchase status to Refunded
+    const updatedPurchase = Purchase {
+        buyerCommitment: purchase.buyerCommitment,
+        quantity: purchase.quantity,
+        amountPaid: purchase.amountPaid,
+        status: PurchaseStatus.Refunded
+    };
+    purchases.insert(purchaseKey, updatedPurchase);
+
+    // Update listing: decrease escrowed amount, return quantity
+    const newEscrowedAmount: Uint<128> = (listing.escrowedAmount - purchase.amountPaid) as Uint<128>;
+    const newRemainingQuantity: Uint<64> = (listing.remainingQuantity + purchase.quantity) as Uint<64>;
+
+    // If listing was Sold (quantity exhausted), reactivate it
+    if (listing.status == ListingStatus.Sold) {
+        const updatedListing = Listing {
+            commitment: listing.commitment,
+            status: ListingStatus.Active,
+            escrowDeadline: listing.escrowDeadline,
+            remainingQuantity: newRemainingQuantity,
+            escrowedAmount: newEscrowedAmount,
+            claimableAmount: listing.claimableAmount
+        };
+        listings.insert(disclosedPublicKey, disclose(updatedListing));
+    } else {
+        const updatedListing = Listing {
+            commitment: listing.commitment,
+            status: listing.status,
+            escrowDeadline: listing.escrowDeadline,
+            remainingQuantity: newRemainingQuantity,
+            escrowedAmount: newEscrowedAmount,
+            claimableAmount: listing.claimableAmount
+        };
+        listings.insert(disclosedPublicKey, disclose(updatedListing));
+    }
+}
+
+/**
+ * Buyer claims refund after seller refunds their purchase
+ *
+ * Uses cryptographic buyer commitment verification to ensure only
+ * the actual buyer can claim the refund. Also uses a buyer nullifier to
+ * prevent double-claiming via race conditions.
+ *
+ * The refund is credited to the buyer's private balance.
+ *
+ * @param listingHash - The hash of the listing
+ * @param nonce - The nonce used when making the purchase
+ */
+export circuit claimRefund(
+    listingHash: Bytes<32>,
+    nonce: Bytes<32>
+): [] {
+    // Get buyer's secret key FIRST
+    const buyerSk = secret_key();
+
+    // Compute the buyer commitment from secret key, listing hash, and nonce
+    const computedBuyerCommitment = computeBuyerCommitment(buyerSk, listingHash, nonce);
+
+    // Compute the buyer nullifier to prevent double-claiming
+    const buyerNullifier = generateBuyerNullifier(buyerSk, listingHash, nonce);
+
+    // Compute the public listing key
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+
+    // Verify the listing exists
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+
+    // Compute purchase key
+    const purchaseKey = computePurchaseKey(disclosedPublicKey, disclose(computedBuyerCommitment));
+
+    // Verify the purchase exists and is refunded
+    assert(purchases.member(purchaseKey), "Purchase not found");
+    const purchase = purchases.lookup(purchaseKey);
+    assert(purchase.status == PurchaseStatus.Refunded, "Purchase not refunded");
+
+    // Cryptographically verify the caller is the actual buyer
+    assert(disclose(computedBuyerCommitment) == purchase.buyerCommitment, "Not the buyer - invalid commitment");
+
+    // Prevent double-claiming via buyer nullifier
+    assert(!usedBuyerNullifiers.member(disclose(buyerNullifier)), "Already claimed refund");
+    usedBuyerNullifiers.insert(disclose(buyerNullifier));
+
+    // Credit buyer's balance with the refund amount
+    creditBuyerBalance(buyerSk, purchase.amountPaid);
+}
+
+/**
+ * Cancel an active listing
+ *
+ * Only the original seller can cancel (proven via nullifier).
+ * Can only cancel if listing has no pending escrow (no pending purchases).
+ *
+ * Listing details are NOT disclosed to prevent information leakage.
+ *
+ * @param listingHash - The hash of the listing to cancel
+ * @param listingDetails - The original listing details
+ */
+export circuit cancelListing(
+    listingHash: Bytes<32>,
+    listingDetails: ListingDetails
+): [] {
+    // Get seller's secret key FIRST
+    const sellerSk = secret_key();
+
+    // Verify listing details match the provided hash (kept private)
+    const computedHash = computeListingHash(listingDetails);
+    assert(computedHash == listingHash, "Invalid listing details");
+
+    // Compute the public listing key
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+
+    // Verify the listing exists and is active
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+    const listing = listings.lookup(disclosedPublicKey);
+    assert(listing.status == ListingStatus.Active, "Listing not active");
+
+    // Cannot cancel if there are pending purchases (escrow > 0)
+    assert(listing.escrowedAmount == (0 as Uint<128>), "Cannot cancel: pending purchases exist");
+
+    // Verify caller is the seller via nullifier
+    const nullifier = generateNullifier(sellerSk, listingDetails.listingId);
+    const storedNullifier = get_listing_nullifier_by_hash(disclose(listingHash));
+    assert(nullifier == storedNullifier, "Not the seller");
+
+    // Update listing status to Cancelled
+    const updatedListing = Listing {
+        commitment: listing.commitment,
+        status: ListingStatus.Cancelled,
+        escrowDeadline: listing.escrowDeadline,
+        remainingQuantity: listing.remainingQuantity,
+        escrowedAmount: listing.escrowedAmount,
+        claimableAmount: listing.claimableAmount
+    };
+    listings.insert(disclosedPublicKey, disclose(updatedListing));
+}
+
+/**
+ * Get listing status (requires knowing the private listing hash)
+ *
+ * SECURITY: The listing hash is NOT disclosed - only the public key is revealed.
+ * This preserves the privacy of which listing is being queried.
+ */
+export circuit getListingStatus(listingHash: Bytes<32>): ListingStatus {
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+    assert(listings.member(disclosedPublicKey), "Listing not found");
+    return listings.lookup(disclosedPublicKey).status;
+}
+
+/**
+ * Check if a listing exists (requires knowing the private listing hash)
+ *
+ * SECURITY: The listing hash is NOT disclosed - only the public key is revealed.
+ * This preserves the privacy of which listing is being queried.
+ */
+export circuit listingExists(listingHash: Bytes<32>): Boolean {
+    const publicListingKey = computePublicListingKey(listingHash);
+    const disclosedPublicKey = disclose(publicListingKey);
+    return listings.member(disclosedPublicKey);
+}
+
+// ============ HELPER CIRCUITS ============
+
+/**
+ * Credit a user's balance (used for claims and refunds)
+ * Creates new balance if user doesn't have one yet
+ */
+circuit creditUserBalance(userSk: Bytes<32>, amount: Uint<128>): [] {
+    // Compute user ID
+    const userId = computeUserId(disclose(userSk));
+
+    // Get current balance from private state and disclose it
+    const currentBalanceWitness = get_user_balance();
+    const currentBalance = disclose(currentBalanceWitness);
+
+    // Check if user has an existing balance
+    if (userBalances.member(userId)) {
+        // Verify the stored commitment matches
+        const storedCommitment = userBalances.lookup(userId);
+        const computedCommitment = computeBalanceCommitment(
+            currentBalance.balance,
+            currentBalance.randomizer
+        );
+        assert(storedCommitment == computedCommitment, "Balance commitment mismatch");
+
+        // Calculate new balance
+        const newBalance: Uint<128> = (currentBalance.balance + amount) as Uint<128>;
+
+        // Generate new randomizer
+        const newRandomizer = generateNewBalanceRandomizer(disclose(userSk), currentBalance.randomizer);
+
+        // Update balance commitment
+        const newCommitment = computeBalanceCommitment(newBalance, newRandomizer);
+        userBalances.insert(userId, newCommitment);
+
+        // Update private state
+        set_user_balance(UserBalance {
+            balance: newBalance,
+            randomizer: newRandomizer
+        });
+    } else {
+        // New balance for user
+        const newBalance: Uint<128> = amount;
+
+        // Generate initial randomizer
+        const initialRandomizer = persistentHash<Vector<2, Bytes<32>>>([
+            pad(32, "init_rand"),
+            disclose(userSk)
+        ]);
+
+        // Create initial balance commitment
+        const newCommitment = computeBalanceCommitment(newBalance, initialRandomizer);
+        userBalances.insert(userId, newCommitment);
+
+        // Update private state
+        set_user_balance(UserBalance {
+            balance: newBalance,
+            randomizer: initialRandomizer
+        });
+    }
+}
+
+// Alias for readability in seller context
+circuit creditSellerBalance(sellerSk: Bytes<32>, amount: Uint<128>): [] {
+    creditUserBalance(sellerSk, amount);
+}
+
+// Alias for readability in buyer context
+circuit creditBuyerBalance(buyerSk: Bytes<32>, amount: Uint<128>): [] {
+    creditUserBalance(buyerSk, amount);
+}
+
+/**
+ * Compute the listing hash from details
+ * This is the private "access key" that seller shares with buyers
+ */
+circuit computeListingHash(details: ListingDetails): Bytes<32> {
+    return persistentHash<ListingDetails>(details);
+}
+
+/**
+ * Compute the public listing key from the private listing hash
+ * This is what gets stored on-chain - cannot be reversed to get the listing hash
+ */
+circuit computePublicListingKey(listingHash: Bytes<32>): Bytes<32> {
+    return persistentHash<Vector<2, Bytes<32>>>([
+        pad(32, "listing_key"),
+        listingHash
+    ]);
+}
+
+/**
+ * Generate a nullifier for a listing (seller)
+ * Used to prove ownership without revealing identity
+ */
+circuit generateNullifier(sk: Bytes<32>, listingId: Bytes<32>): Bytes<32> {
+    return persistentHash<Vector<3, Bytes<32>>>([
+        pad(32, "nullifier"),
+        sk,
+        listingId
+    ]);
+}
+
+/**
+ * Compute buyer commitment
+ * This binds a buyer to a purchase cryptographically
+ * Only the buyer who knows sk can reproduce this commitment
+ * Includes nonce to allow same buyer to make multiple purchases
+ */
+circuit computeBuyerCommitment(buyerSk: Bytes<32>, listingHash: Bytes<32>, nonce: Bytes<32>): Bytes<32> {
+    return persistentHash<Vector<4, Bytes<32>>>([
+        pad(32, "buyer_commit"),
+        buyerSk,
+        listingHash,
+        nonce
+    ]);
+}
+
+/**
+ * Generate a buyer nullifier for refund claims
+ * Prevents double-claiming of refunds
+ * Includes nonce to match specific purchase
+ */
+circuit generateBuyerNullifier(buyerSk: Bytes<32>, listingHash: Bytes<32>, nonce: Bytes<32>): Bytes<32> {
+    return persistentHash<Vector<4, Bytes<32>>>([
+        pad(32, "buyer_null"),
+        buyerSk,
+        listingHash,
+        nonce
+    ]);
+}
+
+/**
+ * Compute purchase key from public listing key and buyer commitment
+ * This is the key used to store/lookup purchases on-chain
+ */
+circuit computePurchaseKey(publicListingKey: Bytes<32>, buyerCommitment: Bytes<32>): Bytes<32> {
+    return persistentHash<Vector<3, Bytes<32>>>([
+        pad(32, "purchase_key"),
+        publicListingKey,
+        buyerCommitment
+    ]);
+}
+
+/**
+ * Compute user ID from secret key
+ * This is the key used to store/lookup user balances on-chain
+ * It's a commitment to the user's public key using their secret key as randomizer
+ */
+circuit computeUserId(sk: Bytes<32>): Bytes<32> {
+    return persistentCommit<Bytes<32>>(ownPublicKey().bytes, sk);
+}
+
+/**
+ * Compute balance commitment from balance and randomizer
+ * This hides the actual balance while allowing ZK verification
+ */
+circuit computeBalanceCommitment(balance: Uint<128>, randomizer: Bytes<32>): Bytes<32> {
+    return persistentCommit<Uint<128>>(balance, randomizer);
+}
+
+/**
+ * Generate a new randomizer for balance updates
+ * Derived from user's secret key and current commitment to ensure uniqueness
+ */
+circuit generateNewBalanceRandomizer(sk: Bytes<32>, oldRandomizer: Bytes<32>): Bytes<32> {
+    return persistentHash<Vector<3, Bytes<32>>>([
+        pad(32, "balance_rand"),
+        sk,
+        oldRandomizer
+    ]);
+}

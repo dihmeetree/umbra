@@ -1,14 +1,14 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "types": ["chrome"],
+    "resolveJsonModule": true,
     "noEmit": true
   },
   "include": ["src/**/*"]

@@ -79,8 +79,7 @@
     "packages/prover-client",
     "packages/oracle-ui",
     "packages/oracle-server",
-    "packages/polyzk-api",
-    "packages/polyzk-extension",
-    "packages/contracts/ada-statera-protocol"
+    "packages/contracts/ada-statera-protocol",
+    "packages/contracts/anonymous-marketplace"
   ]
 }

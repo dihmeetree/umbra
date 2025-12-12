@@ -1,0 +1,40 @@
+{
+  "name": "@statera/anonymous-marketplace",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "packageManager": "yarn@4.9.2",
+  "workspaces": [
+    "packages/*"
+  ],
+  "exports": {
+    ".": {
+      "default": "./dist/index.js",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "compact": "compact compile src/anonymousMarketplace.compact ./src/managed/anonymousMarketplace",
+    "build": "rm -rf dist && tsc --project tsconfig.build.json && cp -R ./src/managed ./dist/managed 2>/dev/null || true && cp ./src/anonymousMarketplace.compact dist",
+    "prebuild": "rm -rf dist && tsc --project tsconfig.build.json && cp -R ./src/managed ./dist/managed 2>/dev/null || true && cp ./src/anonymousMarketplace.compact dist",
+    "lint": "eslint src",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepack": "yarn build"
+  },
+  "dependencies": {
+    "@statera/simulator": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "eslint": "^9.27.0",
+    "typescript": "^5.8.2",
+    "vitest": "^1.6.1"
+  }
+}
