@@ -15,7 +15,7 @@
     "@statera/ada-statera-protocol": "workspace:*",
     "@statera/prover-client": "workspace:*",
     "@statera/simulator": "workspace:*",
-    "hono": "^4.6.0"
+    "hono": "^4.11.7"
   },
   "devDependencies": {
     "@types/bun": "latest",
