@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::commitment::Commitment;
 use crate::crypto::encryption::EncryptedPayload;
+use crate::crypto::keys::{Signature, SigningPublicKey};
 use crate::crypto::nullifier::Nullifier;
 use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
@@ -69,6 +70,37 @@ pub struct TxMessage {
     pub payload: EncryptedPayload,
 }
 
+/// Transaction type: regular transfer or validator lifecycle operation.
+///
+/// Validator operations are carried as regular transactions so the bond can be
+/// paid through the fee field without modifying the zk-STARK balance proof.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TxType {
+    /// Regular private value transfer (default).
+    Transfer,
+    /// Register a new validator. The transaction fee must be at least
+    /// `VALIDATOR_BOND + MIN_TX_FEE`; the bond portion is escrowed.
+    ValidatorRegister {
+        /// The validator's Dilithium5 signing public key.
+        signing_key: SigningPublicKey,
+    },
+    /// Deregister an active validator and return the bond.
+    ValidatorDeregister {
+        /// ID (fingerprint) of the validator being deregistered.
+        validator_id: Hash,
+        /// Signature proving ownership: signs `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`.
+        auth_signature: Signature,
+        /// Output that receives the returned bond (added to commitment tree).
+        bond_return_output: Box<TxOutput>,
+    },
+}
+
+impl Default for TxType {
+    fn default() -> Self {
+        TxType::Transfer
+    }
+}
+
 /// A complete Spectra transaction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
@@ -88,6 +120,9 @@ pub struct Transaction {
     pub messages: Vec<TxMessage>,
     /// Binding hash over all non-proof fields (prevents tampering)
     pub tx_binding: Hash,
+    /// Transaction type (transfer, validator register/deregister)
+    #[serde(default)]
+    pub tx_type: TxType,
 }
 
 impl Transaction {
@@ -110,6 +145,8 @@ impl Transaction {
         hasher.update(&self.expiry_epoch.to_le_bytes());
         // Hash binding
         hasher.update(&self.tx_binding);
+        // Hash tx_type discriminant
+        hash_tx_type_into(&self.tx_type, &mut hasher);
         TxId(*hasher.finalize().as_bytes())
     }
 
@@ -125,6 +162,7 @@ impl Transaction {
             self.fee,
             &self.chain_id,
             self.expiry_epoch,
+            &self.tx_type,
         )
     }
 
@@ -156,6 +194,32 @@ impl Transaction {
         // Enforce minimum fee to prevent zero-fee spam
         if self.fee < crate::constants::MIN_TX_FEE {
             return Err(TxValidationError::FeeTooLow);
+        }
+
+        // Transaction-type-specific validation
+        match &self.tx_type {
+            TxType::Transfer => {}
+            TxType::ValidatorRegister { signing_key } => {
+                // Bond must be included in the fee
+                let min_fee = crate::constants::VALIDATOR_BOND
+                    .checked_add(crate::constants::MIN_TX_FEE)
+                    .unwrap_or(u64::MAX);
+                if self.fee < min_fee {
+                    return Err(TxValidationError::InsufficientBond);
+                }
+                // Signing key must not be empty
+                if signing_key.0.is_empty() {
+                    return Err(TxValidationError::InvalidValidatorKey);
+                }
+            }
+            TxType::ValidatorDeregister {
+                bond_return_output, ..
+            } => {
+                // Bond return output must have a non-zero commitment
+                if bond_return_output.commitment.0 == [0u8; 32] {
+                    return Err(TxValidationError::InvalidBondReturn);
+                }
+            }
         }
 
         // Enforce transaction expiry
@@ -283,12 +347,15 @@ pub fn compute_tx_content_hash(
     fee: u64,
     chain_id: &Hash,
     expiry_epoch: u64,
+    tx_type: &TxType,
 ) -> Hash {
     let mut hasher = blake3::Hasher::new_derive_key("spectra.tx_content_hash");
     // Chain binding
     hasher.update(chain_id);
     hasher.update(&expiry_epoch.to_le_bytes());
     hasher.update(&fee.to_le_bytes());
+    // Transaction type
+    hash_tx_type_into(tx_type, &mut hasher);
     // Input count + nullifiers + proof_links
     hasher.update(&(inputs.len() as u32).to_le_bytes());
     for input in inputs {
@@ -320,6 +387,44 @@ pub fn compute_tx_content_hash(
     *hasher.finalize().as_bytes()
 }
 
+/// Hash the tx_type discriminant and relevant fields into a hasher.
+fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
+    match tx_type {
+        TxType::Transfer => {
+            hasher.update(&[0u8]);
+        }
+        TxType::ValidatorRegister { signing_key } => {
+            hasher.update(&[1u8]);
+            hasher.update(&(signing_key.0.len() as u32).to_le_bytes());
+            hasher.update(&signing_key.0);
+        }
+        TxType::ValidatorDeregister {
+            validator_id,
+            auth_signature,
+            bond_return_output,
+        } => {
+            hasher.update(&[2u8]);
+            hasher.update(validator_id);
+            hasher.update(&(auth_signature.0.len() as u32).to_le_bytes());
+            hasher.update(&auth_signature.0);
+            hasher.update(&bond_return_output.commitment.0);
+            hasher.update(&bond_return_output.stealth_address.one_time_key);
+        }
+    }
+}
+
+/// Compute the deregistration auth sign data.
+///
+/// The validator signs: `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`
+pub fn deregister_sign_data(chain_id: &Hash, validator_id: &Hash, tx_content_hash: &Hash) -> Hash {
+    crate::hash_concat(&[
+        b"spectra.validator.deregister",
+        chain_id,
+        validator_id,
+        tx_content_hash,
+    ])
+}
+
 /// Transaction validation errors.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum TxValidationError {
@@ -349,4 +454,10 @@ pub enum TxValidationError {
     Expired,
     #[error("fee below minimum ({} required)", crate::constants::MIN_TX_FEE)]
     FeeTooLow,
+    #[error("validator registration fee too low (bond + fee required)")]
+    InsufficientBond,
+    #[error("invalid validator signing key")]
+    InvalidValidatorKey,
+    #[error("invalid bond return output")]
+    InvalidBondReturn,
 }

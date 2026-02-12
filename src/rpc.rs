@@ -34,6 +34,8 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/state", get(get_state))
         .route("/peers", get(get_peers))
         .route("/mempool", get(get_mempool))
+        .route("/validators", get(get_validators))
+        .route("/validator/{id}", get(get_validator))
         .with_state(rpc_state)
 }
 
@@ -198,4 +200,60 @@ async fn get_peers(State(state): State<RpcState>) -> Json<Vec<PeerInfoResponse>>
 async fn get_mempool(State(state): State<RpcState>) -> Json<crate::mempool::MempoolStats> {
     let node = state.node.read().await;
     Json(node.mempool.stats())
+}
+
+// ── GET /validators ──
+
+#[derive(Serialize)]
+struct ValidatorResponse {
+    id: String,
+    active: bool,
+    bond: Option<u64>,
+    slashed: bool,
+}
+
+async fn get_validators(State(state): State<RpcState>) -> Json<Vec<ValidatorResponse>> {
+    let node = state.node.read().await;
+    let s = &node.ledger.state;
+    let validators: Vec<ValidatorResponse> = s
+        .all_validators()
+        .into_iter()
+        .map(|v| ValidatorResponse {
+            id: hex::encode(v.id),
+            active: v.active,
+            bond: s.validator_bond(&v.id),
+            slashed: s.is_slashed(&v.id),
+        })
+        .collect();
+    Json(validators)
+}
+
+// ── GET /validator/:id ──
+
+async fn get_validator(
+    State(state): State<RpcState>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<ValidatorResponse>, (StatusCode, String)> {
+    let id_bytes: [u8; 32] = hex::decode(&id_hex)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid id: {}", e)))?
+        .try_into()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "id must be 32 bytes hex".to_string(),
+            )
+        })?;
+
+    let node = state.node.read().await;
+    let s = &node.ledger.state;
+    let validator = s
+        .get_validator(&id_bytes)
+        .ok_or((StatusCode::NOT_FOUND, "validator not found".to_string()))?;
+
+    Ok(Json(ValidatorResponse {
+        id: hex::encode(validator.id),
+        active: validator.active,
+        bond: s.validator_bond(&id_bytes),
+        slashed: s.is_slashed(&id_bytes),
+    }))
 }

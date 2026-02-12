@@ -34,6 +34,10 @@ struct Cli {
     /// Run the demo walkthrough instead of starting a node.
     #[arg(long)]
     demo: bool,
+
+    /// Register as a genesis validator (for bootstrapping a new network).
+    #[arg(long)]
+    genesis_validator: bool,
 }
 
 #[tokio::main]
@@ -52,8 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("RPC: 0.0.0.0:{}", cli.rpc_port);
     tracing::info!("Data: {}", cli.data_dir.display());
 
-    // Generate a node keypair (in production, load from storage)
-    let keypair = spectra::crypto::keys::SigningKeypair::generate();
+    // Load persistent keypair (or generate on first run)
+    let keypair = spectra::node::load_or_generate_keypair(&cli.data_dir)?;
 
     let rpc_addr: SocketAddr = ([0, 0, 0, 0], cli.rpc_port).into();
 
@@ -63,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir: cli.data_dir,
         rpc_addr,
         keypair,
+        genesis_validator: cli.genesis_validator,
     };
 
     let mut node = spectra::node::Node::new(config).await?;
@@ -304,6 +309,7 @@ fn run_demo() {
         timestamp: 1000,
         state_root: [0u8; 32],
         signature: Signature(vec![]),
+        vrf_proof: None,
     };
     dag.insert_unchecked(v1).unwrap();
     dag.finalize(&v1_id);
@@ -323,6 +329,7 @@ fn run_demo() {
         timestamp: 1000,
         state_root: [0u8; 32],
         signature: Signature(vec![]),
+        vrf_proof: None,
     };
     dag.insert_unchecked(v2).unwrap();
     dag.finalize(&v2_id);
@@ -342,6 +349,7 @@ fn run_demo() {
         timestamp: 2000,
         state_root: [0u8; 32],
         signature: Signature(vec![]),
+        vrf_proof: None,
     };
     dag.insert_unchecked(v3).unwrap();
     dag.finalize(&v3_id);

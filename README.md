@@ -77,24 +77,24 @@ spectra/
         spend_prover.rs     Prover for spend STARK proofs
         verify.rs           STARK verification wrappers
     transaction/
-      mod.rs                Transaction, TxInput, TxOutput types and validation
+      mod.rs                Transaction, TxType, TxInput, TxOutput types and validation
       builder.rs            TransactionBuilder API for constructing transactions
     consensus/
       mod.rs                PoVP design documentation
-      dag.rs                DAG data structure (vertices, tips, ancestors)
-      bft.rs                BFT voting, certification, committee selection
+      dag.rs                DAG data structure (vertices with VRF proofs, tips, ancestors)
+      bft.rs                BFT voting with VRF proofs, certification, committee selection
     mempool.rs              Fee-priority transaction pool with nullifier conflict detection
-    storage.rs              Persistent storage trait + sled backend
+    storage.rs              Persistent storage trait + sled backend (vertices, txs, validators)
     p2p.rs                  Async TCP P2P networking with channel-based architecture
-    node.rs                 Node orchestrator: event loop, message handling, vertex proposal
-    rpc.rs                  JSON HTTP API (axum)
-    state.rs                Chain state, Ledger: Merkle tree, nullifier set, DAG coordination
+    node.rs                 Node orchestrator: active consensus, persistent keypair, BFT voting
+    rpc.rs                  JSON HTTP API (axum): tx, state, peers, mempool, validators
+    state.rs                Chain state (bonds, slashing, epoch seed), Ledger (two-phase vertex flow)
     network.rs              P2P protocol message types and serialization
     wallet.rs               Key management, output scanning, tx building
-    main.rs                 Node binary with clap CLI (+ demo mode)
+    main.rs                 Node binary with clap CLI (--genesis-validator, --demo)
 ```
 
-**~9,900 lines of Rust** across 32 source files with **111 tests**.
+**~10,700 lines of Rust** across 32 source files with **115 tests**.
 
 ## Building
 
@@ -119,12 +119,16 @@ cargo run --release -- [OPTIONS]
 | `--data-dir` | `./spectra-data` | Data directory for persistent storage |
 | `--rpc-port` | `9733` | JSON RPC listen port |
 | `--demo` | *(off)* | Run the protocol demo walkthrough instead |
+| `--genesis-validator` | *(off)* | Register as a genesis validator (for bootstrapping a new network) |
 
 ### Examples
 
 ```bash
 # Start a node with default settings
 cargo run --release
+
+# Start as a genesis validator (bootstraps a new network)
+cargo run --release -- --genesis-validator
 
 # Start with custom ports and a bootstrap peer
 cargo run --release -- --listen-addr 127.0.0.1:9000 --rpc-port 9001 --peers 192.168.1.10:9732
@@ -144,6 +148,8 @@ The node exposes a JSON HTTP API on the RPC port (default 9733).
 | `GET` | `/state` | Query chain state (epoch, commitment/nullifier counts, roots) |
 | `GET` | `/peers` | List connected peers |
 | `GET` | `/mempool` | Get mempool statistics |
+| `GET` | `/validators` | List all validators with bond and status |
+| `GET` | `/validator/{id}` | Get a single validator's info |
 
 ### Example
 
@@ -153,6 +159,9 @@ curl http://localhost:9733/state
 
 # Check mempool stats
 curl http://localhost:9733/mempool
+
+# List all validators
+curl http://localhost:9733/validators
 
 # Look up a transaction
 curl http://localhost:9733/tx/abc123...
@@ -174,7 +183,7 @@ Fee-priority transaction pool with configurable limits:
 
 `Storage` trait with a [sled](https://docs.rs/sled) embedded database backend:
 
-- **5 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`
+- **6 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`
 - All values are bincode-serialized; keys are raw 32-byte hashes
 - `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts) for persistence
 - Commitment level storage enables Merkle tree reconstruction on restart
@@ -194,10 +203,13 @@ Async TCP transport built on tokio with channel-based architecture:
 
 The `Node` struct ties everything together with a `tokio::select!` event loop:
 
-- Processes P2P events: new transactions → mempool, new vertices → ledger + storage, votes → gossip
-- Periodic vertex proposal timer drains high-fee transactions from the mempool
-- Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage)
+- **Persistent validator identity** — keypair is saved to `data_dir/validator.key` on first run and loaded on subsequent startups
+- **Active consensus participation** — when selected for the committee via VRF, the node proposes vertices (draining high-fee transactions from the mempool) and casts BFT votes on incoming vertices
+- **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, purges conflicting mempool entries, persists to storage, and slashes equivocators
+- **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root
+- Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
 - Peer discovery via `GetPeers` / `PeersResponse` messages
+- Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed, no funding tx required)
 
 ## Testing
 
@@ -205,7 +217,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 111 tests cover:
+All 115 tests cover:
 
 - Post-quantum key generation, signing, and KEM roundtrips
 - Stealth address generation and detection (correct and wrong recipient)
@@ -226,8 +238,9 @@ All 111 tests cover:
 - Wallet scanning, balance tracking, spending with change, pending transaction confirm/cancel
 - End-to-end: fund, transfer, message decrypt, bystander non-detection
 - Mempool: fee-priority ordering, nullifier conflict detection, eviction, drain
-- Storage: vertex/transaction/nullifier persistence, chain state meta roundtrips
+- Storage: vertex/transaction/nullifier/validator persistence, chain state meta roundtrips
 - P2P: peer connection establishment, message exchange
+- Node: persistent keypair load/save roundtrip
 
 ## Demo
 
@@ -260,6 +273,7 @@ Transaction {
     balance_proof: BalanceStarkProof
     messages:      [EncryptedPayload]  (optional)
     tx_binding:    Hash (binds all fields together)
+    tx_type:       Transfer | ValidatorRegister | ValidatorDeregister
 }
 ```
 
@@ -269,6 +283,9 @@ Transaction {
 - **Replay protection** — each transaction includes a `chain_id` (network identifier) and `expiry_epoch` (after which the tx is invalid), preventing cross-chain and stale-transaction replay.
 - **tx_binding** — the hash of all transaction content, included in proof challenges. Any modification to inputs, outputs, fee, chain_id, or expiry_epoch invalidates the balance proof.
 - **Messages** are Kyber-encrypted payloads (with 24-byte nonce + BLAKE3 MAC) that only the recipient can decrypt.
+- **Transaction types** — in addition to regular transfers, transactions can carry validator registration or deregistration operations:
+  - `ValidatorRegister` — includes the validator's Dilithium5 signing key. The fee must be at least `VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state, and only the remainder goes to epoch fees. No zk-STARK modifications are needed — the bond is carried through the existing fee field.
+  - `ValidatorDeregister` — includes the validator ID, an auth signature proving ownership, and a `TxOutput` that receives the returned bond (added to the commitment tree). The bond return is secured by the STARK system: if the validator creates a wrong commitment, it will fail verification when they try to spend.
 
 ## Zero-Knowledge Proof System
 
@@ -405,10 +422,16 @@ All transaction validity is verified via zk-STARKs:
 - **Equivocation detection** — BFT tracks `(voter_id, round) → vertex_id` and records `EquivocationEvidence` when a validator votes for conflicting vertices in the same round
 - **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` to prevent double-spend of outputs in unconfirmed transactions
 - **VRF commitment verification** — `VrfOutput::verify()` requires a pre-registered proof commitment, enforcing the commit-reveal anti-grinding scheme; `verify_locally()` is available for self-checks only
+- **VRF-proven vertices and votes** — every non-genesis vertex and BFT vote must include a VRF proof demonstrating the proposer/voter was selected for the epoch's committee; vertices and votes without valid VRF proofs are rejected
+- **Validator bond escrow** — registration requires `fee >= VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state and only the remainder goes to epoch fees. Prevents unbonded validators from participating
+- **Slashing** — equivocation evidence (voting for conflicting vertices in the same round) triggers automatic bond forfeiture to epoch fees and permanent validator exclusion
+- **Deregistration auth** — validator deregistration requires a signature over `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`, preventing unauthorized bond withdrawal
+- **Two-phase vertex finalization** — vertices are inserted into the DAG (unfinalized) first, then finalized only after BFT quorum certification, preventing premature state application
+- **Persistent validator keypair** — the validator's Dilithium5 keypair is persisted to disk with raw byte serialization and validated on load, preventing key loss across restarts
 
 ## Production Roadmap
 
-Spectra includes a full node implementation with P2P networking, persistent storage, mempool, and RPC API. A production deployment would additionally require:
+Spectra includes a full node implementation with P2P networking, persistent storage, mempool, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, and VRF-proven committee membership. A production deployment would additionally require:
 
 - **Post-quantum handshakes** — upgrade the P2P transport layer with Noise/Kyber for quantum-resistant peer connections
 - **Peer reputation and discovery** — DHT-based peer discovery, reputation scoring, and ban management

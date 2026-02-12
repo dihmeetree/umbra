@@ -10,7 +10,7 @@
 //! canonical depth 20, matching the zk-STARK spend proof circuit. Appending
 //! a commitment is O(MERKLE_DEPTH) instead of rebuilding the full tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::consensus::bft::Validator;
 use crate::consensus::dag::{Vertex, VertexId};
@@ -19,7 +19,8 @@ use crate::crypto::nullifier::{Nullifier, NullifierSet};
 use crate::crypto::proof::{IncrementalMerkleTree, MerkleNode};
 use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::SpendPublicInputs;
-use crate::transaction::Transaction;
+use crate::crypto::vrf::EpochSeed;
+use crate::transaction::{deregister_sign_data, Transaction, TxType};
 use crate::Hash;
 
 /// The full blockchain state.
@@ -36,6 +37,12 @@ pub struct ChainState {
     nullifier_hash: Hash,
     /// Registered validators
     validators: HashMap<Hash, Validator>,
+    /// Escrowed validator bonds (validator_id -> bond amount)
+    validator_bonds: HashMap<Hash, u64>,
+    /// Permanently slashed validators
+    slashed_validators: HashSet<Hash>,
+    /// Current epoch's VRF seed
+    epoch_seed: EpochSeed,
     /// Total fees collected in the current epoch
     epoch_fees: u64,
     /// Current epoch number
@@ -62,6 +69,9 @@ impl ChainState {
             nullifiers: NullifierSet::new(),
             nullifier_hash: [0u8; 32],
             validators: HashMap::new(),
+            validator_bonds: HashMap::new(),
+            slashed_validators: HashSet::new(),
+            epoch_seed: EpochSeed::genesis(),
             epoch_fees: 0,
             epoch: 0,
             last_finalized: None,
@@ -123,11 +133,83 @@ impl ChainState {
             self.add_commitment(output.commitment);
         }
 
-        // Collect fee with overflow check
-        self.epoch_fees = self
-            .epoch_fees
-            .checked_add(tx.fee)
-            .ok_or(StateError::FeeOverflow)?;
+        // Handle transaction type
+        match &tx.tx_type {
+            TxType::Transfer => {
+                // Standard fee collection
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(tx.fee)
+                    .ok_or(StateError::FeeOverflow)?;
+            }
+            TxType::ValidatorRegister { signing_key } => {
+                let validator = Validator::new(signing_key.clone());
+                let vid = validator.id;
+
+                // Check not already registered
+                if self.validators.contains_key(&vid) {
+                    return Err(StateError::ValidatorAlreadyRegistered);
+                }
+                // Check not slashed
+                if self.slashed_validators.contains(&vid) {
+                    return Err(StateError::ValidatorSlashed);
+                }
+
+                // Escrow bond, remainder goes to epoch fees
+                let bond = crate::constants::VALIDATOR_BOND;
+                let actual_fee = tx
+                    .fee
+                    .checked_sub(bond)
+                    .ok_or(StateError::InsufficientBond)?;
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(actual_fee)
+                    .ok_or(StateError::FeeOverflow)?;
+
+                self.validator_bonds.insert(vid, bond);
+                self.register_validator(validator);
+            }
+            TxType::ValidatorDeregister {
+                validator_id,
+                auth_signature,
+                bond_return_output,
+            } => {
+                // Verify validator exists and is active
+                let validator = self
+                    .validators
+                    .get(validator_id)
+                    .ok_or(StateError::ValidatorNotFound)?;
+                if !validator.active {
+                    return Err(StateError::ValidatorNotActive);
+                }
+                if self.slashed_validators.contains(validator_id) {
+                    return Err(StateError::ValidatorSlashed);
+                }
+
+                // Verify auth signature
+                let tx_content_hash = tx.tx_content_hash();
+                let sign_data =
+                    deregister_sign_data(&self.chain_id, validator_id, &tx_content_hash);
+                if !validator.public_key.verify(&sign_data, auth_signature) {
+                    return Err(StateError::InvalidDeregisterAuth);
+                }
+
+                // Return bond as output commitment
+                self.add_commitment(bond_return_output.commitment);
+
+                // Mark inactive and remove bond
+                if let Some(v) = self.validators.get_mut(validator_id) {
+                    v.active = false;
+                }
+                self.validator_bonds.remove(validator_id);
+
+                // Collect fee
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(tx.fee)
+                    .ok_or(StateError::FeeOverflow)?;
+            }
+        }
 
         Ok(())
     }
@@ -177,14 +259,67 @@ impl ChainState {
         self.validators.insert(validator.id, validator);
     }
 
+    /// Register a genesis validator (bond escrowed without requiring a funding tx).
+    pub fn register_genesis_validator(&mut self, validator: Validator) {
+        let id = validator.id;
+        self.validator_bonds
+            .insert(id, crate::constants::VALIDATOR_BOND);
+        self.validators.insert(id, validator);
+    }
+
     /// Get all active validators.
     pub fn active_validators(&self) -> Vec<&Validator> {
         self.validators.values().filter(|v| v.active).collect()
     }
 
+    /// Get all validators (active and inactive).
+    pub fn all_validators(&self) -> Vec<&Validator> {
+        self.validators.values().collect()
+    }
+
     /// Get a validator by ID.
     pub fn get_validator(&self, id: &Hash) -> Option<&Validator> {
         self.validators.get(id)
+    }
+
+    /// Check if a validator is registered and active.
+    pub fn is_active_validator(&self, id: &Hash) -> bool {
+        self.validators.get(id).map(|v| v.active).unwrap_or(false)
+    }
+
+    /// Get the bond escrowed for a validator.
+    pub fn validator_bond(&self, id: &Hash) -> Option<u64> {
+        self.validator_bonds.get(id).copied()
+    }
+
+    /// Count of active validators.
+    pub fn total_validators(&self) -> usize {
+        self.active_validators().len()
+    }
+
+    /// Slash a validator: forfeit bond and mark as permanently slashed.
+    pub fn slash_validator(&mut self, validator_id: &Hash) -> Result<(), StateError> {
+        let validator = self
+            .validators
+            .get_mut(validator_id)
+            .ok_or(StateError::ValidatorNotFound)?;
+        validator.active = false;
+
+        // Forfeit bond to epoch fees
+        if let Some(bond) = self.validator_bonds.remove(validator_id) {
+            self.epoch_fees = self
+                .epoch_fees
+                .checked_add(bond)
+                .ok_or(StateError::FeeOverflow)?;
+        }
+
+        self.slashed_validators.insert(*validator_id);
+        Ok(())
+    }
+
+    /// Check if a validator has been slashed.
+    pub fn is_slashed(&self, id: &Hash) -> bool {
+        self.slashed_validators.contains(id)
     }
 
     /// Get the total number of output commitments.
@@ -202,12 +337,14 @@ impl ChainState {
         self.epoch_fees
     }
 
-    /// Advance to the next epoch, returning collected fees.
-    pub fn advance_epoch(&mut self) -> u64 {
+    /// Advance to the next epoch, returning collected fees and the new epoch seed.
+    pub fn advance_epoch(&mut self) -> (u64, EpochSeed) {
         let fees = self.epoch_fees;
         self.epoch_fees = 0;
         self.epoch += 1;
-        fees
+        let state_root = self.state_root();
+        self.epoch_seed = self.epoch_seed.next(&state_root);
+        (fees, self.epoch_seed.clone())
     }
 
     /// Compute the state root (hash of all state components).
@@ -241,6 +378,11 @@ impl ChainState {
     pub fn nullifier_hash(&self) -> &Hash {
         &self.nullifier_hash
     }
+
+    /// Get the current epoch seed for VRF evaluation.
+    pub fn epoch_seed(&self) -> &EpochSeed {
+        &self.epoch_seed
+    }
 }
 
 impl Default for ChainState {
@@ -260,21 +402,37 @@ impl Ledger {
         }
     }
 
-    /// Apply a finalized vertex: insert into DAG, finalize, and update state.
+    /// Insert a vertex into the DAG (validated but not yet finalized).
     ///
-    /// Validates vertex structure including proposer signature.
-    pub fn apply_finalized_vertex(
-        &mut self,
-        vertex: crate::consensus::dag::Vertex,
-    ) -> Result<(), StateError> {
-        let id = vertex.id;
-        // Use insert() which validates structure + signature
+    /// Validates vertex structure including proposer signature, but does NOT
+    /// apply transactions to state. Call `finalize_vertex()` after BFT
+    /// certification to apply.
+    pub fn insert_vertex(&mut self, vertex: Vertex) -> Result<(), StateError> {
         self.dag.insert(vertex).map_err(StateError::InvalidVertex)?;
-        self.dag.finalize(&id);
-        if let Some(v) = self.dag.get(&id) {
+        Ok(())
+    }
+
+    /// Finalize a vertex: mark as final in DAG and apply transactions to state.
+    ///
+    /// Call after BFT certification. The vertex must already be in the DAG
+    /// (via `insert_vertex()`).
+    pub fn finalize_vertex(&mut self, vertex_id: &VertexId) -> Result<(), StateError> {
+        self.dag.finalize(vertex_id);
+        if let Some(v) = self.dag.get(vertex_id) {
             let v = v.clone();
             self.state.apply_vertex(&v)?;
         }
+        Ok(())
+    }
+
+    /// Apply a finalized vertex: insert into DAG, finalize, and update state.
+    ///
+    /// Convenience method that calls `insert_vertex()` then `finalize_vertex()`.
+    /// Validates vertex structure including proposer signature.
+    pub fn apply_finalized_vertex(&mut self, vertex: Vertex) -> Result<(), StateError> {
+        let id = vertex.id;
+        self.insert_vertex(vertex)?;
+        self.finalize_vertex(&id)?;
         Ok(())
     }
 }
@@ -300,6 +458,16 @@ pub enum StateError {
     InvalidVertex(#[from] crate::consensus::dag::VertexError),
     #[error("validator not found")]
     ValidatorNotFound,
+    #[error("validator already registered")]
+    ValidatorAlreadyRegistered,
+    #[error("validator not active")]
+    ValidatorNotActive,
+    #[error("validator has been slashed")]
+    ValidatorSlashed,
+    #[error("insufficient bond deposit")]
+    InsufficientBond,
+    #[error("invalid deregistration auth signature")]
+    InvalidDeregisterAuth,
     #[error("fee accumulation overflow")]
     FeeOverflow,
 }

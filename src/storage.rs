@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::consensus::bft::Validator;
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::nullifier::Nullifier;
 use crate::transaction::{Transaction, TxId};
@@ -30,6 +31,17 @@ pub struct ChainStateMeta {
     pub nullifier_count: u64,
     pub nullifier_hash: Hash,
     pub epoch_fees: u64,
+    #[serde(default)]
+    pub validator_count: u64,
+    #[serde(default)]
+    pub epoch_seed: Hash,
+}
+
+/// Stored validator with bond information.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorRecord {
+    pub validator: Validator,
+    pub bond: u64,
 }
 
 /// Trait for persistent storage backends.
@@ -59,6 +71,11 @@ pub trait Storage {
         index: usize,
     ) -> Result<Option<Hash>, StorageError>;
 
+    fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError>;
+    fn get_validator(&self, id: &Hash) -> Result<Option<ValidatorRecord>, StorageError>;
+    fn get_all_validators(&self) -> Result<Vec<ValidatorRecord>, StorageError>;
+    fn remove_validator(&self, id: &Hash) -> Result<(), StorageError>;
+
     fn flush(&self) -> Result<(), StorageError>;
 }
 
@@ -71,6 +88,7 @@ pub struct SledStorage {
     nullifiers: sled::Tree,
     chain_meta: sled::Tree,
     commitment_levels: sled::Tree,
+    validators: sled::Tree,
 }
 
 impl SledStorage {
@@ -103,6 +121,9 @@ impl SledStorage {
         let commitment_levels = db
             .open_tree("commitment_levels")
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        let validators = db
+            .open_tree("validators")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         Ok(SledStorage {
             db,
             vertices,
@@ -110,6 +131,7 @@ impl SledStorage {
             nullifiers,
             chain_meta,
             commitment_levels,
+            validators,
         })
     }
 }
@@ -249,6 +271,52 @@ impl Storage for SledStorage {
         }
     }
 
+    fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError> {
+        let record = ValidatorRecord {
+            validator: validator.clone(),
+            bond,
+        };
+        let value =
+            bincode::serialize(&record).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.validators
+            .insert(validator.id, value)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_validator(&self, id: &Hash) -> Result<Option<ValidatorRecord>, StorageError> {
+        match self
+            .validators
+            .get(id)
+            .map_err(|e| StorageError::Io(e.to_string()))?
+        {
+            Some(bytes) => {
+                let record = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn get_all_validators(&self) -> Result<Vec<ValidatorRecord>, StorageError> {
+        let mut records = Vec::new();
+        for entry in self.validators.iter() {
+            let (_, value) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            let record: ValidatorRecord = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn remove_validator(&self, id: &Hash) -> Result<(), StorageError> {
+        self.validators
+            .remove(id)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     fn flush(&self) -> Result<(), StorageError> {
         self.db
             .flush()
@@ -278,6 +346,7 @@ mod tests {
             timestamp: 1000,
             state_root: [0u8; 32],
             signature: Signature(vec![]),
+            vrf_proof: None,
         }
     }
 
@@ -336,6 +405,8 @@ mod tests {
             nullifier_count: 50,
             nullifier_hash: [4u8; 32],
             epoch_fees: 1000,
+            validator_count: 10,
+            epoch_seed: [5u8; 32],
         };
 
         assert!(storage.get_chain_state_meta().unwrap().is_none());
@@ -361,5 +432,50 @@ mod tests {
     fn flush_succeeds() {
         let storage = temp_storage();
         storage.flush().unwrap();
+    }
+
+    #[test]
+    fn validator_put_get_roundtrip() {
+        let storage = temp_storage();
+        let kp = SigningKeypair::generate();
+        let validator = crate::consensus::bft::Validator::new(kp.public.clone());
+        let id = validator.id;
+
+        assert!(storage.get_validator(&id).unwrap().is_none());
+        storage.put_validator(&validator, 1_000_000).unwrap();
+
+        let record = storage.get_validator(&id).unwrap().unwrap();
+        assert_eq!(record.validator.id, id);
+        assert_eq!(record.bond, 1_000_000);
+        assert!(record.validator.active);
+    }
+
+    #[test]
+    fn validator_get_all() {
+        let storage = temp_storage();
+        let kp1 = SigningKeypair::generate();
+        let kp2 = SigningKeypair::generate();
+        let v1 = crate::consensus::bft::Validator::new(kp1.public.clone());
+        let v2 = crate::consensus::bft::Validator::new(kp2.public.clone());
+
+        storage.put_validator(&v1, 1_000_000).unwrap();
+        storage.put_validator(&v2, 2_000_000).unwrap();
+
+        let all = storage.get_all_validators().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn validator_remove() {
+        let storage = temp_storage();
+        let kp = SigningKeypair::generate();
+        let validator = crate::consensus::bft::Validator::new(kp.public.clone());
+        let id = validator.id;
+
+        storage.put_validator(&validator, 1_000_000).unwrap();
+        assert!(storage.get_validator(&id).unwrap().is_some());
+
+        storage.remove_validator(&id).unwrap();
+        assert!(storage.get_validator(&id).unwrap().is_none());
     }
 }

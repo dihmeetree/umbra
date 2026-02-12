@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::keys::{Signature, SigningPublicKey};
+use crate::crypto::vrf::{EpochSeed, VrfOutput};
 use crate::transaction::{Transaction, TxId};
 use crate::Hash;
 
@@ -39,6 +40,10 @@ pub struct Vertex {
     pub state_root: Hash,
     /// Proposer's signature over the vertex header
     pub signature: Signature,
+    /// VRF proof showing the proposer was selected for this epoch's committee.
+    /// `None` only for the genesis vertex.
+    #[serde(default)]
+    pub vrf_proof: Option<VrfOutput>,
 }
 
 impl Vertex {
@@ -49,6 +54,7 @@ impl Vertex {
         round: u64,
         proposer_fingerprint: &Hash,
         tx_root: &Hash,
+        vrf_value: Option<&Hash>,
     ) -> VertexId {
         let mut hasher = blake3::Hasher::new_derive_key("spectra.vertex.id");
         for p in parents {
@@ -58,6 +64,9 @@ impl Vertex {
         hasher.update(&round.to_le_bytes());
         hasher.update(proposer_fingerprint);
         hasher.update(tx_root);
+        if let Some(vrf_val) = vrf_value {
+            hasher.update(vrf_val);
+        }
         VertexId(*hasher.finalize().as_bytes())
     }
 
@@ -94,12 +103,14 @@ impl Vertex {
 
         // Verify proposer signature over the vertex header
         if !skip_signature {
+            let vrf_value = self.vrf_proof.as_ref().map(|v| &v.value);
             let expected_id = Self::compute_id(
                 &self.parents,
                 self.epoch,
                 self.round,
                 &self.proposer.fingerprint(),
                 &self.tx_root(),
+                vrf_value,
             );
             if expected_id != self.id {
                 return Err(VertexError::InvalidId);
@@ -107,6 +118,33 @@ impl Vertex {
             if !self.proposer.verify(&self.id.0, &self.signature) {
                 return Err(VertexError::InvalidSignature);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Validate the VRF proof for this vertex (requires state context).
+    ///
+    /// Verifies the proposer was selected for the current epoch's committee.
+    /// Separate from `validate_structure()` because it requires the epoch seed
+    /// and total validator count.
+    pub fn validate_vrf(
+        &self,
+        epoch_seed: &EpochSeed,
+        total_validators: usize,
+    ) -> Result<(), VertexError> {
+        let vrf = self.vrf_proof.as_ref().ok_or(VertexError::MissingVrf)?;
+        let proposer_id = self.proposer.fingerprint();
+        let vrf_input = epoch_seed.vrf_input(&proposer_id);
+
+        // Verify VRF proof against the proposer's public key
+        if !vrf.verify_locally(&self.proposer, &vrf_input) {
+            return Err(VertexError::InvalidVrf);
+        }
+
+        // Check that the proposer was actually selected
+        if !vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
+            return Err(VertexError::NotSelected);
         }
 
         Ok(())
@@ -170,6 +208,7 @@ impl Dag {
             timestamp: 0,
             state_root: [0u8; 32],
             signature: Signature(vec![]),
+            vrf_proof: None,
         }
     }
 
@@ -361,6 +400,12 @@ pub enum VertexError {
     InvalidId,
     #[error("proposer signature is invalid")]
     InvalidSignature,
+    #[error("vertex missing VRF proof")]
+    MissingVrf,
+    #[error("invalid VRF proof")]
+    InvalidVrf,
+    #[error("proposer was not selected by VRF")]
+    NotSelected,
 }
 
 #[cfg(test)]
@@ -368,7 +413,7 @@ mod tests {
     use super::*;
 
     fn make_vertex_with_nonce(parents: Vec<VertexId>, round: u64, nonce: u8) -> Vertex {
-        let id = Vertex::compute_id(&parents, 0, round, &[nonce; 32], &[round as u8; 32]);
+        let id = Vertex::compute_id(&parents, 0, round, &[nonce; 32], &[round as u8; 32], None);
         Vertex {
             id,
             parents,
@@ -379,6 +424,7 @@ mod tests {
             timestamp: round * 1000,
             state_root: [0u8; 32],
             signature: Signature(vec![]),
+            vrf_proof: None,
         }
     }
 

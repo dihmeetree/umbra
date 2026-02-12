@@ -81,6 +81,9 @@ pub struct Vote {
     pub vote_type: VoteType,
     /// Signature over (epoch || vertex_id || round || vote_type)
     pub signature: Signature,
+    /// VRF proof showing the voter was selected for this epoch's committee.
+    #[serde(default)]
+    pub vrf_proof: Option<VrfOutput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +159,8 @@ pub struct BftState {
     our_keypair: Option<SigningKeypair>,
     /// Our validator ID
     our_id: Option<Hash>,
+    /// Our VRF proof for this epoch (if we were selected)
+    our_vrf_proof: Option<VrfOutput>,
     /// Votes collected for each vertex
     votes: HashMap<VertexId, Vec<Vote>>,
     /// Certificates issued
@@ -177,6 +182,7 @@ impl BftState {
             committee,
             our_keypair: None,
             our_id: None,
+            our_vrf_proof: None,
             votes: HashMap::new(),
             certificates: HashMap::new(),
             round_votes: HashMap::new(),
@@ -188,6 +194,16 @@ impl BftState {
     pub fn set_our_keypair(&mut self, keypair: SigningKeypair) {
         self.our_id = Some(keypair.public.fingerprint());
         self.our_keypair = Some(keypair);
+    }
+
+    /// Set our VRF proof for this epoch.
+    pub fn set_our_vrf_proof(&mut self, vrf: VrfOutput) {
+        self.our_vrf_proof = Some(vrf);
+    }
+
+    /// Get our VRF proof for this epoch.
+    pub fn our_vrf_proof(&self) -> Option<&VrfOutput> {
+        self.our_vrf_proof.as_ref()
     }
 
     /// Check if we're on the committee.
@@ -233,6 +249,7 @@ impl BftState {
             round: self.round,
             vote_type,
             signature,
+            vrf_proof: self.our_vrf_proof.clone(),
         };
 
         self.receive_vote(vote.clone());
@@ -399,6 +416,37 @@ pub fn select_committee(
     candidates
 }
 
+/// Create a vote for a vertex.
+///
+/// This is a convenience function for use by the node when it needs to
+/// vote on an incoming vertex without going through BftState.
+pub fn create_vote(
+    vertex_id: VertexId,
+    keypair: &SigningKeypair,
+    epoch: u64,
+    round: u64,
+    accept: bool,
+    chain_id: &Hash,
+    vrf_proof: Option<VrfOutput>,
+) -> Vote {
+    let vote_type = if accept {
+        VoteType::Accept
+    } else {
+        VoteType::Reject
+    };
+    let msg = vote_sign_data(&vertex_id, epoch, round, &vote_type, chain_id);
+    let signature = keypair.sign(&msg);
+    Vote {
+        vertex_id,
+        voter_id: keypair.public.fingerprint(),
+        epoch,
+        round,
+        vote_type,
+        signature,
+        vrf_proof,
+    }
+}
+
 /// Compute the dynamic BFT quorum for a given committee size: 2/3 + 1.
 pub fn dynamic_quorum(committee_size: usize) -> usize {
     (committee_size * 2) / 3 + 1
@@ -470,6 +518,7 @@ mod tests {
                 round: 0,
                 vote_type: VoteType::Accept,
                 signature: sig,
+                vrf_proof: None,
             };
             if let Some(c) = bft.receive_vote(vote) {
                 cert = Some(c);
@@ -512,6 +561,7 @@ mod tests {
             round: 0,
             vote_type: VoteType::Accept,
             signature: sig.clone(),
+            vrf_proof: None,
         };
 
         bft.receive_vote(vote.clone());
@@ -537,6 +587,7 @@ mod tests {
             round: 0,
             vote_type: VoteType::Accept,
             signature: sig,
+            vrf_proof: None,
         };
 
         assert!(bft.receive_vote(vote).is_none());
@@ -562,6 +613,7 @@ mod tests {
             round: 0,
             vote_type: VoteType::Accept,
             signature: sig_a,
+            vrf_proof: None,
         };
         bft.receive_vote(vote_a);
 
@@ -575,6 +627,7 @@ mod tests {
             round: 0,
             vote_type: VoteType::Accept,
             signature: sig_b,
+            vrf_proof: None,
         };
         assert!(bft.receive_vote(vote_b).is_none()); // Rejected
 

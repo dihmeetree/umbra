@@ -26,7 +26,9 @@ use crate::crypto::stark::types::{
 };
 use crate::crypto::stark::{default_proof_options, prove_balance, prove_spend};
 use crate::crypto::stealth::StealthAddress;
-use crate::transaction::*;
+use crate::transaction::{
+    compute_tx_content_hash, Transaction, TxInput, TxMessage, TxOutput, TxType,
+};
 use crate::Hash;
 
 /// An input to be spent, with its secret witness data.
@@ -62,6 +64,7 @@ pub struct TransactionBuilder {
     chain_id: Hash,
     expiry_epoch: u64,
     proof_options: Option<winterfell::ProofOptions>,
+    tx_type: TxType,
 }
 
 impl TransactionBuilder {
@@ -74,6 +77,7 @@ impl TransactionBuilder {
             chain_id: crate::constants::chain_id(),
             expiry_epoch: 0,
             proof_options: None,
+            tx_type: TxType::Transfer,
         }
     }
 
@@ -125,6 +129,12 @@ impl TransactionBuilder {
     /// Override proof options (for testing with lighter parameters).
     pub fn set_proof_options(mut self, opts: winterfell::ProofOptions) -> Self {
         self.proof_options = Some(opts);
+        self
+    }
+
+    /// Set the transaction type (validator register/deregister).
+    pub fn set_tx_type(mut self, tx_type: TxType) -> Self {
+        self.tx_type = tx_type;
         self
     }
 
@@ -282,6 +292,7 @@ impl TransactionBuilder {
             self.fee,
             &self.chain_id,
             self.expiry_epoch,
+            &self.tx_type,
         );
 
         // Generate STARK balance proof
@@ -317,6 +328,7 @@ impl TransactionBuilder {
             balance_proof,
             messages: tx_messages,
             tx_binding: tx_content_hash,
+            tx_type: self.tx_type,
         })
     }
 }
