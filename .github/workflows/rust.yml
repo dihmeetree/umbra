@@ -1,0 +1,84 @@
+# =============================================================================
+# Rust CI/CD Pipeline for API Server
+#
+# This workflow ensures code quality, security, and functionality by running
+# comprehensive checks on every push and pull request to the main branch.
+#
+# Pipeline stages:
+# 1. Setup: Install Rust toolchain and setup caching for faster builds
+# 2. Format: Fail fast if code is not formatted
+# 3. Check: Verify code compiles successfully
+# 4. Lint: Run clippy for code quality and best practices
+# 5. Test: Execute test suite to verify functionality
+# 6. Security: Scan for known vulnerabilities in dependencies
+# =============================================================================
+
+name: Rust
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  # Enable colored output for better readability in CI logs
+  CARGO_TERM_COLOR: always
+
+# Restrict GITHUB_TOKEN permissions to minimum required
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      # Use system RocksDB library instead of compiling from source
+      ROCKSDB_LIB_DIR: /usr/lib/x86_64-linux-gnu
+    steps:
+      # Checkout the repository code
+      - uses: actions/checkout@v4
+
+      # Install RocksDB dependencies for faster builds
+      - name: Install RocksDB dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librocksdb-dev libclang-dev
+
+      # Install the latest stable Rust toolchain
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache Cargo dependencies and build artifacts to speed up subsequent runs
+      # Using rust-cache which intelligently handles Rust's large target directories
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Enforce consistent code formatting across the codebase
+      # Runs first to fail fast on simple formatting issues
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # Verify that all workspace members typecheck successfully
+      # Using check instead of build for faster CI (skips codegen)
+      - name: Check
+        run: cargo check --workspace --verbose
+
+      # Run Clippy linter to catch common mistakes and enforce best practices
+      # Treats all warnings as errors to maintain high code quality
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      # Execute the full test suite to verify functionality
+      # Includes unit tests, integration tests, and doc tests
+      - name: Run tests
+        run: cargo test --workspace --verbose
+
+      # Install cargo-audit if not already available
+      # cargo-audit scans for security vulnerabilities in dependencies
+      - name: Install cargo-audit
+        run: cargo audit --version || cargo install cargo-audit --locked
+
+      # Scan dependencies for known security vulnerabilities
+      - name: Run security audit
+        run: cargo audit
