@@ -5,11 +5,10 @@
 //! spending the same output twice would produce the same nullifier.
 //!
 //! The nullifier itself does not reveal which output is being spent — only
-//! the spender (who knows the secret) can compute the nullifier. However,
-//! the current transaction model also publishes the commitment in `TxInput`
-//! (needed to link spend proofs to balance proofs), which does allow graph
-//! analysis between inputs and outputs sharing the same commitment.
-//! See the "Privacy Limitations" section in `transaction/mod.rs` for details.
+//! the spender (who knows the secret) can compute the nullifier. The
+//! commitment is never published on-chain; inputs reveal only a one-way
+//! `proof_link` that binds the spend and balance proofs without exposing
+//! which commitment is being spent.
 //!
 //!   nullifier = RescuePrime("null" || spend_auth_key || commitment)
 
