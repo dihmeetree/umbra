@@ -93,7 +93,7 @@ enum InternalEvent {
         msg_tx: mpsc::Sender<Message>,
     },
     /// A message was received from a peer.
-    Message { from: PeerId, message: Message },
+    Message { from: PeerId, message: Box<Message> },
     /// A peer disconnected.
     Disconnected(PeerId),
 }
@@ -263,7 +263,7 @@ async fn p2p_loop(
                         }
                     }
                     InternalEvent::Message { from, message } => {
-                        let _ = event_tx.send(P2pEvent::MessageReceived { from, message: Box::new(message) }).await;
+                        let _ = event_tx.send(P2pEvent::MessageReceived { from, message }).await;
                     }
                     InternalEvent::Disconnected(peer_id) => {
                         peers.remove(&peer_id);
@@ -389,7 +389,7 @@ async fn spawn_connection_tasks(
                     if internal_tx_read
                         .send(InternalEvent::Message {
                             from: peer_id,
-                            message,
+                            message: Box::new(message),
                         })
                         .await
                         .is_err()

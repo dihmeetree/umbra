@@ -74,9 +74,10 @@ pub struct TxMessage {
 ///
 /// Validator operations are carried as regular transactions so the bond can be
 /// paid through the fee field without modifying the zk-STARK balance proof.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub enum TxType {
     /// Regular private value transfer (default).
+    #[default]
     Transfer,
     /// Register a new validator. The transaction fee must be at least
     /// `VALIDATOR_BOND + MIN_TX_FEE`; the bond portion is escrowed.
@@ -93,12 +94,6 @@ pub enum TxType {
         /// Output that receives the returned bond (added to commitment tree).
         bond_return_output: Box<TxOutput>,
     },
-}
-
-impl Default for TxType {
-    fn default() -> Self {
-        TxType::Transfer
-    }
 }
 
 /// A complete Spectra transaction.
@@ -201,9 +196,8 @@ impl Transaction {
             TxType::Transfer => {}
             TxType::ValidatorRegister { signing_key } => {
                 // Bond must be included in the fee
-                let min_fee = crate::constants::VALIDATOR_BOND
-                    .checked_add(crate::constants::MIN_TX_FEE)
-                    .unwrap_or(u64::MAX);
+                let min_fee =
+                    crate::constants::VALIDATOR_BOND.saturating_add(crate::constants::MIN_TX_FEE);
                 if self.fee < min_fee {
                     return Err(TxValidationError::InsufficientBond);
                 }
