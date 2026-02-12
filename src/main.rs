@@ -1,43 +1,112 @@
-//! Spectra node binary.
+//! Spectra node and wallet binary.
 //!
 //! Runs a full Spectra node with P2P networking, mempool, persistent storage,
-//! and JSON RPC API. Use `--demo` to run the protocol walkthrough instead.
+//! and JSON RPC API. Also provides a wallet CLI for key management, balance
+//! queries, and sending transactions.
+//!
+//! Usage:
+//!   spectra                         # run node (default)
+//!   spectra node                    # run node (explicit)
+//!   spectra --demo                  # run protocol demo
+//!   spectra wallet init             # create a new wallet
+//!   spectra wallet balance           # scan chain + show balance
+//!   spectra wallet send --to <file> --amount N --fee N
+//!   spectra wallet messages          # show received messages
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-/// Spectra post-quantum cryptocurrency node.
+/// Spectra post-quantum cryptocurrency node and wallet.
 #[derive(Parser, Debug)]
 #[command(
     name = "spectra",
     version,
-    about = "Spectra post-quantum private cryptocurrency node"
+    about = "Spectra post-quantum private cryptocurrency"
 )]
 struct Cli {
-    /// P2P listen address.
-    #[arg(long, default_value = "0.0.0.0:9732")]
-    listen_addr: SocketAddr,
-
-    /// Bootstrap peer addresses (comma-separated).
-    #[arg(long, value_delimiter = ',')]
-    peers: Vec<SocketAddr>,
-
     /// Data directory for persistent storage.
-    #[arg(long, default_value = "./spectra-data")]
+    #[arg(long, default_value = "./spectra-data", global = true)]
     data_dir: PathBuf,
 
-    /// RPC listen address (defaults to localhost for safety; use 0.0.0.0 for public).
-    #[arg(long, default_value = "127.0.0.1:9733")]
+    /// RPC address for node/wallet communication.
+    #[arg(long, default_value = "127.0.0.1:9733", global = true)]
     rpc_addr: SocketAddr,
 
     /// Run the demo walkthrough instead of starting a node.
     #[arg(long)]
     demo: bool,
 
-    /// Register as a genesis validator (for bootstrapping a new network).
-    #[arg(long)]
-    genesis_validator: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the Spectra node.
+    Node {
+        /// P2P listen address.
+        #[arg(long, default_value = "0.0.0.0:9732")]
+        listen_addr: SocketAddr,
+
+        /// Bootstrap peer addresses (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        peers: Vec<SocketAddr>,
+
+        /// Register as a genesis validator (for bootstrapping a new network).
+        #[arg(long)]
+        genesis_validator: bool,
+    },
+
+    /// Manage the Spectra wallet.
+    Wallet {
+        #[command(subcommand)]
+        action: WalletAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum WalletAction {
+    /// Create a new wallet.
+    Init,
+
+    /// Show wallet address.
+    Address,
+
+    /// Scan the chain and show balance.
+    Balance,
+
+    /// Scan the chain for new outputs.
+    Scan,
+
+    /// Send a transaction.
+    Send {
+        /// Path to recipient's .spectra-address file.
+        #[arg(long)]
+        to: PathBuf,
+
+        /// Amount to send (in base units).
+        #[arg(long)]
+        amount: u64,
+
+        /// Transaction fee (in base units).
+        #[arg(long)]
+        fee: u64,
+
+        /// Optional message to encrypt for the recipient.
+        #[arg(long)]
+        message: Option<String>,
+    },
+
+    /// Show received encrypted messages.
+    Messages,
+
+    /// Export wallet address to a file for sharing.
+    Export {
+        /// Output file path.
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -51,37 +120,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    tracing::info!("Starting Spectra node...");
-    tracing::info!("P2P: {}", cli.listen_addr);
-    tracing::info!("RPC: {}", cli.rpc_addr);
-    tracing::info!("Data: {}", cli.data_dir.display());
+    match cli.command {
+        // Default (no subcommand) → run node for backward compatibility
+        None => {
+            run_node(
+                cli.data_dir,
+                cli.rpc_addr,
+                "0.0.0.0:9732".parse()?,
+                vec![],
+                false,
+            )
+            .await
+        }
 
-    // Load persistent keypair (or generate on first run)
-    let keypair = spectra::node::load_or_generate_keypair(&cli.data_dir)?;
+        Some(Command::Node {
+            listen_addr,
+            peers,
+            genesis_validator,
+        }) => {
+            run_node(
+                cli.data_dir,
+                cli.rpc_addr,
+                listen_addr,
+                peers,
+                genesis_validator,
+            )
+            .await
+        }
+
+        Some(Command::Wallet { action }) => {
+            run_wallet_command(action, &cli.data_dir, cli.rpc_addr).await
+        }
+    }
+}
+
+async fn run_node(
+    data_dir: PathBuf,
+    rpc_addr: SocketAddr,
+    listen_addr: SocketAddr,
+    peers: Vec<SocketAddr>,
+    genesis_validator: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::info!("Starting Spectra node...");
+    tracing::info!("P2P: {}", listen_addr);
+    tracing::info!("RPC: {}", rpc_addr);
+    tracing::info!("Data: {}", data_dir.display());
+
+    let keypair = spectra::node::load_or_generate_keypair(&data_dir)?;
 
     let config = spectra::node::NodeConfig {
-        listen_addr: cli.listen_addr,
-        bootstrap_peers: cli.peers,
-        data_dir: cli.data_dir,
-        rpc_addr: cli.rpc_addr,
+        listen_addr,
+        bootstrap_peers: peers,
+        data_dir,
+        rpc_addr,
         keypair,
-        genesis_validator: cli.genesis_validator,
+        genesis_validator,
     };
 
     let rpc_addr = config.rpc_addr;
     let mut node = spectra::node::Node::new(config).await?;
 
-    // Start RPC server
     let rpc_state = spectra::rpc::RpcState {
         node: node.state(),
         p2p: node.p2p_handle(),
     };
     tokio::spawn(spectra::rpc::serve(rpc_addr, rpc_state));
 
-    // Run the main event loop
     node.run().await;
-
     Ok(())
+}
+
+async fn run_wallet_command(
+    action: WalletAction,
+    data_dir: &std::path::Path,
+    rpc_addr: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use spectra::wallet_cli;
+
+    match action {
+        WalletAction::Init => wallet_cli::cmd_init(data_dir),
+        WalletAction::Address => wallet_cli::cmd_address(data_dir),
+        WalletAction::Balance => wallet_cli::cmd_balance(data_dir, rpc_addr).await,
+        WalletAction::Scan => wallet_cli::cmd_scan(data_dir, rpc_addr).await,
+        WalletAction::Send {
+            to,
+            amount,
+            fee,
+            message,
+        } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, fee, message).await,
+        WalletAction::Messages => wallet_cli::cmd_messages(data_dir),
+        WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
+    }
 }
 
 /// Run the original protocol demonstration.

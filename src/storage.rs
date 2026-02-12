@@ -35,6 +35,8 @@ pub struct ChainStateMeta {
     pub validator_count: u64,
     #[serde(default)]
     pub epoch_seed: Hash,
+    #[serde(default)]
+    pub finalized_count: u64,
 }
 
 /// Stored validator with bond information.
@@ -55,6 +57,7 @@ pub trait Storage {
 
     fn put_nullifier(&self, nullifier: &Nullifier) -> Result<(), StorageError>;
     fn has_nullifier(&self, nullifier: &Nullifier) -> Result<bool, StorageError>;
+    fn get_all_nullifiers(&self) -> Result<Vec<Nullifier>, StorageError>;
 
     fn put_chain_state_meta(&self, meta: &ChainStateMeta) -> Result<(), StorageError>;
     fn get_chain_state_meta(&self) -> Result<Option<ChainStateMeta>, StorageError>;
@@ -70,6 +73,18 @@ pub trait Storage {
         level: usize,
         index: usize,
     ) -> Result<Option<Hash>, StorageError>;
+
+    fn put_finalized_vertex_index(
+        &self,
+        sequence: u64,
+        vertex_id: &VertexId,
+    ) -> Result<(), StorageError>;
+    fn get_finalized_vertices_after(
+        &self,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, Vertex)>, StorageError>;
+    fn finalized_vertex_count(&self) -> Result<u64, StorageError>;
 
     fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError>;
     fn get_validator(&self, id: &Hash) -> Result<Option<ValidatorRecord>, StorageError>;
@@ -89,6 +104,7 @@ pub struct SledStorage {
     chain_meta: sled::Tree,
     commitment_levels: sled::Tree,
     validators: sled::Tree,
+    finalized_index: sled::Tree,
 }
 
 impl SledStorage {
@@ -124,6 +140,9 @@ impl SledStorage {
         let validators = db
             .open_tree("validators")
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        let finalized_index = db
+            .open_tree("finalized_index")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         Ok(SledStorage {
             db,
             vertices,
@@ -132,6 +151,7 @@ impl SledStorage {
             chain_meta,
             commitment_levels,
             validators,
+            finalized_index,
         })
     }
 }
@@ -212,6 +232,19 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))
     }
 
+    fn get_all_nullifiers(&self) -> Result<Vec<Nullifier>, StorageError> {
+        let mut nullifiers = Vec::new();
+        for entry in self.nullifiers.iter() {
+            let (key, _) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            let hash: Hash = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Serialization("invalid nullifier key".into()))?;
+            nullifiers.push(Nullifier(hash));
+        }
+        Ok(nullifiers)
+    }
+
     fn put_chain_state_meta(&self, meta: &ChainStateMeta) -> Result<(), StorageError> {
         let value =
             bincode::serialize(meta).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -269,6 +302,55 @@ impl Storage for SledStorage {
             }
             None => Ok(None),
         }
+    }
+
+    fn put_finalized_vertex_index(
+        &self,
+        sequence: u64,
+        vertex_id: &VertexId,
+    ) -> Result<(), StorageError> {
+        // Use big-endian so sled's lexicographic order matches numeric order
+        self.finalized_index
+            .insert(sequence.to_be_bytes(), &vertex_id.0)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_finalized_vertices_after(
+        &self,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, Vertex)>, StorageError> {
+        let start = match after_sequence.checked_add(1) {
+            Some(s) => s,
+            None => return Ok(Vec::new()), // u64::MAX + 1 overflows, nothing to return
+        };
+        let start_key = start.to_be_bytes();
+        let mut results = Vec::new();
+        for entry in self.finalized_index.range(start_key..) {
+            if results.len() >= limit as usize {
+                break;
+            }
+            let (key_bytes, vid_bytes) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            let seq = u64::from_be_bytes(
+                key_bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| StorageError::Serialization("bad sequence key".into()))?,
+            );
+            let vid: Hash = vid_bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Serialization("bad vertex id".into()))?;
+            if let Some(vertex) = self.get_vertex(&VertexId(vid))? {
+                results.push((seq, vertex));
+            }
+        }
+        Ok(results)
+    }
+
+    fn finalized_vertex_count(&self) -> Result<u64, StorageError> {
+        Ok(self.finalized_index.len() as u64)
     }
 
     fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError> {
@@ -407,6 +489,7 @@ mod tests {
             epoch_fees: 1000,
             validator_count: 10,
             epoch_seed: [5u8; 32],
+            finalized_count: 42,
         };
 
         assert!(storage.get_chain_state_meta().unwrap().is_none());
@@ -432,6 +515,79 @@ mod tests {
     fn flush_succeeds() {
         let storage = temp_storage();
         storage.flush().unwrap();
+    }
+
+    #[test]
+    fn finalized_index_roundtrip() {
+        let storage = temp_storage();
+        let v1 = test_vertex();
+        storage.put_vertex(&v1).unwrap();
+
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
+        storage.put_finalized_vertex_index(0, &v1.id).unwrap();
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 1);
+
+        let results = storage.get_finalized_vertices_after(0, 10).unwrap();
+        assert!(results.is_empty()); // after=0, so starts at seq 1
+
+        let results = storage.get_finalized_vertices_after(u64::MAX, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn finalized_index_batch_retrieval() {
+        let storage = temp_storage();
+
+        // Create and store 5 vertices
+        let mut ids = Vec::new();
+        for i in 0u8..5 {
+            let id = VertexId(crate::hash_domain(b"test", &[i]));
+            let vertex = Vertex {
+                id,
+                parents: vec![],
+                epoch: 0,
+                round: 0,
+                proposer: SigningKeypair::generate().public,
+                transactions: vec![],
+                timestamp: 1000,
+                state_root: [0u8; 32],
+                signature: Signature(vec![]),
+                vrf_proof: None,
+            };
+            storage.put_vertex(&vertex).unwrap();
+            storage.put_finalized_vertex_index(i as u64, &id).unwrap();
+            ids.push(id);
+        }
+
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 5);
+
+        // Get all from the start (after=max meaning "before first")
+        // after_sequence=u64::MAX wraps, so use a helper: get from seq 0
+        // get_finalized_vertices_after(u64::MAX, ..) → starts at 0
+        // Actually after_sequence + 1 would overflow. Let me test with normal values.
+        let results = storage.get_finalized_vertices_after(1, 10).unwrap();
+        assert_eq!(results.len(), 3); // seq 2, 3, 4
+        assert_eq!(results[0].0, 2);
+        assert_eq!(results[1].0, 3);
+        assert_eq!(results[2].0, 4);
+
+        // Limit works
+        let results = storage.get_finalized_vertices_after(0, 2).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn get_all_nullifiers_roundtrip() {
+        let storage = temp_storage();
+        let n1 = Nullifier([1u8; 32]);
+        let n2 = Nullifier([2u8; 32]);
+
+        assert!(storage.get_all_nullifiers().unwrap().is_empty());
+        storage.put_nullifier(&n1).unwrap();
+        storage.put_nullifier(&n2).unwrap();
+
+        let all = storage.get_all_nullifiers().unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod state;
 pub mod storage;
 pub mod transaction;
 pub mod wallet;
+pub mod wallet_cli;
 
 /// Protocol constants
 pub mod constants {
@@ -73,6 +74,11 @@ pub mod constants {
     pub const PEER_CONNECT_TIMEOUT_MS: u64 = 5_000;
     /// Maximum transactions to drain from mempool per vertex proposal
     pub const VERTEX_MAX_DRAIN: usize = 1_000;
+
+    /// Batch size for vertex sync requests
+    pub const SYNC_BATCH_SIZE: u32 = 100;
+    /// Timeout for sync requests in milliseconds
+    pub const SYNC_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
     /// Minimum transaction fee (in base units).
     ///

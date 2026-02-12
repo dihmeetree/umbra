@@ -90,11 +90,12 @@ spectra/
     rpc.rs                  JSON HTTP API (axum): tx, state, peers, mempool, validators
     state.rs                Chain state (bonds, slashing, epoch seed), Ledger (two-phase vertex flow)
     network.rs              P2P protocol message types and serialization
-    wallet.rs               Key management, output scanning, tx building
-    main.rs                 Node binary with clap CLI (--genesis-validator, --demo)
+    wallet.rs               Key management, output scanning, tx building, persistence
+    wallet_cli.rs           Wallet CLI commands (init, send, balance, scan, messages)
+    main.rs                 Node + wallet binary with clap subcommands
 ```
 
-**~11,100 lines of Rust** across 32 source files with **115 tests**.
+**~12,750 lines of Rust** across 33 source files with **124 tests**.
 
 ## Building
 
@@ -107,18 +108,27 @@ cargo build --release
 ## Running a Node
 
 ```bash
-cargo run --release -- [OPTIONS]
+cargo run --release -- node [OPTIONS]
 ```
 
 ### CLI Options
+
+The binary uses subcommands (`node`, `wallet`). Running without a subcommand defaults to node mode for backward compatibility.
+
+**Global flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data-dir` | `./spectra-data` | Data directory for persistent storage |
+| `--rpc-addr` | `127.0.0.1:9733` | JSON RPC listen address (localhost by default for safety) |
+| `--demo` | *(off)* | Run the protocol demo walkthrough instead |
+
+**Node flags** (`spectra node`):
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--listen-addr` | `0.0.0.0:9732` | P2P listen address |
 | `--peers` | *(none)* | Comma-separated bootstrap peer addresses |
-| `--data-dir` | `./spectra-data` | Data directory for persistent storage |
-| `--rpc-addr` | `127.0.0.1:9733` | JSON RPC listen address (localhost by default for safety) |
-| `--demo` | *(off)* | Run the protocol demo walkthrough instead |
 | `--genesis-validator` | *(off)* | Register as a genesis validator (for bootstrapping a new network) |
 
 ### Examples
@@ -128,14 +138,63 @@ cargo run --release -- [OPTIONS]
 cargo run --release
 
 # Start as a genesis validator (bootstraps a new network)
-cargo run --release -- --genesis-validator
+cargo run --release -- node --genesis-validator
 
 # Start with custom addresses and a bootstrap peer
-cargo run --release -- --listen-addr 127.0.0.1:9000 --rpc-addr 127.0.0.1:9001 --peers 192.168.1.10:9732
+cargo run --release -- node --listen-addr 127.0.0.1:9000 --rpc-addr 127.0.0.1:9001 --peers 192.168.1.10:9732
 
 # Run the protocol demo
 cargo run --release -- --demo
 ```
+
+## Wallet CLI
+
+The wallet runs client-side — it downloads finalized vertices from the node and scans them locally. The node never learns which outputs belong to the wallet.
+
+```bash
+cargo run --release -- wallet <command>
+```
+
+### Wallet Commands
+
+| Command | Description |
+|---------|-------------|
+| `init` | Create a new wallet and export address file |
+| `address` | Show wallet address ID and re-export address file |
+| `balance` | Scan the chain and show current balance |
+| `scan` | Scan the chain for new outputs (without showing balance) |
+| `send` | Build and submit a transaction |
+| `messages` | Show received encrypted messages |
+| `export` | Export wallet address to a file for sharing |
+
+### Wallet Examples
+
+```bash
+# Create a new wallet
+cargo run --release -- wallet init
+
+# Check balance (scans chain first)
+cargo run --release -- wallet balance
+
+# Send 1000 units to a recipient
+cargo run --release -- wallet send --to ./bob.spectra-address --amount 1000 --fee 10
+
+# Send with an encrypted message
+cargo run --release -- wallet send --to ./bob.spectra-address --amount 500 --fee 10 --message "Payment for services"
+
+# View received messages
+cargo run --release -- wallet messages
+
+# Export address for sharing
+cargo run --release -- wallet export --file ./my-address.spectra-address
+
+# Use a custom data directory
+cargo run --release -- --data-dir ./my-wallet wallet balance
+```
+
+### Address Exchange
+
+Wallets exchange addresses via `.spectra-address` files (hex-encoded bincode-serialized `PublicAddress`). The `init` and `address` commands automatically export this file to the data directory. Use `export` to save it elsewhere for sharing.
 
 ## RPC API
 
@@ -150,6 +209,7 @@ The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for s
 | `GET` | `/mempool` | Get mempool statistics |
 | `GET` | `/validators` | List all validators with bond and status |
 | `GET` | `/validator/{id}` | Get a single validator's info |
+| `GET` | `/vertices/finalized` | Paginated finalized vertices (`?after=N&limit=N`) |
 
 ### Example
 
@@ -165,6 +225,9 @@ curl http://localhost:9733/validators
 
 # Look up a transaction
 curl http://localhost:9733/tx/abc123...
+
+# Get finalized vertices (paginated)
+curl "http://localhost:9733/vertices/finalized?after=0&limit=100"
 ```
 
 ## Architecture
@@ -183,10 +246,11 @@ Fee-priority transaction pool with configurable limits:
 
 `Storage` trait with a [sled](https://docs.rs/sled) embedded database backend:
 
-- **6 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`
-- All values are bincode-serialized; keys are raw 32-byte hashes
-- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts) for persistence
+- **7 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`, `finalized_index`
+- All values are bincode-serialized; keys are raw 32-byte hashes (finalized_index uses big-endian sequence numbers)
+- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts, finalized count) for persistence
 - Commitment level storage enables Merkle tree reconstruction on restart
+- Finalized vertex index supports paginated retrieval for wallet sync and state sync
 - `open_temporary()` provides in-memory storage for testing
 
 ### P2P Networking
@@ -207,6 +271,8 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 - **Active consensus participation** — when selected for the committee via VRF, the node proposes vertices (draining high-fee transactions from the mempool) and casts BFT votes on incoming vertices
 - **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, purges conflicting mempool entries, persists to storage, and slashes equivocators
 - **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root
+- **State persistence** — every finalized vertex persists its transactions, nullifiers, Merkle tree nodes, finalized index, validators, and a `ChainStateMeta` snapshot to storage, then flushes. On restart the full chain state (Merkle tree, nullifier set, validators, epoch state) is restored from the snapshot
+- **State sync** — new nodes joining the network request finalized vertices in batches from peers via `GetFinalizedVertices` / `FinalizedVerticesResponse` messages. A three-state machine (`NeedSync → Syncing → Synced`) tracks sync progress
 - Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
 - Peer discovery via `GetPeers` / `PeersResponse` messages
 - Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed, no funding tx required)
@@ -217,7 +283,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 115 tests cover:
+All 124 tests cover:
 
 - Post-quantum key generation, signing, and KEM roundtrips
 - Stealth address generation and detection (correct and wrong recipient)
@@ -238,9 +304,13 @@ All 115 tests cover:
 - Wallet scanning, balance tracking, spending with change, pending transaction confirm/cancel
 - End-to-end: fund, transfer, message decrypt, bystander non-detection
 - Mempool: fee-priority ordering, nullifier conflict detection, eviction, drain
-- Storage: vertex/transaction/nullifier/validator persistence, chain state meta roundtrips
+- Storage: vertex/transaction/nullifier/validator persistence, chain state meta roundtrips, finalized index roundtrip and batch retrieval
 - P2P: peer connection establishment, message exchange
 - Node: persistent keypair load/save roundtrip
+- Merkle tree restore from stored level data, last-appended path coverage
+- Chain state persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state)
+- Ledger restore from storage
+- Wallet file save/load roundtrip (keys, outputs, messages, pending status)
 
 ## Demo
 
@@ -351,6 +421,8 @@ Proves in zero knowledge:
 | `MAX_PEERS` | 64 | Maximum connected peers |
 | `PEER_CONNECT_TIMEOUT_MS` | 5,000 | Peer connection timeout |
 | `VERTEX_MAX_DRAIN` | 1,000 | Max transactions drained per vertex proposal |
+| `SYNC_BATCH_SIZE` | 100 | Finalized vertices per sync request batch |
+| `SYNC_REQUEST_TIMEOUT_MS` | 30,000 | Timeout for sync requests |
 
 ## Dependencies
 
@@ -373,6 +445,7 @@ Proves in zero knowledge:
 | `serde_json` | JSON serialization for RPC |
 | `tracing` + `tracing-subscriber` | Structured logging |
 | `subtle` | Constant-time comparison for cryptographic checks |
+| `reqwest` | HTTP client (rustls-tls) for wallet RPC communication |
 
 ## Security Model
 
@@ -437,12 +510,11 @@ All transaction validity is verified via zk-STARKs:
 
 ## Production Roadmap
 
-Spectra includes a full node implementation with P2P networking, persistent storage, mempool, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, and VRF-proven committee membership. A production deployment would additionally require:
+Spectra includes a full node implementation with P2P networking, persistent storage, state sync, mempool, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership, and a client-side wallet CLI. A production deployment would additionally require:
 
 - **Post-quantum handshakes** — upgrade the P2P transport layer with Noise/Kyber for quantum-resistant peer connections
 - **Peer reputation and discovery** — DHT-based peer discovery, reputation scoring, and ban management
-- **Block/vertex syncing** — efficient state sync protocol for new nodes joining the network
-- **Wallet CLI/GUI** — user-facing wallet for key management, transaction building, and balance queries
+- **Wallet GUI** — graphical interface for non-technical users
 - **Formal security audit** — cryptographic protocol review and implementation audit
 
 ## License

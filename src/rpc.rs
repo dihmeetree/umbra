@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -43,6 +43,7 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/mempool", get(get_mempool))
         .route("/validators", get(get_validators))
         .route("/validator/{id}", get(get_validator))
+        .route("/vertices/finalized", get(get_finalized_vertices))
         .with_state(rpc_state)
 }
 
@@ -272,5 +273,72 @@ async fn get_validator(
         active: validator.active,
         bond: s.validator_bond(&id_bytes),
         slashed: s.is_slashed(&id_bytes),
+    }))
+}
+
+// ── GET /vertices/finalized ──
+
+#[derive(Deserialize)]
+struct FinalizedVerticesQuery {
+    /// Return vertices with sequence > after (default: return from start)
+    #[serde(default)]
+    after: u64,
+    /// Maximum number of vertices to return (capped at 100)
+    #[serde(default = "default_finalized_limit")]
+    limit: u32,
+}
+
+fn default_finalized_limit() -> u32 {
+    crate::constants::SYNC_BATCH_SIZE
+}
+
+#[derive(Serialize)]
+struct FinalizedVerticesResponse {
+    vertices: Vec<FinalizedVertexEntry>,
+    has_more: bool,
+    total: u64,
+}
+
+#[derive(Serialize)]
+struct FinalizedVertexEntry {
+    sequence: u64,
+    vertex_hex: String,
+}
+
+async fn get_finalized_vertices(
+    State(state): State<RpcState>,
+    Query(params): Query<FinalizedVerticesQuery>,
+) -> Result<Json<FinalizedVerticesResponse>, (StatusCode, String)> {
+    let node = state.node.read().await;
+    let limit = params.limit.min(crate::constants::SYNC_BATCH_SIZE);
+    let total = node.storage.finalized_vertex_count().unwrap_or(0);
+
+    let vertices = node
+        .storage
+        .get_finalized_vertices_after(params.after, limit)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("storage error: {}", e),
+            )
+        })?;
+
+    let has_more = vertices.len() == limit as usize;
+    let entries: Vec<FinalizedVertexEntry> = vertices
+        .into_iter()
+        .filter_map(|(seq, v)| {
+            bincode::serialize(&v)
+                .ok()
+                .map(|bytes| FinalizedVertexEntry {
+                    sequence: seq,
+                    vertex_hex: hex::encode(bytes),
+                })
+        })
+        .collect();
+
+    Ok(Json(FinalizedVerticesResponse {
+        vertices: entries,
+        has_more,
+        total,
     }))
 }

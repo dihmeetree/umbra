@@ -6,8 +6,12 @@
 //! - Decrypts note data (amounts, blinding factors) from our outputs
 //! - Builds and signs transactions for spending
 
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
 use crate::crypto::commitment::{BlindingFactor, Commitment};
-use crate::crypto::keys::{FullKeypair, SharedSecret};
+use crate::crypto::keys::{FullKeypair, KemKeypair, SharedSecret, SigningKeypair};
 use crate::crypto::stealth::derive_spend_auth;
 use crate::transaction::builder::{decode_note, InputSpec, TransactionBuilder};
 use crate::transaction::{Transaction, TxOutput};
@@ -332,6 +336,181 @@ impl Default for Wallet {
     }
 }
 
+// ── Persistence ──────────────────────────────────────────────────────────
+
+/// Wallet file format (bincode-serialized).
+#[derive(Serialize, Deserialize)]
+struct WalletFile {
+    version: u32,
+    signing_pk: Vec<u8>,
+    signing_sk: Vec<u8>,
+    kem_pk: Vec<u8>,
+    kem_sk: Vec<u8>,
+    outputs: Vec<SerializedOutput>,
+    messages: Vec<SerializedMessage>,
+    last_scanned_sequence: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerializedOutput {
+    commitment: Hash,
+    value: u64,
+    blinding: [u8; 32],
+    spend_auth: Hash,
+    status: SerializedSpendStatus,
+    commitment_index: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum SerializedSpendStatus {
+    Unspent,
+    Pending { tx_binding: Hash },
+    Spent,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerializedMessage {
+    tx_hash: Hash,
+    content: Vec<u8>,
+}
+
+impl From<&SpendStatus> for SerializedSpendStatus {
+    fn from(s: &SpendStatus) -> Self {
+        match s {
+            SpendStatus::Unspent => SerializedSpendStatus::Unspent,
+            SpendStatus::Pending { tx_binding } => SerializedSpendStatus::Pending {
+                tx_binding: *tx_binding,
+            },
+            SpendStatus::Spent => SerializedSpendStatus::Spent,
+        }
+    }
+}
+
+impl From<SerializedSpendStatus> for SpendStatus {
+    fn from(s: SerializedSpendStatus) -> Self {
+        match s {
+            SerializedSpendStatus::Unspent => SpendStatus::Unspent,
+            SerializedSpendStatus::Pending { tx_binding } => SpendStatus::Pending { tx_binding },
+            SerializedSpendStatus::Spent => SpendStatus::Spent,
+        }
+    }
+}
+
+const WALLET_FILE_VERSION: u32 = 1;
+
+impl Wallet {
+    /// Save the wallet to a file.
+    ///
+    /// Persists keypair, outputs, messages, and scan progress.
+    /// File permissions are set to 0o600 on Unix.
+    pub fn save_to_file(&self, path: &Path, last_scanned_seq: u64) -> Result<(), WalletError> {
+        let outputs: Vec<SerializedOutput> = self
+            .outputs
+            .iter()
+            .map(|o| SerializedOutput {
+                commitment: o.commitment.0,
+                value: o.value,
+                blinding: o.blinding.0,
+                spend_auth: o.spend_auth,
+                status: (&o.status).into(),
+                commitment_index: o.commitment_index,
+            })
+            .collect();
+
+        let messages: Vec<SerializedMessage> = self
+            .messages
+            .iter()
+            .map(|m| SerializedMessage {
+                tx_hash: m.tx_hash,
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let wallet_file = WalletFile {
+            version: WALLET_FILE_VERSION,
+            signing_pk: self.keypair.signing.public.0.clone(),
+            signing_sk: self.keypair.signing.secret.0.clone(),
+            kem_pk: self.keypair.kem.public.0.clone(),
+            kem_sk: self.keypair.kem.secret.0.clone(),
+            outputs,
+            messages,
+            last_scanned_sequence: last_scanned_seq,
+        };
+
+        let bytes = bincode::serialize(&wallet_file)
+            .map_err(|e| WalletError::Persistence(format!("serialization failed: {}", e)))?;
+
+        std::fs::write(path, &bytes)
+            .map_err(|e| WalletError::Persistence(format!("write failed: {}", e)))?;
+
+        // Restrict file permissions to owner-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        Ok(())
+    }
+
+    /// Load a wallet from a file.
+    ///
+    /// Returns the wallet and the last scanned sequence number.
+    pub fn load_from_file(path: &Path) -> Result<(Self, u64), WalletError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
+
+        let wallet_file: WalletFile = bincode::deserialize(&bytes)
+            .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
+
+        if wallet_file.version != WALLET_FILE_VERSION {
+            return Err(WalletError::Persistence(format!(
+                "unsupported wallet version: {} (expected {})",
+                wallet_file.version, WALLET_FILE_VERSION
+            )));
+        }
+
+        // Validate and reconstruct keys
+        let signing = SigningKeypair::from_bytes(wallet_file.signing_pk, wallet_file.signing_sk)
+            .ok_or_else(|| WalletError::Persistence("invalid signing key data".into()))?;
+
+        let kem = KemKeypair::from_bytes(wallet_file.kem_pk, wallet_file.kem_sk)
+            .ok_or_else(|| WalletError::Persistence("invalid KEM key data".into()))?;
+
+        let keypair = FullKeypair { signing, kem };
+
+        let outputs: Vec<OwnedOutput> = wallet_file
+            .outputs
+            .into_iter()
+            .map(|o| OwnedOutput {
+                commitment: Commitment(o.commitment),
+                value: o.value,
+                blinding: BlindingFactor::from_bytes(o.blinding),
+                spend_auth: o.spend_auth,
+                status: o.status.into(),
+                commitment_index: o.commitment_index,
+            })
+            .collect();
+
+        let messages: Vec<ReceivedMessage> = wallet_file
+            .messages
+            .into_iter()
+            .map(|m| ReceivedMessage {
+                tx_hash: m.tx_hash,
+                content: m.content,
+            })
+            .collect();
+
+        let wallet = Wallet {
+            keypair,
+            outputs,
+            messages,
+        };
+
+        Ok((wallet, wallet_file.last_scanned_sequence))
+    }
+}
+
 /// Wallet errors.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum WalletError {
@@ -341,6 +520,10 @@ pub enum WalletError {
     Build(#[from] crate::transaction::builder::TxBuildError),
     #[error("arithmetic overflow")]
     ArithmeticOverflow,
+    #[error("persistence error: {0}")]
+    Persistence(String),
+    #[error("RPC error: {0}")]
+    Rpc(String),
 }
 
 #[cfg(test)]
@@ -476,6 +659,46 @@ mod tests {
         // Alice scans her own transaction to pick up change
         alice.scan_transaction(&tx);
         assert_eq!(alice.balance(), 6900); // 10000 - 3000 - 100
+    }
+
+    #[test]
+    fn wallet_save_load_roundtrip() {
+        let mut wallet = Wallet::new();
+
+        // Give wallet some funds
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 5000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(wallet.kem_public_key().clone(), 4000)
+            .add_message(wallet.kem_public_key().clone(), b"test message".to_vec())
+            .set_fee(1000)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        wallet.scan_transaction(&tx);
+        assert_eq!(wallet.balance(), 4000);
+        assert_eq!(wallet.received_messages().len(), 1);
+
+        let original_address = wallet.address().address_id();
+
+        // Save to temp file
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 42).unwrap();
+
+        // Load back
+        let (loaded, last_seq) = Wallet::load_from_file(&path).unwrap();
+        assert_eq!(last_seq, 42);
+        assert_eq!(loaded.balance(), 4000);
+        assert_eq!(loaded.received_messages().len(), 1);
+        assert_eq!(loaded.received_messages()[0].content, b"test message");
+        assert_eq!(loaded.address().address_id(), original_address);
+        assert_eq!(loaded.output_count(), 1);
     }
 
     #[test]

@@ -20,6 +20,7 @@ use crate::crypto::proof::{IncrementalMerkleTree, MerkleNode};
 use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::SpendPublicInputs;
 use crate::crypto::vrf::EpochSeed;
+use crate::storage::{ChainStateMeta, Storage};
 use crate::transaction::{deregister_sign_data, Transaction, TxType};
 use crate::Hash;
 
@@ -33,12 +34,12 @@ use crate::Hash;
 /// grows linearly with spends; production deployments should consider a
 /// disk-backed set (e.g., via sled) and periodic compaction.
 ///
-/// # Persistence (M4)
+/// # Persistence
 ///
-/// State restoration from storage is not yet implemented. On startup the
-/// chain state is rebuilt from genesis. A production node should persist
-/// `ChainStateMeta` and the commitment tree levels to storage, and restore
-/// them on startup to avoid full replay.
+/// State can be persisted via `to_chain_state_meta()` (snapshot) and the
+/// commitment tree's `last_appended_path()` (incremental level writes).
+/// Use `restore_from_storage()` on startup to rebuild state from storage
+/// without replaying all finalized vertices from genesis.
 pub struct ChainState {
     /// Chain identifier for replay protection
     chain_id: Hash,
@@ -431,6 +432,127 @@ impl ChainState {
     pub fn epoch_seed(&self) -> &EpochSeed {
         &self.epoch_seed
     }
+
+    // ── Persistence / Restoration ──────────────────────────────────────
+
+    /// Create a `ChainStateMeta` snapshot for storage persistence.
+    pub fn to_chain_state_meta(&self, finalized_count: u64) -> ChainStateMeta {
+        ChainStateMeta {
+            epoch: self.epoch,
+            last_finalized: self.last_finalized,
+            state_root: self.state_root(),
+            commitment_root: self.commitment_root(),
+            commitment_count: self.commitments.len() as u64,
+            nullifier_count: self.nullifiers.len() as u64,
+            nullifier_hash: self.nullifier_hash,
+            epoch_fees: self.epoch_fees,
+            validator_count: self.validators.values().filter(|v| v.active).count() as u64,
+            epoch_seed: self.epoch_seed.seed,
+            finalized_count,
+        }
+    }
+
+    /// Get a commitment tree node hash (for incremental persistence).
+    pub fn commitment_tree_node(&self, level: usize, index: usize) -> Hash {
+        self.commitment_tree.get_node_public(level, index)
+    }
+
+    /// Get the number of stored nodes at a commitment tree level.
+    pub fn commitment_tree_level_len(&self, level: usize) -> usize {
+        self.commitment_tree.level_len(level)
+    }
+
+    /// Return the path of nodes modified by the most recent commitment append.
+    pub fn commitment_tree_last_path(&self) -> Vec<(usize, usize, Hash)> {
+        self.commitment_tree.last_appended_path()
+    }
+
+    /// Restore chain state from persistent storage.
+    ///
+    /// Rebuilds the commitment Merkle tree, nullifier set, validator registry,
+    /// and epoch state from stored data. Verifies the restored commitment root
+    /// matches the stored snapshot.
+    pub fn restore_from_storage(
+        storage: &dyn Storage,
+        meta: &ChainStateMeta,
+    ) -> Result<Self, StateError> {
+        // 1. Rebuild the commitment Merkle tree from stored level data
+        let num_leaves = meta.commitment_count as usize;
+        let commitment_tree = IncrementalMerkleTree::restore(num_leaves, |level, idx| {
+            storage.get_commitment_level(level, idx).ok().flatten()
+        });
+
+        // Verify restored root matches snapshot
+        if commitment_tree.root() != meta.commitment_root {
+            return Err(StateError::StorageError(
+                "restored commitment root does not match stored snapshot".into(),
+            ));
+        }
+
+        // Rebuild commitments Vec from tree leaves
+        let mut commitments = Vec::with_capacity(num_leaves);
+        for i in 0..num_leaves {
+            commitments.push(Commitment(commitment_tree.get_node_public(0, i)));
+        }
+
+        // 2. Load all nullifiers from storage
+        let stored_nullifiers = storage
+            .get_all_nullifiers()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+        let mut nullifiers = NullifierSet::new();
+        for n in &stored_nullifiers {
+            nullifiers.insert(*n);
+        }
+
+        // Verify nullifier count matches
+        if nullifiers.len() as u64 != meta.nullifier_count {
+            return Err(StateError::StorageError(format!(
+                "nullifier count mismatch: stored {} vs meta {}",
+                nullifiers.len(),
+                meta.nullifier_count
+            )));
+        }
+
+        // 3. Load all validators from storage
+        let validator_records = storage
+            .get_all_validators()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+        let mut validators = HashMap::new();
+        let mut validator_bonds = HashMap::new();
+        let mut slashed_validators = HashSet::new();
+        for record in validator_records {
+            let vid = record.validator.id;
+            if !record.validator.active && record.bond == 0 {
+                // Inactive with no bond = slashed
+                slashed_validators.insert(vid);
+            }
+            if record.bond > 0 {
+                validator_bonds.insert(vid, record.bond);
+            }
+            validators.insert(vid, record.validator);
+        }
+
+        // 4. Restore epoch state from meta
+        let epoch_seed = EpochSeed {
+            epoch: meta.epoch,
+            seed: meta.epoch_seed,
+        };
+
+        Ok(ChainState {
+            chain_id: crate::constants::chain_id(),
+            commitments,
+            commitment_tree,
+            nullifiers,
+            nullifier_hash: meta.nullifier_hash,
+            validators,
+            validator_bonds,
+            slashed_validators,
+            epoch_seed,
+            epoch_fees: meta.epoch_fees,
+            epoch: meta.epoch,
+            last_finalized: meta.last_finalized,
+        })
+    }
 }
 
 impl Default for ChainState {
@@ -483,6 +605,21 @@ impl Ledger {
         self.finalize_vertex(&id)?;
         Ok(())
     }
+
+    /// Restore a ledger from persistent storage.
+    ///
+    /// Rebuilds the chain state from stored data and creates a fresh genesis-only
+    /// DAG. Unfinalized vertices are lost on restart (acceptable since they were
+    /// not BFT-certified).
+    pub fn restore_from_storage(
+        storage: &dyn Storage,
+        meta: &ChainStateMeta,
+    ) -> Result<Self, StateError> {
+        let state = ChainState::restore_from_storage(storage, meta)?;
+        let genesis = crate::consensus::dag::Dag::genesis_vertex();
+        let dag = crate::consensus::dag::Dag::new(genesis);
+        Ok(Ledger { dag, state })
+    }
 }
 
 impl Default for Ledger {
@@ -520,14 +657,18 @@ pub enum StateError {
     InvalidBondReturn,
     #[error("fee accumulation overflow")]
     FeeOverflow,
+    #[error("storage error during state restoration: {0}")]
+    StorageError(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::commitment::{BlindingFactor, Commitment};
+    use crate::crypto::keys::SigningKeypair;
     use crate::crypto::nullifier::Nullifier;
     use crate::crypto::stark::spend_air::MERKLE_DEPTH;
+    use crate::storage::SledStorage;
 
     #[test]
     fn state_commitment_tree() {
@@ -590,5 +731,131 @@ mod tests {
         assert_eq!(path.len(), MERKLE_DEPTH);
         let root_from_path = crate::crypto::proof::compute_merkle_root(&c.0, &path);
         assert_eq!(root_from_path, state.commitment_root());
+    }
+
+    #[test]
+    fn chain_state_persist_restore_roundtrip() {
+        let storage = SledStorage::open_temporary().unwrap();
+
+        // Build up some state
+        let mut state = ChainState::new();
+
+        // Add commitments
+        for i in 0..5u64 {
+            let blind = BlindingFactor::from_bytes([i as u8; 32]);
+            state.add_commitment(Commitment::commit(i * 100 + 1, &blind));
+        }
+
+        // Add nullifiers
+        let n1 = Nullifier::derive(&[10u8; 32], &[20u8; 32]);
+        let n2 = Nullifier::derive(&[30u8; 32], &[40u8; 32]);
+        state.mark_nullifier(n1);
+        state.mark_nullifier(n2);
+
+        // Register a validator
+        let kp = SigningKeypair::generate();
+        let validator = Validator::new(kp.public.clone());
+        let vid = validator.id;
+        state.register_genesis_validator(validator.clone());
+
+        // Advance epoch
+        state.advance_epoch();
+
+        let original_root = state.state_root();
+        let original_commitment_root = state.commitment_root();
+        let original_nullifier_hash = *state.nullifier_hash();
+
+        // Persist to storage
+        let finalized_count = 3u64;
+        let meta = state.to_chain_state_meta(finalized_count);
+
+        // Store commitment tree levels
+        for level in 0..=MERKLE_DEPTH {
+            for idx in 0..state.commitment_tree_level_len(level) {
+                let hash = state.commitment_tree_node(level, idx);
+                storage.put_commitment_level(level, idx, &hash).unwrap();
+            }
+        }
+
+        // Store nullifiers
+        storage.put_nullifier(&n1).unwrap();
+        storage.put_nullifier(&n2).unwrap();
+
+        // Store validators
+        let bond = state.validator_bond(&vid).unwrap();
+        storage.put_validator(&validator, bond).unwrap();
+
+        // Store meta
+        storage.put_chain_state_meta(&meta).unwrap();
+
+        // Restore
+        let restored = ChainState::restore_from_storage(&storage, &meta).unwrap();
+
+        // Verify everything matches
+        assert_eq!(restored.commitment_root(), original_commitment_root);
+        assert_eq!(restored.commitment_count(), 5);
+        assert_eq!(*restored.nullifier_hash(), original_nullifier_hash);
+        assert_eq!(restored.nullifier_count(), 2);
+        assert!(restored.is_spent(&n1));
+        assert!(restored.is_spent(&n2));
+        assert!(restored.is_active_validator(&vid));
+        assert_eq!(
+            restored.validator_bond(&vid),
+            Some(crate::constants::VALIDATOR_BOND)
+        );
+        assert_eq!(restored.epoch(), 1);
+        assert_eq!(restored.state_root(), original_root);
+
+        // Verify commitment paths still work
+        for i in 0..5 {
+            let path = restored.commitment_path(i).unwrap();
+            assert_eq!(path.len(), MERKLE_DEPTH);
+        }
+    }
+
+    #[test]
+    fn chain_state_meta_snapshot() {
+        let mut state = ChainState::new();
+        let blind = BlindingFactor::random();
+        state.add_commitment(Commitment::commit(42, &blind));
+        state.mark_nullifier(Nullifier::derive(&[1u8; 32], &[2u8; 32]));
+
+        let meta = state.to_chain_state_meta(7);
+
+        assert_eq!(meta.epoch, 0);
+        assert_eq!(meta.commitment_count, 1);
+        assert_eq!(meta.nullifier_count, 1);
+        assert_eq!(meta.commitment_root, state.commitment_root());
+        assert_eq!(meta.state_root, state.state_root());
+        assert_eq!(meta.nullifier_hash, *state.nullifier_hash());
+        assert_eq!(meta.finalized_count, 7);
+    }
+
+    #[test]
+    fn ledger_restore_from_storage() {
+        let storage = SledStorage::open_temporary().unwrap();
+
+        // Build some state
+        let mut state = ChainState::new();
+        let blind = BlindingFactor::from_bytes([1u8; 32]);
+        state.add_commitment(Commitment::commit(500, &blind));
+
+        let meta = state.to_chain_state_meta(0);
+
+        // Persist commitment tree
+        for level in 0..=MERKLE_DEPTH {
+            for idx in 0..state.commitment_tree_level_len(level) {
+                let hash = state.commitment_tree_node(level, idx);
+                storage.put_commitment_level(level, idx, &hash).unwrap();
+            }
+        }
+        storage.put_chain_state_meta(&meta).unwrap();
+
+        // Restore as ledger
+        let ledger = Ledger::restore_from_storage(&storage, &meta).unwrap();
+        assert_eq!(ledger.state.commitment_root(), state.commitment_root());
+        assert_eq!(ledger.state.commitment_count(), 1);
+        // DAG should have genesis only
+        assert_eq!(ledger.dag.len(), 1);
     }
 }

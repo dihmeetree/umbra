@@ -90,6 +90,17 @@ pub enum Message {
         commitment_root: Hash,
         nullifier_count: u64,
     },
+
+    // ── State Sync ──
+    /// Request finalized vertices after a given sequence number
+    GetFinalizedVertices { after_sequence: u64, limit: u32 },
+
+    /// Response with a batch of finalized vertices
+    FinalizedVerticesResponse {
+        vertices: Vec<(u64, Box<Vertex>)>,
+        has_more: bool,
+        total_finalized: u64,
+    },
 }
 
 /// Information about a known peer.

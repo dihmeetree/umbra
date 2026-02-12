@@ -236,6 +236,70 @@ impl IncrementalMerkleTree {
         self.num_leaves
     }
 
+    /// Restore a tree from stored level data and leaf count.
+    ///
+    /// The `loader` function is called with `(level, index)` and should return
+    /// the stored hash for that node, or `None` if not stored (will use zero hash).
+    pub fn restore(num_leaves: usize, loader: impl Fn(usize, usize) -> Option<Hash>) -> Self {
+        let zero_hashes = zero_subtree_hashes().clone();
+        let mut levels: Vec<Vec<Hash>> = (0..=MERKLE_DEPTH).map(|_| Vec::new()).collect();
+
+        // For each level, determine how many nodes should exist
+        let mut count_at_level = num_leaves;
+        for level in 0..=MERKLE_DEPTH {
+            if count_at_level == 0 {
+                break;
+            }
+            let mut level_vec = Vec::with_capacity(count_at_level);
+            for idx in 0..count_at_level {
+                let hash = loader(level, idx).unwrap_or(zero_hashes[level]);
+                level_vec.push(hash);
+            }
+            levels[level] = level_vec;
+            count_at_level = count_at_level.div_ceil(2);
+        }
+
+        IncrementalMerkleTree {
+            num_leaves,
+            levels,
+            zero_hashes,
+        }
+    }
+
+    /// Get a node hash (public accessor for persistence).
+    pub fn get_node_public(&self, level: usize, index: usize) -> Hash {
+        self.get_node(level, index)
+    }
+
+    /// Get the number of stored nodes at a level.
+    pub fn level_len(&self, level: usize) -> usize {
+        if level < self.levels.len() {
+            self.levels[level].len()
+        } else {
+            0
+        }
+    }
+
+    /// Return the path of nodes modified by the most recent append.
+    ///
+    /// Returns `(level, index, hash)` for each node on the append path.
+    /// Used for incremental persistence (only 21 writes per append).
+    pub fn last_appended_path(&self) -> Vec<(usize, usize, Hash)> {
+        if self.num_leaves == 0 {
+            return vec![];
+        }
+        let leaf_index = self.num_leaves - 1;
+        let mut result = Vec::with_capacity(MERKLE_DEPTH + 1);
+        result.push((0, leaf_index, self.get_node(0, leaf_index)));
+        let mut idx = leaf_index;
+        for level in 1..=MERKLE_DEPTH {
+            let parent_idx = idx / 2;
+            result.push((level, parent_idx, self.get_node(level, parent_idx)));
+            idx = parent_idx;
+        }
+        result
+    }
+
     /// Get a node, defaulting to the zero-subtree hash for that level.
     fn get_node(&self, level: usize, index: usize) -> Hash {
         if index < self.levels[level].len() {
@@ -390,6 +454,60 @@ mod tests {
         assert_eq!(path.len(), MERKLE_DEPTH);
         assert_eq!(compute_merkle_root(&c.0, &path), tree.root());
         assert_eq!(tree.root(), canonical_root(&c.0, 0));
+    }
+
+    #[test]
+    fn incremental_tree_restore() {
+        // Build a tree with several leaves
+        let leaves: Vec<Hash> = (0..7u64)
+            .map(|i| Commitment::commit(i * 100 + 1, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+
+        let mut tree = IncrementalMerkleTree::new();
+        for leaf in &leaves {
+            tree.append(*leaf);
+        }
+        let original_root = tree.root();
+
+        // Save all nodes
+        let mut saved: std::collections::HashMap<(usize, usize), Hash> =
+            std::collections::HashMap::new();
+        for level in 0..=MERKLE_DEPTH {
+            for idx in 0..tree.level_len(level) {
+                saved.insert((level, idx), tree.get_node_public(level, idx));
+            }
+        }
+
+        // Restore from saved data
+        let restored = IncrementalMerkleTree::restore(leaves.len(), |level, idx| {
+            saved.get(&(level, idx)).copied()
+        });
+        assert_eq!(restored.root(), original_root);
+        assert_eq!(restored.num_leaves(), leaves.len());
+
+        // Paths should still work
+        for (i, leaf) in leaves.iter().enumerate() {
+            let path = restored.path(i).unwrap();
+            assert_eq!(compute_merkle_root(leaf, &path), original_root);
+        }
+
+        // Appending after restore should work
+        let mut restored = restored;
+        let new_leaf = Commitment::commit(999, &BlindingFactor::from_bytes([99u8; 32])).0;
+        tree.append(new_leaf);
+        restored.append(new_leaf);
+        assert_eq!(restored.root(), tree.root());
+    }
+
+    #[test]
+    fn last_appended_path_covers_all_levels() {
+        let mut tree = IncrementalMerkleTree::new();
+        let leaf = Commitment::commit(42, &BlindingFactor::random()).0;
+        tree.append(leaf);
+
+        let path = tree.last_appended_path();
+        assert_eq!(path.len(), MERKLE_DEPTH + 1); // levels 0..=20
+        assert_eq!(path[0], (0, 0, leaf)); // leaf level
     }
 
     #[test]

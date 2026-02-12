@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 use crate::consensus::bft::{self, BftState, Validator};
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::keys::SigningKeypair;
+use crate::crypto::stark::spend_air::MERKLE_DEPTH;
 use crate::crypto::vrf::VrfOutput;
 use crate::mempool::Mempool;
 use crate::network::Message;
@@ -34,6 +35,21 @@ pub struct NodeState {
     pub bft: BftState,
 }
 
+/// Sync progress tracking for catching up with the network.
+enum SyncState {
+    /// Haven't started sync yet — waiting for a peer to query.
+    NeedSync { our_finalized: u64 },
+    /// Actively syncing vertices from a peer.
+    Syncing {
+        peer: crate::network::PeerId,
+        next_seq: u64,
+        #[allow(dead_code)]
+        target: u64,
+    },
+    /// Fully synced with the network.
+    Synced,
+}
+
 /// The node orchestrator.
 pub struct Node {
     state: Arc<RwLock<NodeState>>,
@@ -42,6 +58,7 @@ pub struct Node {
     keypair: SigningKeypair,
     our_validator_id: Hash,
     our_vrf_output: Option<VrfOutput>,
+    sync_state: SyncState,
 }
 
 /// Node configuration.
@@ -129,8 +146,26 @@ impl Node {
         // Open storage
         let storage = SledStorage::open(&config.data_dir)?;
 
-        // Initialize ledger (future: restore from storage snapshot)
-        let mut ledger = Ledger::new();
+        // Restore ledger from storage if a snapshot exists, otherwise start fresh
+        let mut ledger = match storage.get_chain_state_meta() {
+            Ok(Some(meta)) => match Ledger::restore_from_storage(&storage, &meta) {
+                Ok(l) => {
+                    tracing::info!(
+                        "Restored state from storage: epoch={}, commitments={}, nullifiers={}, finalized={}",
+                        meta.epoch,
+                        meta.commitment_count,
+                        meta.nullifier_count,
+                        meta.finalized_count,
+                    );
+                    l
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to restore state, starting fresh: {}", e);
+                    Ledger::new()
+                }
+            },
+            _ => Ledger::new(),
+        };
 
         // Create mempool
         let mempool = Mempool::with_defaults();
@@ -179,6 +214,9 @@ impl Node {
             );
         }
 
+        // Record our finalized count before storage is moved into NodeState
+        let our_finalized = storage.finalized_vertex_count().unwrap_or(0);
+
         // Start P2P
         let p2p_config = P2pConfig {
             listen_addr: config.listen_addr,
@@ -203,6 +241,8 @@ impl Node {
             bft,
         }));
 
+        let sync_state = SyncState::NeedSync { our_finalized };
+
         Ok(Node {
             state,
             p2p,
@@ -210,6 +250,7 @@ impl Node {
             keypair: config.keypair,
             our_validator_id,
             our_vrf_output,
+            sync_state,
         })
     }
 
@@ -241,21 +282,34 @@ impl Node {
         }
     }
 
-    async fn handle_p2p_event(&self, event: P2pEvent) {
+    async fn handle_p2p_event(&mut self, event: P2pEvent) {
         match event {
             P2pEvent::MessageReceived { from, message } => {
                 self.handle_message(from, *message).await;
             }
             P2pEvent::PeerConnected(peer_id) => {
                 tracing::info!("Peer connected: {}", hex::encode(&peer_id[..8]));
+                // If we need sync, ask this peer about their state
+                if let SyncState::NeedSync { .. } = &self.sync_state {
+                    let _ = self.p2p.send_to(peer_id, Message::GetEpochState).await;
+                }
             }
             P2pEvent::PeerDisconnected(peer_id) => {
                 tracing::info!("Peer disconnected: {}", hex::encode(&peer_id[..8]));
+                // If we were syncing from this peer, revert to NeedSync
+                if let SyncState::Syncing { peer, next_seq, .. } = &self.sync_state {
+                    if *peer == peer_id {
+                        tracing::warn!("Sync peer disconnected, will retry with next peer");
+                        self.sync_state = SyncState::NeedSync {
+                            our_finalized: *next_seq,
+                        };
+                    }
+                }
             }
         }
     }
 
-    async fn handle_message(&self, from: crate::network::PeerId, message: Message) {
+    async fn handle_message(&mut self, from: crate::network::PeerId, message: Message) {
         match message {
             Message::NewTransaction(tx) => {
                 let mut state = self.state.write().await;
@@ -428,11 +482,203 @@ impl Node {
                     )
                     .await;
             }
-            // Response messages don't need forwarding
+            Message::GetFinalizedVertices {
+                after_sequence,
+                limit,
+            } => {
+                let state = self.state.read().await;
+                let capped_limit = limit.min(crate::constants::SYNC_BATCH_SIZE);
+                let total_finalized = state.storage.finalized_vertex_count().unwrap_or(0);
+                match state
+                    .storage
+                    .get_finalized_vertices_after(after_sequence, capped_limit)
+                {
+                    Ok(vertices) => {
+                        let has_more = vertices.len() == capped_limit as usize;
+                        let boxed: Vec<(u64, Box<Vertex>)> = vertices
+                            .into_iter()
+                            .map(|(seq, v)| (seq, Box::new(v)))
+                            .collect();
+                        let _ = self
+                            .p2p
+                            .send_to(
+                                from,
+                                Message::FinalizedVerticesResponse {
+                                    vertices: boxed,
+                                    has_more,
+                                    total_finalized,
+                                },
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to serve sync request: {}", e);
+                    }
+                }
+            }
+
+            Message::EpochStateResponse {
+                nullifier_count, ..
+            } => {
+                // Check if we need to sync from this peer
+                if let SyncState::NeedSync { our_finalized } = self.sync_state {
+                    let state = self.state.read().await;
+                    let our_nullifiers = state.ledger.state.nullifier_count() as u64;
+                    drop(state);
+
+                    // Use nullifier count as a rough proxy for how far ahead the peer is
+                    if nullifier_count > our_nullifiers || our_finalized == 0 {
+                        tracing::info!(
+                            "Starting sync from peer {} (our finalized: {}, peer nullifiers: {})",
+                            hex::encode(&from[..8]),
+                            our_finalized,
+                            nullifier_count,
+                        );
+                        // Start requesting finalized vertices
+                        let start_after = if our_finalized > 0 {
+                            our_finalized - 1
+                        } else {
+                            u64::MAX // will be wrapped to 0 by the range query
+                        };
+                        self.sync_state = SyncState::Syncing {
+                            peer: from,
+                            next_seq: start_after,
+                            target: 0, // unknown until first response
+                        };
+                        let _ = self
+                            .p2p
+                            .send_to(
+                                from,
+                                Message::GetFinalizedVertices {
+                                    after_sequence: start_after,
+                                    limit: crate::constants::SYNC_BATCH_SIZE,
+                                },
+                            )
+                            .await;
+                    } else {
+                        tracing::info!("Already synced with network");
+                        self.sync_state = SyncState::Synced;
+                    }
+                }
+            }
+            Message::FinalizedVerticesResponse {
+                vertices,
+                has_more,
+                total_finalized,
+            } => {
+                if let SyncState::Syncing { peer, .. } = &self.sync_state {
+                    if from != *peer {
+                        return; // Ignore responses from unexpected peers
+                    }
+
+                    let batch_len = vertices.len();
+                    let mut last_seq = 0u64;
+                    let mut applied = 0usize;
+
+                    for (seq, vertex) in vertices {
+                        last_seq = seq;
+                        let mut state = self.state.write().await;
+
+                        // Record commitment count for incremental persistence
+                        let old_cc = state.ledger.state.commitment_count();
+
+                        // Apply vertex to chain state (skip DAG for already-finalized vertices)
+                        match state.ledger.state.apply_vertex(&vertex) {
+                            Ok(_) => {
+                                applied += 1;
+
+                                // Persist the same way as finalize_vertex_inner
+                                let _ = state.storage.put_vertex(&vertex);
+                                for tx in &vertex.transactions {
+                                    let _ = state.storage.put_transaction(tx);
+                                    for input in &tx.inputs {
+                                        let _ = state.storage.put_nullifier(&input.nullifier);
+                                    }
+                                }
+                                let _ = state.storage.put_finalized_vertex_index(seq, &vertex.id);
+
+                                // Persist modified commitment tree nodes
+                                let new_cc = state.ledger.state.commitment_count();
+                                if new_cc > old_cc {
+                                    for level in 0..=MERKLE_DEPTH {
+                                        let range_start = old_cc >> level;
+                                        let range_end = ((new_cc - 1) >> level) + 1;
+                                        for idx in range_start..range_end {
+                                            let hash =
+                                                state.ledger.state.commitment_tree_node(level, idx);
+                                            let _ = state
+                                                .storage
+                                                .put_commitment_level(level, idx, &hash);
+                                        }
+                                    }
+                                }
+
+                                // Persist validators
+                                for validator in state.ledger.state.all_validators() {
+                                    let bond = state
+                                        .ledger
+                                        .state
+                                        .validator_bond(&validator.id)
+                                        .unwrap_or(0);
+                                    let _ = state.storage.put_validator(validator, bond);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Sync: failed to apply vertex at seq {}: {}",
+                                    seq,
+                                    e
+                                );
+                                // Stop syncing on error
+                                self.sync_state = SyncState::NeedSync { our_finalized: seq };
+                                return;
+                            }
+                        }
+                    }
+
+                    // Persist meta snapshot after batch
+                    {
+                        let state = self.state.read().await;
+                        let fc = state.storage.finalized_vertex_count().unwrap_or(0);
+                        let meta = state.ledger.state.to_chain_state_meta(fc);
+                        let _ = state.storage.put_chain_state_meta(&meta);
+                        let _ = state.storage.flush();
+                    }
+
+                    tracing::info!(
+                        "Sync: applied {} vertices (up to seq {}), total finalized on peer: {}",
+                        applied,
+                        last_seq,
+                        total_finalized,
+                    );
+
+                    if has_more && batch_len > 0 {
+                        // Request next batch
+                        self.sync_state = SyncState::Syncing {
+                            peer: from,
+                            next_seq: last_seq,
+                            target: total_finalized,
+                        };
+                        let _ = self
+                            .p2p
+                            .send_to(
+                                from,
+                                Message::GetFinalizedVertices {
+                                    after_sequence: last_seq,
+                                    limit: crate::constants::SYNC_BATCH_SIZE,
+                                },
+                            )
+                            .await;
+                    } else {
+                        tracing::info!("Sync complete");
+                        self.sync_state = SyncState::Synced;
+                    }
+                }
+            }
+            // Response messages that don't need special handling
             Message::TransactionResponse(_)
             | Message::VertexResponse(_)
             | Message::TipsResponse(_)
-            | Message::EpochStateResponse { .. }
             | Message::Hello { .. } => {}
         }
     }
@@ -456,15 +702,62 @@ impl Node {
             })
             .unwrap_or_default();
 
+        // Record commitment count before finalization for incremental tree persistence
+        let old_commitment_count = state.ledger.state.commitment_count();
+
         match state.ledger.finalize_vertex(vertex_id) {
             Ok(_) => {
                 // Remove conflicting mempool txs
                 state.mempool.remove_conflicting(&nullifiers);
 
-                // Persist vertex
+                // ── Persist finalized vertex and state ──
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
                     let _ = state.storage.put_vertex(v);
+
+                    // Persist individual transactions and their nullifiers
+                    for tx in &v.transactions {
+                        let _ = state.storage.put_transaction(tx);
+                        for input in &tx.inputs {
+                            let _ = state.storage.put_nullifier(&input.nullifier);
+                        }
+                    }
                 }
+
+                // Persist finalized vertex index
+                let finalized_count = state.storage.finalized_vertex_count().unwrap_or(0);
+                let _ = state
+                    .storage
+                    .put_finalized_vertex_index(finalized_count, vertex_id);
+
+                // Persist modified commitment tree nodes (incremental)
+                let new_commitment_count = state.ledger.state.commitment_count();
+                if new_commitment_count > old_commitment_count {
+                    for level in 0..=MERKLE_DEPTH {
+                        let range_start = old_commitment_count >> level;
+                        let range_end = ((new_commitment_count - 1) >> level) + 1;
+                        for idx in range_start..range_end {
+                            let hash = state.ledger.state.commitment_tree_node(level, idx);
+                            let _ = state.storage.put_commitment_level(level, idx, &hash);
+                        }
+                    }
+                }
+
+                // Persist validators (update all active + bonded)
+                for validator in state.ledger.state.all_validators() {
+                    let bond = state
+                        .ledger
+                        .state
+                        .validator_bond(&validator.id)
+                        .unwrap_or(0);
+                    let _ = state.storage.put_validator(validator, bond);
+                }
+
+                // Persist chain state meta snapshot
+                let meta = state.ledger.state.to_chain_state_meta(finalized_count + 1);
+                let _ = state.storage.put_chain_state_meta(&meta);
+
+                // Flush to disk
+                let _ = state.storage.flush();
 
                 // Check for equivocation evidence and slash
                 for evidence in state.bft.equivocations() {
