@@ -39,9 +39,11 @@
 
     form { display: flex; flex-direction: column; gap: 0.75rem; }
     label { font-size: 0.85rem; color: var(--text-dim); }
-    input, textarea, select { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem; color: var(--text); font-family: inherit; font-size: 0.85rem; }
+    input, textarea, select { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem; color: var(--text); font-family: inherit; font-size: 0.85rem; width: 100%; }
     input:focus, textarea:focus { outline: none; border-color: var(--accent); }
     textarea { resize: vertical; min-height: 60px; }
+    .form-group { display: flex; flex-direction: column; gap: 0.25rem; }
+    .form-group label { margin-bottom: 0.1rem; }
     button, .btn { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 0.6rem 1.25rem; font-family: inherit; font-size: 0.85rem; cursor: pointer; display: inline-block; text-align: center; }
     button:hover, .btn:hover { background: var(--accent-hover); }
     .btn-danger { background: var(--danger); }
@@ -76,10 +78,15 @@
       .stat .value { font-size: 0.95rem; }
       .truncate { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 
-      input, textarea, select { font-size: 1rem; padding: 0.75rem; }
-      button, .btn { font-size: 1rem; padding: 0.75rem 1rem; width: 100%; }
+      input, textarea, select { font-size: 1rem; padding: 0.75rem; -webkit-appearance: none; border-radius: 6px; }
+      textarea { min-height: 80px; }
+      form { gap: 1rem; }
+      .form-group { gap: 0.35rem; }
+      .form-group label { font-size: 0.9rem; }
+      button, .btn { font-size: 1rem; padding: 0.85rem 1rem; width: 100%; margin-top: 0.25rem; }
       .btn-sm { padding: 0.6rem 0.75rem; width: 100%; }
       .actions { flex-direction: column; }
+      .flash { font-size: 0.9rem; word-break: break-word; }
     }
   </style>
 </head>
@@ -87,10 +94,10 @@
   <nav>
     <span class="logo">SPECTRA</span>
     <div class="links">
-      <a href="/">Dashboard</a>
-      <a href="/send">Send</a>
-      <a href="/messages">Messages</a>
-      <a href="/address">Address</a>
+      <a href="/"{% if active_tab == "dashboard" %} class="active"{% endif %}>Dashboard</a>
+      <a href="/send"{% if active_tab == "send" %} class="active"{% endif %}>Send</a>
+      <a href="/messages"{% if active_tab == "messages" %} class="active"{% endif %}>Messages</a>
+      <a href="/address"{% if active_tab == "address" %} class="active"{% endif %}>Address</a>
     </div>
   </nav>
   <main>

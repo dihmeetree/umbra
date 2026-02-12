@@ -84,6 +84,7 @@ impl WalletWebState {
 #[derive(Template, WebTemplate)]
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
+    active_tab: &'static str,
     balance: u64,
     unspent_count: usize,
     total_outputs: usize,
@@ -99,12 +100,14 @@ struct DashboardTemplate {
 #[derive(Template, WebTemplate)]
 #[template(path = "init.html")]
 struct InitTemplate {
+    active_tab: &'static str,
     flash_error: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]
 #[template(path = "address.html")]
 struct AddressTemplate {
+    active_tab: &'static str,
     address_id: String,
     signing_key_size: usize,
     kem_key_size: usize,
@@ -114,6 +117,7 @@ struct AddressTemplate {
 #[derive(Template, WebTemplate)]
 #[template(path = "send.html")]
 struct SendTemplate {
+    active_tab: &'static str,
     balance: u64,
     flash_error: Option<String>,
 }
@@ -121,6 +125,7 @@ struct SendTemplate {
 #[derive(Template, WebTemplate)]
 #[template(path = "send_result.html")]
 struct SendResultTemplate {
+    active_tab: &'static str,
     tx_id: String,
     amount: u64,
     fee: u64,
@@ -136,17 +141,20 @@ struct MessageDisplay {
 #[derive(Template, WebTemplate)]
 #[template(path = "messages.html")]
 struct MessagesTemplate {
+    active_tab: &'static str,
     messages: Vec<MessageDisplay>,
 }
 
 #[derive(Template, WebTemplate)]
 #[template(path = "error.html")]
 struct ErrorTemplate {
+    active_tab: &'static str,
     message: String,
 }
 
 fn error_page(msg: impl Into<String>) -> ErrorTemplate {
     ErrorTemplate {
+        active_tab: "",
         message: msg.into(),
     }
 }
@@ -219,6 +227,7 @@ async fn dashboard(State(state): State<WalletWebState>) -> Response {
         };
 
     DashboardTemplate {
+        active_tab: "dashboard",
         balance: wallet.balance(),
         unspent_count: wallet.unspent_outputs().len(),
         total_outputs: wallet.output_count(),
@@ -237,7 +246,11 @@ async fn init_page(State(state): State<WalletWebState>) -> Response {
     if state.wallet_exists() {
         return Redirect::to("/").into_response();
     }
-    InitTemplate { flash_error: None }.into_response()
+    InitTemplate {
+        active_tab: "",
+        flash_error: None,
+    }
+    .into_response()
 }
 
 async fn init_action(State(state): State<WalletWebState>) -> Response {
@@ -248,6 +261,7 @@ async fn init_action(State(state): State<WalletWebState>) -> Response {
     let path = wallet_cli::wallet_path(&state.data_dir);
     if let Err(e) = std::fs::create_dir_all(&state.data_dir) {
         return InitTemplate {
+            active_tab: "",
             flash_error: Some(format!("Failed to create directory: {}", e)),
         }
         .into_response();
@@ -256,6 +270,7 @@ async fn init_action(State(state): State<WalletWebState>) -> Response {
     let wallet = Wallet::new();
     if let Err(e) = wallet.save_to_file(&path, 0) {
         return InitTemplate {
+            active_tab: "",
             flash_error: Some(format!("Failed to save wallet: {}", e)),
         }
         .into_response();
@@ -296,6 +311,7 @@ async fn address_page(State(state): State<WalletWebState>) -> Response {
     };
 
     AddressTemplate {
+        active_tab: "address",
         address_id,
         signing_key_size,
         kem_key_size,
@@ -346,6 +362,7 @@ async fn send_page(State(state): State<WalletWebState>) -> Response {
     };
 
     SendTemplate {
+        active_tab: "send",
         balance: wallet.balance(),
         flash_error: None,
     }
@@ -370,6 +387,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         Ok(s) => s,
         Err(e) => {
             return SendTemplate {
+                active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Scan failed: {}", e)),
             }
@@ -383,6 +401,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         Ok(b) => b,
         Err(e) => {
             return SendTemplate {
+                active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Invalid recipient hex: {}", e)),
             }
@@ -393,6 +412,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         Ok(a) => a,
         Err(e) => {
             return SendTemplate {
+                active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Invalid recipient address: {}", e)),
             }
@@ -409,6 +429,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         Ok(tx) => tx,
         Err(e) => {
             return SendTemplate {
+                active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Build failed: {}", e)),
             }
@@ -431,6 +452,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
             wallet.cancel_transaction(&tx.tx_binding);
             let _ = state.save_wallet(&wallet, scanned_to).await;
             return SendTemplate {
+                active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Submission failed: {}", e)),
             }
@@ -443,6 +465,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
     let _ = state.save_wallet(&wallet, scanned_to).await;
 
     SendResultTemplate {
+        active_tab: "send",
         tx_id: result.tx_id,
         amount: form.amount,
         fee: form.fee,
@@ -475,7 +498,11 @@ async fn messages_page(State(state): State<WalletWebState>) -> Response {
         })
         .collect();
 
-    MessagesTemplate { messages }.into_response()
+    MessagesTemplate {
+        active_tab: "messages",
+        messages,
+    }
+    .into_response()
 }
 
 async fn scan_action(State(state): State<WalletWebState>) -> Response {
@@ -512,6 +539,7 @@ async fn scan_action(State(state): State<WalletWebState>) -> Response {
         };
 
     DashboardTemplate {
+        active_tab: "dashboard",
         balance: wallet.balance(),
         unspent_count: wallet.unspent_outputs().len(),
         total_outputs: wallet.output_count(),

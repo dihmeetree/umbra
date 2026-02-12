@@ -29,9 +29,13 @@ struct Cli {
     #[arg(long, default_value = "./spectra-data", global = true)]
     data_dir: PathBuf,
 
-    /// RPC address for node/wallet communication.
-    #[arg(long, default_value = "127.0.0.1:9733", global = true)]
-    rpc_addr: SocketAddr,
+    /// RPC host for node/wallet communication.
+    #[arg(long, default_value = "127.0.0.1", global = true)]
+    rpc_host: String,
+
+    /// RPC port for node/wallet communication.
+    #[arg(long, default_value = "9733", global = true)]
+    rpc_port: u16,
 
     /// Run the demo walkthrough instead of starting a node.
     #[arg(long)]
@@ -45,9 +49,13 @@ struct Cli {
 enum Command {
     /// Run the Spectra node.
     Node {
-        /// P2P listen address.
-        #[arg(long, default_value = "0.0.0.0:9732")]
-        listen_addr: SocketAddr,
+        /// P2P listen host.
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// P2P listen port.
+        #[arg(long, default_value = "9732")]
+        port: u16,
 
         /// Bootstrap peer addresses (comma-separated).
         #[arg(long, value_delimiter = ',')]
@@ -131,12 +139,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let rpc_addr: SocketAddr = format!("{}:{}", cli.rpc_host, cli.rpc_port).parse()?;
+
     match cli.command {
         // Default (no subcommand) → run node for backward compatibility
         None => {
             run_node(
                 cli.data_dir,
-                cli.rpc_addr,
+                rpc_addr,
                 "0.0.0.0:9732".parse()?,
                 vec![],
                 false,
@@ -145,13 +155,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Some(Command::Node {
-            listen_addr,
+            host,
+            port,
             peers,
             genesis_validator,
         }) => {
+            let listen_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             run_node(
                 cli.data_dir,
-                cli.rpc_addr,
+                rpc_addr,
                 listen_addr,
                 peers,
                 genesis_validator,
@@ -160,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Some(Command::Wallet { action }) => {
-            run_wallet_command(action, &cli.data_dir, cli.rpc_addr).await
+            run_wallet_command(action, &cli.data_dir, rpc_addr).await
         }
     }
 }

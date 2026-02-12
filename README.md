@@ -130,14 +130,16 @@ The binary uses subcommands (`node`, `wallet`). Running without a subcommand def
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--data-dir` | `./spectra-data` | Data directory for persistent storage |
-| `--rpc-addr` | `127.0.0.1:9733` | JSON RPC listen address (localhost by default for safety) |
+| `--rpc-host` | `127.0.0.1` | RPC listen host (localhost by default for safety) |
+| `--rpc-port` | `9733` | RPC listen port |
 | `--demo` | *(off)* | Run the protocol demo walkthrough instead |
 
 **Node flags** (`spectra node`):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--listen-addr` | `0.0.0.0:9732` | P2P listen address |
+| `--host` | `0.0.0.0` | P2P listen host |
+| `--port` | `9732` | P2P listen port |
 | `--peers` | *(none)* | Comma-separated bootstrap peer addresses |
 | `--genesis-validator` | *(off)* | Register as a genesis validator (for bootstrapping a new network) |
 
@@ -151,7 +153,7 @@ cargo run --release
 cargo run --release -- node --genesis-validator
 
 # Start with custom addresses and a bootstrap peer
-cargo run --release -- node --listen-addr 127.0.0.1:9000 --rpc-addr 127.0.0.1:9001 --peers 192.168.1.10:9732
+cargo run --release -- --rpc-host 127.0.0.1 --rpc-port 9001 node --host 127.0.0.1 --port 9000 --peers 192.168.1.10:9732
 
 # Run the protocol demo
 cargo run --release -- --demo
@@ -215,7 +217,7 @@ A browser-based wallet interface with the same capabilities as the CLI. The web 
 cargo run --release -- wallet web
 
 # Custom host/port and node RPC
-cargo run --release -- --rpc-addr 127.0.0.1:9733 wallet web --host 0.0.0.0 --port 8080
+cargo run --release -- --rpc-host 127.0.0.1 --rpc-port 9733 wallet web --host 0.0.0.0 --port 8080
 ```
 
 Open `http://127.0.0.1:9734` in your browser. If no wallet exists, you'll be prompted to create one.
@@ -534,7 +536,7 @@ All transaction validity is verified via zk-STARKs:
 - **Merkle tree capacity enforcement** — the incremental Merkle tree rejects appends beyond `2^MERKLE_DEPTH` leaves, preventing silent overflow
 - **Bounded DAG traversal** — ancestor queries are depth-bounded (default `2 * EPOCH_LENGTH`), preventing unbounded memory usage from deep graph exploration
 - **Secret key encapsulation** — `SigningSecretKey` and `KemSecretKey` inner bytes are `pub(crate)`, preventing external crates from directly reading secret key material
-- **RPC localhost binding** — the RPC server binds to `127.0.0.1` by default, requiring explicit opt-in (`--rpc-addr 0.0.0.0:9733`) for network exposure
+- **RPC localhost binding** — the RPC server binds to `127.0.0.1` by default, requiring explicit opt-in (`--rpc-host 0.0.0.0`) for network exposure
 
 ## Production Roadmap
 

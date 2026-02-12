@@ -6,7 +6,7 @@
 <div class="card">
   <div class="stat">
     <span class="label">Address ID</span>
-    <span class="value mono">{{ address_id }}</span>
+    <span class="value mono" style="overflow-wrap: anywhere;">{{ address_id }}</span>
   </div>
   <div class="stat">
     <span class="label">Signing key</span>
@@ -22,11 +22,13 @@
   <h2>Share Address</h2>
   <p style="margin-bottom: 0.75rem; color: var(--text-dim); font-size: 0.85rem;">
     Share the hex string below with anyone who wants to send you funds.
-    They can paste it into the "Send" form as the recipient address.
+    They can paste it into the &quot;Send&quot; form as the recipient address.
   </p>
-  <textarea readonly rows="4" style="width: 100%; font-size: 0.75rem;">{{ address_hex }}</textarea>
-  <div class="actions">
-    <a href="/address/export" class="btn btn-sm btn-secondary">Download .spectra-address</a>
+  <div class="form-group">
+    <textarea readonly rows="6" style="font-size: 0.75rem; overflow-wrap: anywhere; word-break: break-all;">{{ address_hex }}</textarea>
+  </div>
+  <div class="actions" style="margin-top: 0.5rem;">
+    <a href="/address/export" class="btn btn-secondary">Download .spectra-address</a>
   </div>
 </div>
 {% endblock %}
