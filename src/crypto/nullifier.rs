@@ -35,8 +35,11 @@ impl Nullifier {
     }
 
     /// Verify that a nullifier was correctly derived (only possible with the secret).
+    ///
+    /// Uses constant-time comparison to avoid timing side-channels.
     pub fn verify(&self, spend_auth: &Hash, commitment_hash: &Hash) -> bool {
-        *self == Self::derive(spend_auth, commitment_hash)
+        let expected = Self::derive(spend_auth, commitment_hash);
+        crate::constant_time_eq(&self.0, &expected.0)
     }
 
     /// Convert to field elements for STARK public inputs.

@@ -42,6 +42,16 @@ pub struct VrfOutput {
 impl VrfOutput {
     /// Evaluate the VRF: produce a pseudorandom output for a given input.
     ///
+    /// # Determinism assumption
+    ///
+    /// Dilithium5 signing MAY be internally randomized depending on the
+    /// implementation. If the underlying `dilithium5::detached_sign` is
+    /// deterministic (as in the pqcrypto reference implementation), then
+    /// `evaluate(sk, input)` is a true VRF: identical inputs always produce
+    /// identical outputs. If the implementation is randomized, the commit-
+    /// reveal scheme (see below) pins the output to the first evaluation,
+    /// preserving security.
+    ///
     /// The `proof_commitment` field is computed as H(proof) and must be
     /// submitted to the chain before the epoch seed is revealed. This
     /// prevents grinding: even if Dilithium signing is randomized, the

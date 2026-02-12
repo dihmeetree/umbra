@@ -276,7 +276,25 @@ async fn p2p_loop(
 }
 
 /// Handle an inbound TCP connection: perform handshake, then spawn read/write tasks.
+///
+/// M9: The entire handshake is wrapped in a timeout to prevent slow-loris
+/// attacks where a peer connects but never completes the handshake.
 async fn handle_inbound(
+    stream: TcpStream,
+    addr: SocketAddr,
+    config: &P2pConfig,
+    internal_tx: mpsc::Sender<InternalEvent>,
+) -> Result<(), P2pError> {
+    let timeout = std::time::Duration::from_millis(crate::constants::PEER_CONNECT_TIMEOUT_MS);
+    tokio::time::timeout(
+        timeout,
+        handle_inbound_inner(stream, addr, config, internal_tx),
+    )
+    .await
+    .map_err(|_| P2pError::ConnectionFailed("inbound handshake timeout".into()))?
+}
+
+async fn handle_inbound_inner(
     stream: TcpStream,
     addr: SocketAddr,
     config: &P2pConfig,

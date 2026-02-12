@@ -93,11 +93,24 @@ impl Wallet {
 
     /// Scan a transaction for outputs and messages addressed to us.
     pub fn scan_transaction(&mut self, tx: &Transaction) {
+        self.scan_transaction_with_state(tx, None);
+    }
+
+    /// Scan a transaction with optional chain state for commitment index resolution.
+    pub fn scan_transaction_with_state(
+        &mut self,
+        tx: &Transaction,
+        state: Option<&crate::state::ChainState>,
+    ) {
         let tx_id = tx.tx_id();
 
         // Scan outputs
         for (idx, output) in tx.outputs.iter().enumerate() {
-            if let Some(owned) = self.try_claim_output(output, idx as u32) {
+            if let Some(mut owned) = self.try_claim_output(output, idx as u32) {
+                // C5: Resolve commitment_index from chain state if available
+                if let Some(st) = state {
+                    owned.commitment_index = st.find_commitment(&owned.commitment);
+                }
                 self.outputs.push(owned);
             }
         }
@@ -109,6 +122,17 @@ impl Wallet {
                     tx_hash: tx_id.0,
                     content: plaintext,
                 });
+            }
+        }
+    }
+
+    /// Resolve commitment indices for all outputs using the given chain state.
+    ///
+    /// Call this after the transaction outputs have been added to the chain state.
+    pub fn resolve_commitment_indices(&mut self, state: &crate::state::ChainState) {
+        for output in &mut self.outputs {
+            if output.commitment_index.is_none() {
+                output.commitment_index = state.find_commitment(&output.commitment);
             }
         }
     }

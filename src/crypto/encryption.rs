@@ -3,11 +3,19 @@
 //! Uses Kyber1024 KEM to establish a shared secret, then BLAKE3 in keyed mode
 //! for authenticated encryption (encrypt-then-MAC).
 //!
+//! # Security rationale (H8)
+//!
+//! This module implements a custom AEAD construction because standard AEAD
+//! ciphers (AES-GCM, ChaCha20-Poly1305) have classical key-recovery
+//! complexity ≤128 bits. By using BLAKE3 (256-bit security margin) for both
+//! the keystream and the MAC, this construction matches the post-quantum
+//! security level of the KEM (Kyber1024, NIST Level 5).
+//!
 //! Message flow:
 //! 1. Sender encapsulates against recipient's KEM public key -> (shared_secret, ciphertext)
-//! 2. Derive encryption key and MAC key from shared_secret + nonce
+//! 2. Derive encryption key and MAC key from shared_secret + nonce (domain-separated BLAKE3)
 //! 3. XOR-encrypt the plaintext with a BLAKE3-derived keystream
-//! 4. Compute MAC over (nonce || ciphertext || kem_ciphertext)
+//! 4. Compute MAC over (nonce || len(ciphertext) || ciphertext || len(kem_ct) || kem_ct)
 //!
 //! A random 24-byte nonce is included in every payload, ensuring that even if
 //! the same shared secret is reused (via encrypt_with_shared_secret), the
@@ -121,6 +129,10 @@ impl EncryptedPayload {
 }
 
 /// Generate a cryptographically random nonce.
+///
+/// M12: Uses `thread_rng()` which is a CSPRNG (ChaCha20 seeded from OsRng).
+/// This provides the same security guarantees as OsRng with better
+/// performance for bulk operations.
 fn random_nonce() -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut nonce);

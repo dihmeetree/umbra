@@ -2,6 +2,13 @@
 //!
 //! Provides endpoints for submitting transactions, querying state,
 //! and inspecting the mempool and peer list.
+//!
+//! # Authentication (M2)
+//!
+//! The RPC server currently has no authentication. By default it binds to
+//! localhost only (M3). Production deployments exposed to a network should
+//! add an authentication layer (e.g., bearer token, mTLS) before the RPC
+//! router, and rate-limiting middleware.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -123,7 +130,12 @@ async fn get_tx(
 
     // Check mempool first
     if let Some(tx) = node.mempool.get(&tx_id) {
-        let tx_hex = hex::encode(bincode::serialize(tx).unwrap_or_default());
+        let tx_hex = bincode::serialize(tx).map(hex::encode).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {}", e),
+            )
+        })?;
         return Ok(Json(GetTxResponse {
             found: true,
             tx_hex: Some(tx_hex),
@@ -133,7 +145,12 @@ async fn get_tx(
 
     // Then storage
     if let Ok(Some(tx)) = node.storage.get_transaction(&tx_id) {
-        let tx_hex = hex::encode(bincode::serialize(&tx).unwrap_or_default());
+        let tx_hex = bincode::serialize(&tx).map(hex::encode).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {}", e),
+            )
+        })?;
         return Ok(Json(GetTxResponse {
             found: true,
             tx_hex: Some(tx_hex),

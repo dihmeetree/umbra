@@ -91,19 +91,24 @@ pub fn build_merkle_tree(leaves: &[Hash]) -> (Hash, Vec<Vec<MerkleNode>>) {
     (root, paths)
 }
 
-/// Precomputed zero-subtree hashes for each level.
+/// Precomputed zero-subtree hashes for each level (cached on first call).
 ///
 /// `zero_subtree[0]` = hash of empty leaf = [0; 32]
 /// `zero_subtree[n]` = merge(zero_subtree[n-1], zero_subtree[n-1])
-fn zero_subtree_hashes() -> Vec<Hash> {
-    let mut hashes = Vec::with_capacity(MERKLE_DEPTH + 1);
-    hashes.push([0u8; 32]); // Level 0: empty leaf
-    for _ in 1..=MERKLE_DEPTH {
-        let prev = hash_to_felts(hashes.last().unwrap());
-        let merged = rescue::hash_merge(&prev, &prev);
-        hashes.push(felts_to_hash(&merged));
-    }
-    hashes
+///
+/// L2: Cached via `OnceLock` to avoid recomputing on every call.
+fn zero_subtree_hashes() -> &'static Vec<Hash> {
+    static CACHE: std::sync::OnceLock<Vec<Hash>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut hashes = Vec::with_capacity(MERKLE_DEPTH + 1);
+        hashes.push([0u8; 32]); // Level 0: empty leaf
+        for _ in 1..=MERKLE_DEPTH {
+            let prev = hash_to_felts(hashes.last().unwrap());
+            let merged = rescue::hash_merge(&prev, &prev);
+            hashes.push(felts_to_hash(&merged));
+        }
+        hashes
+    })
 }
 
 /// Pad a Merkle path to the canonical depth (MERKLE_DEPTH = 20).
@@ -157,7 +162,7 @@ pub struct IncrementalMerkleTree {
 impl IncrementalMerkleTree {
     /// Create a new empty tree.
     pub fn new() -> Self {
-        let zero_hashes = zero_subtree_hashes();
+        let zero_hashes = zero_subtree_hashes().clone();
         let levels = (0..=MERKLE_DEPTH).map(|_| Vec::new()).collect();
         IncrementalMerkleTree {
             num_leaves: 0,
@@ -166,10 +171,25 @@ impl IncrementalMerkleTree {
         }
     }
 
+    /// Maximum number of leaves the tree can hold: 2^MERKLE_DEPTH.
+    pub const MAX_LEAVES: usize = 1 << MERKLE_DEPTH;
+
     /// Append a leaf hash, updating all affected internal nodes.
     ///
     /// Runs in O(MERKLE_DEPTH) time (20 hash operations).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tree already has `MAX_LEAVES` (2^20 = 1,048,576) entries.
+    /// In production, callers should check `num_leaves() < MAX_LEAVES` before
+    /// appending and reject transactions that would overflow the tree.
     pub fn append(&mut self, leaf: Hash) {
+        assert!(
+            self.num_leaves < Self::MAX_LEAVES,
+            "commitment tree full: {} leaves (max {})",
+            self.num_leaves,
+            Self::MAX_LEAVES,
+        );
         let leaf_index = self.num_leaves;
         self.set_node(0, leaf_index, leaf);
 

@@ -93,6 +93,9 @@ pub enum TxType {
         auth_signature: Signature,
         /// Output that receives the returned bond (added to commitment tree).
         bond_return_output: Box<TxOutput>,
+        /// Blinding factor for the bond return commitment, so the chain can verify
+        /// the commitment opens to exactly VALIDATOR_BOND.
+        bond_blinding: [u8; 32],
     },
 }
 
@@ -396,6 +399,7 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
             validator_id,
             auth_signature,
             bond_return_output,
+            bond_blinding,
         } => {
             hasher.update(&[2u8]);
             hasher.update(validator_id);
@@ -403,6 +407,7 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
             hasher.update(&auth_signature.0);
             hasher.update(&bond_return_output.commitment.0);
             hasher.update(&bond_return_output.stealth_address.one_time_key);
+            hasher.update(bond_blinding);
         }
     }
 }

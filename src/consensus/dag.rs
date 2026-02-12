@@ -362,11 +362,22 @@ impl Dag {
         }
     }
 
-    /// Get all ancestors of a vertex (transitive parents).
+    /// Get all ancestors of a vertex (transitive parents), bounded by max depth.
+    ///
+    /// L8: The traversal is bounded to prevent DoS from extremely deep DAGs.
+    /// Default limit is `EPOCH_LENGTH * 2` which covers two full epochs.
     pub fn ancestors(&self, id: &VertexId) -> HashSet<VertexId> {
+        self.ancestors_bounded(id, crate::constants::EPOCH_LENGTH as usize * 2)
+    }
+
+    /// Get ancestors up to a maximum number of vertices visited.
+    pub fn ancestors_bounded(&self, id: &VertexId, max_visited: usize) -> HashSet<VertexId> {
         let mut result = HashSet::new();
         let mut stack = vec![*id];
         while let Some(vid) = stack.pop() {
+            if result.len() >= max_visited {
+                break;
+            }
             if let Some(v) = self.vertices.get(&vid) {
                 for parent in &v.parents {
                     if result.insert(*parent) {

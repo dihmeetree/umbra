@@ -1,8 +1,20 @@
 //! Network protocol message definitions for Spectra P2P communication.
 //!
 //! Defines the wire protocol messages exchanged between nodes.
-//! Transport: Production would use libp2p with Noise protocol (post-quantum
-//! upgrade path via Kyber handshake). This module defines the message types.
+//!
+//! # Transport security (H2, H3)
+//!
+//! The current transport is plaintext TCP. Production deployment MUST add:
+//! - **Authentication**: Verify peer identity via Dilithium5 signature
+//!   challenge-response during the Hello handshake.
+//! - **Encryption**: Use a Kyber1024 KEM handshake to establish a shared
+//!   secret, then encrypt the TCP stream (e.g., Noise_KK pattern with
+//!   post-quantum KEM, or a simple BLAKE3-based stream cipher similar to
+//!   the transaction encryption module).
+//!
+//! Until transport encryption is implemented, the protocol relies on
+//! application-layer authentication (signed votes, signed vertices) for
+//! integrity of consensus-critical messages.
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};

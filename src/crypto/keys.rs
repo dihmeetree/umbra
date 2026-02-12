@@ -21,8 +21,10 @@ use crate::Hash;
 // Expected key sizes for validation
 const DILITHIUM5_PK_BYTES: usize = 2592;
 const _DILITHIUM5_SK_BYTES: usize = 4896;
+const DILITHIUM5_SIG_BYTES: usize = 4595;
 const KYBER1024_PK_BYTES: usize = 1568;
 const _KYBER1024_SK_BYTES: usize = 3168;
+const KYBER1024_CT_BYTES: usize = 1568;
 
 // ── Signing (Dilithium5) ──
 
@@ -31,14 +33,46 @@ const _KYBER1024_SK_BYTES: usize = 3168;
 pub struct SigningPublicKey(pub Vec<u8>);
 
 /// A CRYSTALS-Dilithium5 signing secret key.
+///
+/// The inner bytes are `pub(crate)` to prevent external crates from
+/// reading or constructing secret keys directly. Use [`SigningKeypair::generate`]
+/// or [`SigningKeypair::from_bytes`] instead.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SigningSecretKey(pub Vec<u8>);
+pub struct SigningSecretKey(pub(crate) Vec<u8>);
 
-/// A Dilithium5 detached signature.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A Dilithium5 detached signature (4595 bytes).
+///
+/// L6: Size is validated during deserialization to prevent oversized payloads.
+#[derive(Clone, Debug)]
 pub struct Signature(pub Vec<u8>);
 
+impl Serialize for Signature {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let bytes: Vec<u8> = serde::Deserialize::deserialize(d)?;
+        // Allow empty signatures (genesis vertex) and valid Dilithium5 signatures.
+        // Reject anything larger than expected to prevent memory exhaustion.
+        if !bytes.is_empty() && bytes.len() != DILITHIUM5_SIG_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "invalid Dilithium5 signature: expected {} bytes, got {}",
+                DILITHIUM5_SIG_BYTES,
+                bytes.len()
+            )));
+        }
+        Ok(Signature(bytes))
+    }
+}
+
 /// A Dilithium5 signing keypair.
+///
+/// Implements [`Clone`] because keypairs need to be shared between the
+/// node's proposal and voting subsystems. The secret key is zeroized on
+/// drop via [`ZeroizeOnDrop`] on [`SigningSecretKey`].
 #[derive(Clone)]
 pub struct SigningKeypair {
     pub public: SigningPublicKey,
@@ -128,18 +162,47 @@ impl<'de> Deserialize<'de> for SigningPublicKey {
 pub struct KemPublicKey(pub Vec<u8>);
 
 /// A CRYSTALS-Kyber1024 encapsulation secret key.
+///
+/// The inner bytes are `pub(crate)` to prevent external crates from
+/// reading or constructing secret keys directly. Use [`KemKeypair::generate`]
+/// or [`KemKeypair::from_bytes`] instead.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct KemSecretKey(pub Vec<u8>);
+pub struct KemSecretKey(pub(crate) Vec<u8>);
 
 /// A Kyber1024 ciphertext (encapsulated shared secret).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// L5: Size is validated during deserialization to prevent oversized payloads.
+#[derive(Clone, Debug)]
 pub struct KemCiphertext(pub Vec<u8>);
+
+impl Serialize for KemCiphertext {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for KemCiphertext {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let bytes: Vec<u8> = serde::Deserialize::deserialize(d)?;
+        if bytes.len() != KYBER1024_CT_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "invalid Kyber1024 ciphertext: expected {} bytes, got {}",
+                KYBER1024_CT_BYTES,
+                bytes.len()
+            )));
+        }
+        Ok(KemCiphertext(bytes))
+    }
+}
 
 /// The shared secret produced by Kyber KEM (32 bytes).
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SharedSecret(pub [u8; 32]);
 
 /// A Kyber1024 KEM keypair.
+///
+/// Implements [`Clone`] for the same reasons as [`SigningKeypair`]; the
+/// secret key is zeroized on drop.
 #[derive(Clone)]
 pub struct KemKeypair {
     pub public: KemPublicKey,

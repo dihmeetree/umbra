@@ -151,6 +151,14 @@ impl TransactionBuilder {
     pub fn build(self) -> Result<Transaction, TxBuildError> {
         let proof_opts = self.proof_options.unwrap_or_else(default_proof_options);
 
+        // M13: Enforce MAX_TX_IO limits early to give clear errors
+        if self.inputs.len() > crate::constants::MAX_TX_IO {
+            return Err(TxBuildError::TooManyInputs);
+        }
+        if self.outputs.len() > crate::constants::MAX_TX_IO {
+            return Err(TxBuildError::TooManyOutputs);
+        }
+
         // Validate balance with checked arithmetic
         let input_sum: u64 = self
             .inputs
@@ -376,6 +384,10 @@ pub enum TxBuildError {
     BalanceProofFailed(String),
     #[error("spend proof generation failed: {0}")]
     SpendProofFailed(String),
+    #[error("too many inputs (max {})", crate::constants::MAX_TX_IO)]
+    TooManyInputs,
+    #[error("too many outputs (max {})", crate::constants::MAX_TX_IO)]
+    TooManyOutputs,
 }
 
 #[cfg(test)]

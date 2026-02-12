@@ -109,6 +109,12 @@ pub fn load_or_generate_keypair(data_dir: &Path) -> Result<SigningKeypair, std::
         bytes.extend_from_slice(&keypair.public.0);
         bytes.extend_from_slice(&keypair.secret.0);
         std::fs::write(&key_path, &bytes)?;
+        // H4: Restrict key file permissions to owner-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+        }
         tracing::info!(
             "Generated validator key: {}",
             hex::encode(&keypair.public.fingerprint()[..8])
@@ -148,6 +154,9 @@ impl Node {
             let vrf = VrfOutput::evaluate(&config.keypair, &vrf_input);
 
             let total_validators = ledger.state.total_validators();
+            // H1: Set epoch context for VRF verification on incoming votes
+            bft.set_epoch_context(epoch_seed, total_validators);
+
             if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
                 tracing::info!("Selected for epoch 0 committee via VRF");
                 our_vrf_output = Some(vrf.clone());
@@ -265,6 +274,26 @@ impl Node {
             Message::NewVertex(vertex) => {
                 let mut state = self.state.write().await;
 
+                // C3: Validate VRF proof before accepting the vertex.
+                // Genesis vertex (round=0) has no VRF proof.
+                if vertex.round > 0 {
+                    let epoch_seed = state.ledger.state.epoch_seed().clone();
+                    let total_validators = state.ledger.state.total_validators();
+                    if let Err(e) = vertex.validate_vrf(&epoch_seed, total_validators) {
+                        tracing::debug!("Rejected vertex (invalid VRF): {}", e);
+                        return;
+                    }
+                }
+
+                // C2: Validate all transactions structurally before inserting.
+                let current_epoch = state.ledger.state.epoch();
+                for tx in &vertex.transactions {
+                    if let Err(e) = tx.validate_structure(current_epoch) {
+                        tracing::debug!("Rejected vertex (invalid tx): {}", e);
+                        return;
+                    }
+                }
+
                 // Insert into DAG (but don't finalize yet — wait for BFT)
                 match state.ledger.insert_vertex(*vertex.clone()) {
                     Ok(_) => {
@@ -305,6 +334,7 @@ impl Node {
             }
             Message::BftVote(vote) => {
                 let mut state = self.state.write().await;
+                // H5: Only re-broadcast if the vote was accepted
                 if let Some(cert) = state.bft.receive_vote(vote.clone()) {
                     // Quorum reached — finalize
                     self.finalize_vertex_inner(&mut state, &cert.vertex_id)
@@ -313,11 +343,22 @@ impl Node {
                         .p2p
                         .broadcast(Message::BftCertificate(cert), None)
                         .await;
+                    // Broadcast the vote that completed the certificate
+                    let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
+                } else if state.bft.is_vote_accepted(&vote) {
+                    // Vote was accepted (not rejected) — forward to peers
+                    let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                 }
-                let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
             }
             Message::BftCertificate(cert) => {
                 let mut state = self.state.write().await;
+                // C1: Verify certificate before finalizing
+                let committee = state.bft.committee.clone();
+                let chain_id = state.bft.chain_id;
+                if !cert.verify(&committee, &chain_id) {
+                    tracing::debug!("Rejected invalid BFT certificate");
+                    return;
+                }
                 self.finalize_vertex_inner(&mut state, &cert.vertex_id)
                     .await;
                 let _ = self
@@ -344,7 +385,9 @@ impl Node {
                 }
             }
             Message::PeersResponse(peers) => {
-                for peer_info in peers {
+                // L12: Limit how many peers we connect to from a single response
+                // to prevent amplification attacks.
+                for peer_info in peers.iter().take(crate::constants::MAX_PEERS) {
                     if let Ok(addr) = peer_info.address.parse::<SocketAddr>() {
                         let _ = self.p2p.connect(addr).await;
                     }
@@ -425,17 +468,50 @@ impl Node {
 
                 // Check for equivocation evidence and slash
                 for evidence in state.bft.equivocations() {
-                    let _ = state.ledger.state.slash_validator(&evidence.voter_id);
-                    tracing::warn!(
-                        "Slashed validator {} for equivocation in round {}",
-                        hex::encode(&evidence.voter_id[..8]),
-                        evidence.round
-                    );
+                    if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
+                        tracing::warn!(
+                            "Slashed validator {} for equivocation in round {}",
+                            hex::encode(&evidence.voter_id[..8]),
+                            evidence.round
+                        );
+                    }
                 }
+                // M5: Clear processed evidence to avoid re-processing
+                state.bft.clear_equivocations();
 
                 // Advance BFT round
                 state.bft.advance_round();
                 state.ledger.dag.advance_round();
+
+                // M1: Check for epoch transition
+                let dag_epoch = state.ledger.dag.epoch();
+                if dag_epoch > state.bft.epoch {
+                    let (fees, new_seed) = state.ledger.state.advance_epoch();
+                    tracing::info!(
+                        "Epoch advanced to {} (fees collected: {})",
+                        new_seed.epoch,
+                        fees
+                    );
+
+                    // Re-evaluate our VRF for the new epoch
+                    let total_validators = state.ledger.state.total_validators();
+                    let vrf_input = new_seed.vrf_input(&self.our_validator_id);
+                    let vrf = VrfOutput::evaluate(&self.keypair, &vrf_input);
+
+                    // Update BFT for the new epoch
+                    state.bft.epoch = dag_epoch;
+                    state.bft.set_epoch_context(new_seed, total_validators);
+
+                    if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
+                        tracing::info!("Selected for epoch {} committee via VRF", dag_epoch);
+                        state.bft.set_our_vrf_proof(vrf);
+                        // Note: self.our_vrf_output is not updated here because
+                        // it's behind &self. The next proposal interval will
+                        // pick up the VRF from bft state.
+                    } else {
+                        tracing::info!("Not selected for epoch {} committee", dag_epoch);
+                    }
+                }
 
                 tracing::info!("Finalized vertex {}", hex::encode(&vertex_id.0[..8]));
             }

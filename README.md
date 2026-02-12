@@ -94,7 +94,7 @@ spectra/
     main.rs                 Node binary with clap CLI (--genesis-validator, --demo)
 ```
 
-**~10,700 lines of Rust** across 32 source files with **115 tests**.
+**~11,100 lines of Rust** across 32 source files with **115 tests**.
 
 ## Building
 
@@ -117,7 +117,7 @@ cargo run --release -- [OPTIONS]
 | `--listen-addr` | `0.0.0.0:9732` | P2P listen address |
 | `--peers` | *(none)* | Comma-separated bootstrap peer addresses |
 | `--data-dir` | `./spectra-data` | Data directory for persistent storage |
-| `--rpc-port` | `9733` | JSON RPC listen port |
+| `--rpc-addr` | `127.0.0.1:9733` | JSON RPC listen address (localhost by default for safety) |
 | `--demo` | *(off)* | Run the protocol demo walkthrough instead |
 | `--genesis-validator` | *(off)* | Register as a genesis validator (for bootstrapping a new network) |
 
@@ -130,8 +130,8 @@ cargo run --release
 # Start as a genesis validator (bootstraps a new network)
 cargo run --release -- --genesis-validator
 
-# Start with custom ports and a bootstrap peer
-cargo run --release -- --listen-addr 127.0.0.1:9000 --rpc-port 9001 --peers 192.168.1.10:9732
+# Start with custom addresses and a bootstrap peer
+cargo run --release -- --listen-addr 127.0.0.1:9000 --rpc-addr 127.0.0.1:9001 --peers 192.168.1.10:9732
 
 # Run the protocol demo
 cargo run --release -- --demo
@@ -139,7 +139,7 @@ cargo run --release -- --demo
 
 ## RPC API
 
-The node exposes a JSON HTTP API on the RPC port (default 9733).
+The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for safety).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -372,6 +372,7 @@ Proves in zero knowledge:
 | `clap` | CLI argument parsing |
 | `serde_json` | JSON serialization for RPC |
 | `tracing` + `tracing-subscriber` | Structured logging |
+| `subtle` | Constant-time comparison for cryptographic checks |
 
 ## Security Model
 
@@ -410,7 +411,7 @@ All transaction validity is verified via zk-STARKs:
 - **Canonical Merkle depth** — commitment tree is always padded to depth 20 with precomputed zero-subtree hashes, ensuring consistent STARK circuit verification regardless of tree size
 - **Range proofs** — all committed values are proven to be in [0, 2^59) via bit decomposition within the balance AIR; with MAX_IO = 16 per side, the maximum sum is 16 * 2^59 = 2^63 < p (Goldilocks), preventing inflation via field-arithmetic wraparound
 - **Network message limits** — serialized messages are rejected above `MAX_NETWORK_MESSAGE_BYTES`; bincode deserialization uses size-limited options to prevent allocation-based DoS from crafted internal length fields
-- **Key size validation** — public keys are validated on deserialization, preventing malformed key injection
+- **Cryptographic type size validation** — public keys, signatures, and KEM ciphertexts are validated on deserialization, rejecting malformed or oversized payloads
 - **Deserialization bounds** — public input deserialization rejects unreasonable counts (> 256 inputs/outputs) to prevent allocation DoS
 - **Overflow protection** — all arithmetic uses `checked_add` to prevent overflow; fee accumulation overflow is an explicit error
 - **Transaction I/O limits** — inputs and outputs are capped at `MAX_TX_IO` (16), ensuring range proof sums stay within the Goldilocks field (16 * 2^59 < p) and preventing inflation via field-arithmetic wraparound
@@ -428,6 +429,11 @@ All transaction validity is verified via zk-STARKs:
 - **Deregistration auth** — validator deregistration requires a signature over `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`, preventing unauthorized bond withdrawal
 - **Two-phase vertex finalization** — vertices are inserted into the DAG (unfinalized) first, then finalized only after BFT quorum certification, preventing premature state application
 - **Persistent validator keypair** — the validator's Dilithium5 keypair is persisted to disk with raw byte serialization and validated on load, preventing key loss across restarts
+- **Inbound connection timeout** — P2P inbound handshakes are wrapped in a configurable timeout (`PEER_CONNECT_TIMEOUT_MS`), preventing slowloris-style connection exhaustion
+- **Merkle tree capacity enforcement** — the incremental Merkle tree rejects appends beyond `2^MERKLE_DEPTH` leaves, preventing silent overflow
+- **Bounded DAG traversal** — ancestor queries are depth-bounded (default `2 * EPOCH_LENGTH`), preventing unbounded memory usage from deep graph exploration
+- **Secret key encapsulation** — `SigningSecretKey` and `KemSecretKey` inner bytes are `pub(crate)`, preventing external crates from directly reading secret key material
+- **RPC localhost binding** — the RPC server binds to `127.0.0.1` by default, requiring explicit opt-in (`--rpc-addr 0.0.0.0:9733`) for network exposure
 
 ## Production Roadmap
 

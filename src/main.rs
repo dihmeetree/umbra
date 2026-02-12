@@ -27,9 +27,9 @@ struct Cli {
     #[arg(long, default_value = "./spectra-data")]
     data_dir: PathBuf,
 
-    /// RPC listen port.
-    #[arg(long, default_value = "9733")]
-    rpc_port: u16,
+    /// RPC listen address (defaults to localhost for safety; use 0.0.0.0 for public).
+    #[arg(long, default_value = "127.0.0.1:9733")]
+    rpc_addr: SocketAddr,
 
     /// Run the demo walkthrough instead of starting a node.
     #[arg(long)]
@@ -53,23 +53,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting Spectra node...");
     tracing::info!("P2P: {}", cli.listen_addr);
-    tracing::info!("RPC: 0.0.0.0:{}", cli.rpc_port);
+    tracing::info!("RPC: {}", cli.rpc_addr);
     tracing::info!("Data: {}", cli.data_dir.display());
 
     // Load persistent keypair (or generate on first run)
     let keypair = spectra::node::load_or_generate_keypair(&cli.data_dir)?;
 
-    let rpc_addr: SocketAddr = ([0, 0, 0, 0], cli.rpc_port).into();
-
     let config = spectra::node::NodeConfig {
         listen_addr: cli.listen_addr,
         bootstrap_peers: cli.peers,
         data_dir: cli.data_dir,
-        rpc_addr,
+        rpc_addr: cli.rpc_addr,
         keypair,
         genesis_validator: cli.genesis_validator,
     };
 
+    let rpc_addr = config.rpc_addr;
     let mut node = spectra::node::Node::new(config).await?;
 
     // Start RPC server

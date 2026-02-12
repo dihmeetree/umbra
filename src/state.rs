@@ -24,6 +24,21 @@ use crate::transaction::{deregister_sign_data, Transaction, TxType};
 use crate::Hash;
 
 /// The full blockchain state.
+///
+/// # State growth (M8)
+///
+/// The commitment tree and nullifier set grow monotonically. At depth 20 the
+/// commitment tree supports up to 2^20 ≈ 1M outputs. After that, a tree
+/// rotation or depth increase would be required. The nullifier `HashSet`
+/// grows linearly with spends; production deployments should consider a
+/// disk-backed set (e.g., via sled) and periodic compaction.
+///
+/// # Persistence (M4)
+///
+/// State restoration from storage is not yet implemented. On startup the
+/// chain state is rebuilt from genesis. A production node should persist
+/// `ChainStateMeta` and the commitment tree levels to storage, and restore
+/// them on startup to avoid full replay.
 pub struct ChainState {
     /// Chain identifier for replay protection
     chain_id: Hash,
@@ -79,19 +94,28 @@ impl ChainState {
     }
 
     /// Apply a finalized vertex to the state.
+    ///
+    /// Uses two-pass validation: first validates all transactions without
+    /// mutating state, then applies them. This prevents partial state
+    /// corruption if a later transaction in the vertex is invalid.
     pub fn apply_vertex(&mut self, vertex: &Vertex) -> Result<(), StateError> {
+        // H9: Pass 1 — validate all transactions without applying
         for tx in &vertex.transactions {
-            self.apply_transaction(tx)?;
+            self.validate_transaction(tx)?;
+        }
+        // Pass 2 — apply all transactions (cannot fail after validation)
+        for tx in &vertex.transactions {
+            self.apply_transaction_unchecked(tx);
         }
         self.last_finalized = Some(vertex.id);
         Ok(())
     }
 
-    /// Apply a transaction to the state.
+    /// Validate a transaction against the current state (without applying).
     ///
-    /// Performs full validation (structure, balance proof, spend proofs, expiry)
-    /// before applying state changes.
-    pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), StateError> {
+    /// Performs full validation (structure, balance proof, spend proofs, expiry,
+    /// state checks) but does NOT mutate state.
+    pub fn validate_transaction(&self, tx: &Transaction) -> Result<(), StateError> {
         // Verify chain_id matches (defense-in-depth; also bound via balance proof)
         if !crate::constant_time_eq(&tx.chain_id, &self.chain_id) {
             return Err(StateError::WrongChainId);
@@ -109,8 +133,6 @@ impl ChainState {
         }
 
         // Check spend proof Merkle roots against current canonical commitment root.
-        // Spend proofs were already cryptographically verified by validate_structure();
-        // here we only need to deserialize the public inputs to check the Merkle root.
         let root_felts = hash_to_felts(&self.commitment_tree.root());
         for input in &tx.inputs {
             let spend_pub = SpendPublicInputs::from_bytes(&input.spend_proof.public_inputs_bytes)
@@ -121,8 +143,71 @@ impl ChainState {
             }
         }
 
-        // All checks passed — apply state changes
+        // Validate transaction-type-specific state constraints
+        match &tx.tx_type {
+            TxType::Transfer => {}
+            TxType::ValidatorRegister { signing_key } => {
+                let vid = signing_key.fingerprint();
+                if self.validators.contains_key(&vid) {
+                    return Err(StateError::ValidatorAlreadyRegistered);
+                }
+                if self.slashed_validators.contains(&vid) {
+                    return Err(StateError::ValidatorSlashed);
+                }
+            }
+            TxType::ValidatorDeregister {
+                validator_id,
+                auth_signature,
+                bond_return_output,
+                bond_blinding,
+            } => {
+                let validator = self
+                    .validators
+                    .get(validator_id)
+                    .ok_or(StateError::ValidatorNotFound)?;
+                if !validator.active {
+                    return Err(StateError::ValidatorNotActive);
+                }
+                if self.slashed_validators.contains(validator_id) {
+                    return Err(StateError::ValidatorSlashed);
+                }
+                let tx_content_hash = tx.tx_content_hash();
+                let sign_data =
+                    deregister_sign_data(&self.chain_id, validator_id, &tx_content_hash);
+                if !validator.public_key.verify(&sign_data, auth_signature) {
+                    return Err(StateError::InvalidDeregisterAuth);
+                }
+                // C4: Verify that the bond return commitment opens to exactly VALIDATOR_BOND
+                let bond = self
+                    .validator_bonds
+                    .get(validator_id)
+                    .copied()
+                    .ok_or(StateError::InsufficientBond)?;
+                let blinding =
+                    crate::crypto::commitment::BlindingFactor::from_bytes(*bond_blinding);
+                if !bond_return_output.commitment.verify(bond, &blinding) {
+                    return Err(StateError::InvalidBondReturn);
+                }
+            }
+        }
 
+        Ok(())
+    }
+
+    /// Apply a transaction to the state (full validate + apply).
+    ///
+    /// Performs full validation then applies state changes.
+    /// For batch application (vertices), prefer `validate_transaction` + `apply_transaction_unchecked`.
+    pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), StateError> {
+        self.validate_transaction(tx)?;
+        self.apply_transaction_unchecked(tx);
+        Ok(())
+    }
+
+    /// Apply a pre-validated transaction to the state (no validation).
+    ///
+    /// SAFETY: The caller MUST have called `validate_transaction` first.
+    fn apply_transaction_unchecked(&mut self, tx: &Transaction) {
         // Record nullifiers (with incremental hash update)
         for input in &tx.inputs {
             self.record_nullifier(input.nullifier);
@@ -137,64 +222,26 @@ impl ChainState {
         match &tx.tx_type {
             TxType::Transfer => {
                 // Standard fee collection
-                self.epoch_fees = self
-                    .epoch_fees
-                    .checked_add(tx.fee)
-                    .ok_or(StateError::FeeOverflow)?;
+                self.epoch_fees = self.epoch_fees.saturating_add(tx.fee);
             }
             TxType::ValidatorRegister { signing_key } => {
                 let validator = Validator::new(signing_key.clone());
                 let vid = validator.id;
 
-                // Check not already registered
-                if self.validators.contains_key(&vid) {
-                    return Err(StateError::ValidatorAlreadyRegistered);
-                }
-                // Check not slashed
-                if self.slashed_validators.contains(&vid) {
-                    return Err(StateError::ValidatorSlashed);
-                }
-
                 // Escrow bond, remainder goes to epoch fees
                 let bond = crate::constants::VALIDATOR_BOND;
-                let actual_fee = tx
-                    .fee
-                    .checked_sub(bond)
-                    .ok_or(StateError::InsufficientBond)?;
-                self.epoch_fees = self
-                    .epoch_fees
-                    .checked_add(actual_fee)
-                    .ok_or(StateError::FeeOverflow)?;
+                let actual_fee = tx.fee.saturating_sub(bond);
+                self.epoch_fees = self.epoch_fees.saturating_add(actual_fee);
 
                 self.validator_bonds.insert(vid, bond);
                 self.register_validator(validator);
             }
             TxType::ValidatorDeregister {
                 validator_id,
-                auth_signature,
                 bond_return_output,
+                ..
             } => {
-                // Verify validator exists and is active
-                let validator = self
-                    .validators
-                    .get(validator_id)
-                    .ok_or(StateError::ValidatorNotFound)?;
-                if !validator.active {
-                    return Err(StateError::ValidatorNotActive);
-                }
-                if self.slashed_validators.contains(validator_id) {
-                    return Err(StateError::ValidatorSlashed);
-                }
-
-                // Verify auth signature
-                let tx_content_hash = tx.tx_content_hash();
-                let sign_data =
-                    deregister_sign_data(&self.chain_id, validator_id, &tx_content_hash);
-                if !validator.public_key.verify(&sign_data, auth_signature) {
-                    return Err(StateError::InvalidDeregisterAuth);
-                }
-
-                // Return bond as output commitment
+                // Return bond as output commitment (already verified in validate_transaction)
                 self.add_commitment(bond_return_output.commitment);
 
                 // Mark inactive and remove bond
@@ -204,14 +251,9 @@ impl ChainState {
                 self.validator_bonds.remove(validator_id);
 
                 // Collect fee
-                self.epoch_fees = self
-                    .epoch_fees
-                    .checked_add(tx.fee)
-                    .ok_or(StateError::FeeOverflow)?;
+                self.epoch_fees = self.epoch_fees.saturating_add(tx.fee);
             }
         }
-
-        Ok(())
     }
 
     /// Record a nullifier as spent, updating the incremental hash accumulator.
@@ -254,8 +296,8 @@ impl ChainState {
         self.nullifiers.contains(nullifier)
     }
 
-    /// Register a validator.
-    pub fn register_validator(&mut self, validator: Validator) {
+    /// Register a validator (internal — use apply_transaction for public API).
+    fn register_validator(&mut self, validator: Validator) {
         self.validators.insert(validator.id, validator);
     }
 
@@ -294,7 +336,8 @@ impl ChainState {
 
     /// Count of active validators.
     pub fn total_validators(&self) -> usize {
-        self.active_validators().len()
+        // L7: Count directly instead of allocating a Vec
+        self.validators.values().filter(|v| v.active).count()
     }
 
     /// Slash a validator: forfeit bond and mark as permanently slashed.
@@ -350,12 +393,17 @@ impl ChainState {
     /// Compute the state root (hash of all state components).
     pub fn state_root(&self) -> Hash {
         let root = self.commitment_tree.root();
+        // M14: Include validator registry in state root
+        let validator_count = self.total_validators() as u64;
+        let total_bonds: u64 = self.validator_bonds.values().sum();
         crate::hash_concat(&[
             b"spectra.state_root",
             &root,
             &self.nullifier_hash,
             &self.epoch.to_le_bytes(),
             &self.epoch_fees.to_le_bytes(),
+            &validator_count.to_le_bytes(),
+            &total_bonds.to_le_bytes(),
         ])
     }
 
@@ -468,6 +516,8 @@ pub enum StateError {
     InsufficientBond,
     #[error("invalid deregistration auth signature")]
     InvalidDeregisterAuth,
+    #[error("bond return commitment does not open to the escrowed bond amount")]
+    InvalidBondReturn,
     #[error("fee accumulation overflow")]
     FeeOverflow,
 }

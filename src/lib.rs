@@ -92,6 +92,7 @@ pub type Hash = [u8; 32];
 
 /// Compute a domain-separated BLAKE3 hash.
 ///
+/// L1: Takes `&[u8]` rather than `&str` for ergonomics with `b""` literals.
 /// The domain MUST be valid UTF-8 (all Spectra domains use ASCII).
 /// Panics at runtime if domain is not valid UTF-8 — this is a programming error.
 pub fn hash_domain(domain: &[u8], data: &[u8]) -> Hash {
@@ -117,14 +118,14 @@ pub fn hash_concat(parts: &[&[u8]]) -> Hash {
 /// Constant-time comparison of two byte slices.
 ///
 /// Returns true only if the slices have equal length and identical contents.
-/// Runs in time proportional to the length, independent of where bytes differ.
+/// Uses the `subtle` crate's audited constant-time operations.
+///
+/// Note: The length comparison is NOT constant-time (leaks whether lengths match).
+/// This is acceptable because all Spectra uses compare fixed-size 32-byte hashes.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
     if a.len() != b.len() {
         return false;
     }
-    let mut acc = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
+    a.ct_eq(b).into()
 }

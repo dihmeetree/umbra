@@ -170,6 +170,10 @@ pub struct BftState {
     round_votes: HashMap<(Hash, u64), VertexId>,
     /// Detected equivocation evidence (slashable misbehaviour)
     equivocations: Vec<EquivocationEvidence>,
+    /// Epoch seed for VRF verification of votes (H1).
+    epoch_seed: Option<EpochSeed>,
+    /// Total validators for VRF is_selected check.
+    total_validators: usize,
 }
 
 impl BftState {
@@ -187,6 +191,8 @@ impl BftState {
             certificates: HashMap::new(),
             round_votes: HashMap::new(),
             equivocations: Vec::new(),
+            epoch_seed: None,
+            total_validators: 0,
         }
     }
 
@@ -199,6 +205,12 @@ impl BftState {
     /// Set our VRF proof for this epoch.
     pub fn set_our_vrf_proof(&mut self, vrf: VrfOutput) {
         self.our_vrf_proof = Some(vrf);
+    }
+
+    /// Set the epoch seed and total validators for VRF verification (H1).
+    pub fn set_epoch_context(&mut self, epoch_seed: EpochSeed, total_validators: usize) {
+        self.epoch_seed = Some(epoch_seed);
+        self.total_validators = total_validators;
     }
 
     /// Get our VRF proof for this epoch.
@@ -271,6 +283,21 @@ impl BftState {
         // Verify the voter is on the committee
         let voter = self.committee.iter().find(|v| v.id == vote.voter_id)?;
 
+        // H1: Verify VRF proof on the vote to confirm the voter was genuinely selected.
+        // This prevents accepting votes from validators who aren't actually on the
+        // committee (e.g., if local committee list is stale or manipulated).
+        if let Some(vrf) = &vote.vrf_proof {
+            if let Some(seed) = &self.epoch_seed {
+                let vrf_input = seed.vrf_input(&vote.voter_id);
+                if !vrf.verify_locally(&voter.public_key, &vrf_input) {
+                    return None;
+                }
+                if !vrf.is_selected(crate::constants::COMMITTEE_SIZE, self.total_validators) {
+                    return None;
+                }
+            }
+        }
+
         // Verify the signature (bound to chain_id + epoch + round + vertex + vote_type)
         let msg = vote_sign_data(
             &vote.vertex_id,
@@ -290,13 +317,20 @@ impl BftState {
         let round_key = (vote.voter_id, vote.round);
         if let Some(&prev_vertex) = self.round_votes.get(&round_key) {
             if prev_vertex != vote.vertex_id {
-                self.equivocations.push(EquivocationEvidence {
-                    voter_id: vote.voter_id,
-                    epoch: vote.epoch,
-                    round: vote.round,
-                    first_vertex: prev_vertex,
-                    second_vertex: vote.vertex_id,
-                });
+                // H10: Only record one evidence per validator (one is enough to slash)
+                let already_recorded = self
+                    .equivocations
+                    .iter()
+                    .any(|e| e.voter_id == vote.voter_id);
+                if !already_recorded {
+                    self.equivocations.push(EquivocationEvidence {
+                        voter_id: vote.voter_id,
+                        epoch: vote.epoch,
+                        round: vote.round,
+                        first_vertex: prev_vertex,
+                        second_vertex: vote.vertex_id,
+                    });
+                }
                 return None; // Reject equivocating vote
             }
         } else {
@@ -348,9 +382,27 @@ impl BftState {
         Some(cert)
     }
 
-    /// Advance to the next round.
+    /// Check if a vote was accepted (exists in the vote set).
+    /// Used to decide whether to re-broadcast a vote.
+    pub fn is_vote_accepted(&self, vote: &Vote) -> bool {
+        self.votes
+            .get(&vote.vertex_id)
+            .map(|votes| votes.iter().any(|v| v.voter_id == vote.voter_id))
+            .unwrap_or(false)
+    }
+
+    /// Advance to the next round, clearing stale vote data from previous rounds.
     pub fn advance_round(&mut self) {
+        // M10: Clear votes and round_votes from the completed round to prevent
+        // unbounded memory growth.
+        self.votes.clear();
+        self.round_votes.clear();
         self.round += 1;
+    }
+
+    /// Clear processed equivocation evidence (call after slashing).
+    pub fn clear_equivocations(&mut self) {
+        self.equivocations.clear();
     }
 
     /// Get a certificate for a vertex.
