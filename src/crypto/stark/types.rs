@@ -265,9 +265,12 @@ impl SpendPublicInputs {
         }
         let mut pos = 0;
         let read_felt = |pos: &mut usize| -> Felt {
-            let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            // Safety: length pre-checked >= 104 bytes, we read exactly 13 × 8 = 104
+            let bytes: [u8; 8] = data[*pos..*pos + 8]
+                .try_into()
+                .expect("pre-checked 104-byte minimum");
             *pos += 8;
-            Felt::new(val)
+            Felt::new(u64::from_le_bytes(bytes))
         };
         let merkle_root = [
             read_felt(&mut pos),

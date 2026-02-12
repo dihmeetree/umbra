@@ -104,7 +104,9 @@ pub fn load_or_generate_keypair(
                 "key file too short",
             ));
         }
-        let pk_len = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let pk_len = u32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "key file header corrupted")
+        })?) as usize;
         if bytes.len() < 4 + pk_len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -121,7 +123,12 @@ pub fn load_or_generate_keypair(
             let kem_pk_len = u32::from_le_bytes(
                 bytes[signing_sk_end..signing_sk_end + 4]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "key file KEM header corrupted",
+                        )
+                    })?,
             ) as usize;
             let kem_pk_start = signing_sk_end + 4;
             if bytes.len() < kem_pk_start + kem_pk_len {

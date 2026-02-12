@@ -411,14 +411,12 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
         }
         TxType::ValidatorDeregister {
             validator_id,
-            auth_signature,
+            auth_signature: _, // C1: excluded — auth_signature signs over tx_content_hash
             bond_return_output,
             bond_blinding,
         } => {
             hasher.update(&[2u8]);
             hasher.update(validator_id);
-            hasher.update(&(auth_signature.0.len() as u32).to_le_bytes());
-            hasher.update(&auth_signature.0);
             hasher.update(&bond_return_output.commitment.0);
             hasher.update(&bond_return_output.stealth_address.one_time_key);
             hasher.update(bond_blinding);
