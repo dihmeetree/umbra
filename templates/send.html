@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Send - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Send Transaction</h1>
+
+{% if let Some(msg) = flash_error %}
+<div class="flash error">{{ msg }}</div>
+{% endif %}
+
+<div class="card">
+  <p style="margin-bottom: 0.5rem; color: var(--text-dim); font-size: 0.85rem;">
+    Balance: <strong style="color: var(--success);">{{ balance }} units</strong>
+  </p>
+  <form method="post" action="/send">
+    <div>
+      <label for="recipient">Recipient address (hex)</label>
+      <textarea id="recipient" name="recipient" rows="3" required placeholder="Paste the recipient's hex-encoded address..."></textarea>
+    </div>
+    <div>
+      <label for="amount">Amount (units)</label>
+      <input type="number" id="amount" name="amount" min="1" required>
+    </div>
+    <div>
+      <label for="fee">Fee (units, min 1)</label>
+      <input type="number" id="fee" name="fee" min="1" value="1" required>
+    </div>
+    <div>
+      <label for="message">Message (optional, encrypted for recipient)</label>
+      <textarea id="message" name="message" rows="2" placeholder="Optional encrypted message..."></textarea>
+    </div>
+    <button type="submit">Send</button>
+  </form>
+</div>
+{% endblock %}

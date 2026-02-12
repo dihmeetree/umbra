@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Transaction Sent - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Transaction Submitted</h1>
+
+<div class="flash success">Transaction submitted successfully.</div>
+
+<div class="card">
+  <div class="stat">
+    <span class="label">TX ID</span>
+    <span class="value mono truncate">{{ tx_id }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">Amount</span>
+    <span class="value">{{ amount }} units</span>
+  </div>
+  <div class="stat">
+    <span class="label">Fee</span>
+    <span class="value">{{ fee }} units</span>
+  </div>
+  <div class="stat">
+    <span class="label">Remaining balance</span>
+    <span class="value balance">{{ remaining_balance }} units</span>
+  </div>
+</div>
+
+<div class="actions">
+  <a href="/" class="btn">Back to Dashboard</a>
+  <a href="/send" class="btn btn-secondary">Send Another</a>
+</div>
+{% endblock %}

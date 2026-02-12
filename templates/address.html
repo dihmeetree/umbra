@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Address - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Wallet Address</h1>
+
+<div class="card">
+  <div class="stat">
+    <span class="label">Address ID</span>
+    <span class="value mono">{{ address_id }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">Signing key</span>
+    <span class="value">{{ signing_key_size }} bytes (Dilithium5)</span>
+  </div>
+  <div class="stat">
+    <span class="label">KEM key</span>
+    <span class="value">{{ kem_key_size }} bytes (Kyber1024)</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Share Address</h2>
+  <p style="margin-bottom: 0.75rem; color: var(--text-dim); font-size: 0.85rem;">
+    Share the hex string below with anyone who wants to send you funds.
+    They can paste it into the "Send" form as the recipient address.
+  </p>
+  <textarea readonly rows="4" style="width: 100%; font-size: 0.75rem;">{{ address_hex }}</textarea>
+  <div class="actions">
+    <a href="/address/export" class="btn btn-sm btn-secondary">Download .spectra-address</a>
+  </div>
+</div>
+{% endblock %}

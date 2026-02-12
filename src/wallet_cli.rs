@@ -18,20 +18,20 @@ const WALLET_FILENAME: &str = "wallet.dat";
 const ADDRESS_FILENAME: &str = "wallet.spectra-address";
 
 /// Simple RPC client for communicating with a Spectra node.
-struct RpcClient {
+pub struct RpcClient {
     base_url: String,
     client: reqwest::Client,
 }
 
 impl RpcClient {
-    fn new(rpc_addr: SocketAddr) -> Self {
+    pub fn new(rpc_addr: SocketAddr) -> Self {
         RpcClient {
             base_url: format!("http://{}", rpc_addr),
             client: reqwest::Client::new(),
         }
     }
 
-    async fn get_state(&self) -> Result<ChainStateInfo, WalletError> {
+    pub async fn get_state(&self) -> Result<ChainStateInfo, WalletError> {
         let url = format!("{}/state", self.base_url);
         let resp = self
             .client
@@ -44,7 +44,7 @@ impl RpcClient {
             .map_err(|e| WalletError::Rpc(format!("invalid response: {}", e)))
     }
 
-    async fn submit_tx(&self, tx_hex: &str) -> Result<SubmitTxResult, WalletError> {
+    pub async fn submit_tx(&self, tx_hex: &str) -> Result<SubmitTxResult, WalletError> {
         let url = format!("{}/tx", self.base_url);
         let body = serde_json::json!({ "tx_hex": tx_hex });
         let resp = self
@@ -85,16 +85,16 @@ impl RpcClient {
 }
 
 #[derive(Deserialize)]
-struct ChainStateInfo {
-    epoch: u64,
-    commitment_count: usize,
-    nullifier_count: usize,
-    state_root: String,
+pub struct ChainStateInfo {
+    pub epoch: u64,
+    pub commitment_count: usize,
+    pub nullifier_count: usize,
+    pub state_root: String,
 }
 
 #[derive(Deserialize)]
-struct SubmitTxResult {
-    tx_id: String,
+pub struct SubmitTxResult {
+    pub tx_id: String,
 }
 
 #[derive(Deserialize)]
@@ -111,11 +111,11 @@ struct FinalizedVertexEntry {
     vertex_hex: String,
 }
 
-fn wallet_path(data_dir: &Path) -> PathBuf {
+pub fn wallet_path(data_dir: &Path) -> PathBuf {
     data_dir.join(WALLET_FILENAME)
 }
 
-fn address_path(data_dir: &Path) -> PathBuf {
+pub fn address_path(data_dir: &Path) -> PathBuf {
     data_dir.join(ADDRESS_FILENAME)
 }
 
@@ -295,7 +295,7 @@ pub fn cmd_export(data_dir: &Path, file: &Path) -> Result<(), Box<dyn std::error
 /// Downloads finalized vertices in batches from the node's RPC and scans
 /// each transaction client-side. The node never learns which outputs belong
 /// to this wallet.
-async fn scan_chain(
+pub async fn scan_chain(
     wallet: &mut Wallet,
     last_seq: u64,
     rpc_addr: SocketAddr,

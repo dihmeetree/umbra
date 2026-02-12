@@ -57,6 +57,7 @@ pub struct ReceivedMessage {
 }
 
 /// The Spectra wallet.
+#[derive(Clone)]
 pub struct Wallet {
     /// Our identity keypair
     keypair: FullKeypair,

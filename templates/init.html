@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Create Wallet - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Create Wallet</h1>
+
+{% if let Some(msg) = flash_error %}
+<div class="flash error">{{ msg }}</div>
+{% endif %}
+
+<div class="card">
+  <p style="margin-bottom: 1rem; color: var(--text-dim);">
+    No wallet found. Create a new wallet to get started. This will generate
+    a post-quantum keypair (Dilithium5 + Kyber1024) and save it to disk.
+  </p>
+  <form method="post" action="/init">
+    <button type="submit">Create Wallet</button>
+  </form>
+</div>
+{% endblock %}

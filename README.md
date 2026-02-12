@@ -92,10 +92,20 @@ spectra/
     network.rs              P2P protocol message types and serialization
     wallet.rs               Key management, output scanning, tx building, persistence
     wallet_cli.rs           Wallet CLI commands (init, send, balance, scan, messages)
+    wallet_web.rs           Wallet web UI (askama templates, axum server)
     main.rs                 Node + wallet binary with clap subcommands
+  templates/
+    base.html               Base layout with navigation and CSS
+    dashboard.html          Balance, outputs, chain state, scan button
+    init.html               Wallet creation page
+    address.html            Address display and export
+    send.html               Transaction send form
+    send_result.html        Transaction submission result
+    messages.html           Encrypted message list
+    error.html              Error display
 ```
 
-**~13,900 lines of Rust** across 33 source files with **190 tests**.
+**~14,500 lines of Rust** across 34 source files with **190 tests**.
 
 ## Building
 
@@ -195,6 +205,26 @@ cargo run --release -- --data-dir ./my-wallet wallet balance
 ### Address Exchange
 
 Wallets exchange addresses via `.spectra-address` files (hex-encoded bincode-serialized `PublicAddress`). The `init` and `address` commands automatically export this file to the data directory. Use `export` to save it elsewhere for sharing.
+
+## Wallet Web UI
+
+A browser-based wallet interface with the same capabilities as the CLI. The web server runs as a separate process and communicates with the node via HTTP RPC. The node never learns which outputs belong to the wallet.
+
+```bash
+# Start the wallet web UI (default: http://127.0.0.1:9734)
+cargo run --release -- wallet web
+
+# Custom host/port and node RPC
+cargo run --release -- --rpc-addr 127.0.0.1:9733 wallet web --host 0.0.0.0 --port 8080
+```
+
+Open `http://127.0.0.1:9734` in your browser. If no wallet exists, you'll be prompted to create one.
+
+**Pages:**
+- **Dashboard** (`/`) — balance, output counts, chain state, scan button
+- **Send** (`/send`) — build and submit transactions with optional encrypted messages
+- **Messages** (`/messages`) — view received encrypted messages
+- **Address** (`/address`) — view and export wallet address for sharing
 
 ## RPC API
 
@@ -442,7 +472,8 @@ Proves in zero knowledge:
 | `serde_json` | JSON serialization for RPC |
 | `tracing` + `tracing-subscriber` | Structured logging |
 | `subtle` | Constant-time comparison for cryptographic checks |
-| `reqwest` | HTTP client (rustls-tls) for wallet RPC communication |
+| `reqwest` | HTTP client (rustls) for wallet RPC communication |
+| `askama` + `askama_web` | Type-safe compiled HTML templates for wallet web UI |
 
 ## Security Model
 

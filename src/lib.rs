@@ -20,6 +20,7 @@ pub mod storage;
 pub mod transaction;
 pub mod wallet;
 pub mod wallet_cli;
+pub mod wallet_web;
 
 /// Protocol constants
 pub mod constants {

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Spectra Wallet{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #0a0e17; --surface: #131a2b; --border: #1e2a42;
+      --text: #c8d6e5; --text-dim: #6b7d99; --accent: #5b8af5;
+      --accent-hover: #7ba3ff; --success: #2ecc71; --danger: #e74c3c;
+      --warn: #f39c12;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--text); min-height: 100vh; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); }
+
+    nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 2rem; }
+    nav .logo { font-weight: bold; font-size: 1.1rem; color: var(--accent); letter-spacing: 0.1em; }
+    nav .links { display: flex; gap: 1.25rem; }
+    nav .links a { color: var(--text-dim); font-size: 0.85rem; padding: 0.25rem 0; border-bottom: 2px solid transparent; }
+    nav .links a:hover, nav .links a.active { color: var(--text); border-bottom-color: var(--accent); }
+
+    main { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; }
+    h1 { font-size: 1.3rem; margin-bottom: 1.25rem; color: var(--text); }
+    h2 { font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 1.25rem; margin-bottom: 1rem; }
+    .stat { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid var(--border); }
+    .stat:last-child { border-bottom: none; }
+    .stat .label { color: var(--text-dim); }
+    .stat .value { font-weight: bold; }
+    .stat .value.balance { color: var(--success); font-size: 1.1rem; }
+
+    .flash { padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.85rem; }
+    .flash.success { background: rgba(46,204,113,0.15); border: 1px solid var(--success); color: var(--success); }
+    .flash.error { background: rgba(231,76,60,0.15); border: 1px solid var(--danger); color: var(--danger); }
+
+    form { display: flex; flex-direction: column; gap: 0.75rem; }
+    label { font-size: 0.85rem; color: var(--text-dim); }
+    input, textarea, select { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.75rem; color: var(--text); font-family: inherit; font-size: 0.85rem; }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    textarea { resize: vertical; min-height: 60px; }
+    button, .btn { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 0.6rem 1.25rem; font-family: inherit; font-size: 0.85rem; cursor: pointer; display: inline-block; text-align: center; }
+    button:hover, .btn:hover { background: var(--accent-hover); }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #c0392b; }
+    .btn-secondary { background: var(--border); color: var(--text); }
+    .btn-secondary:hover { background: #2a3a5c; }
+    .btn-sm { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+
+    .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; word-break: break-all; }
+    .truncate { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .msg-list { list-style: none; }
+    .msg-list li { padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
+    .msg-list li:last-child { border-bottom: none; }
+    .msg-tx { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.25rem; }
+    .msg-content { font-size: 0.9rem; }
+    .empty { color: var(--text-dim); font-style: italic; padding: 2rem 0; text-align: center; }
+    .actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }
+
+    /* ── Mobile ── */
+    @media (max-width: 600px) {
+      nav { flex-wrap: wrap; gap: 0.5rem; padding: 0.6rem 1rem; }
+      nav .logo { width: 100%; }
+      nav .links { gap: 0.75rem; width: 100%; }
+      nav .links a { font-size: 0.9rem; padding: 0.4rem 0; }
+
+      main { padding: 0 1rem; margin: 1.25rem auto; }
+      h1 { font-size: 1.15rem; }
+
+      .card { padding: 1rem; }
+      .stat { flex-direction: column; gap: 0.15rem; padding: 0.5rem 0; }
+      .stat .label { font-size: 0.8rem; }
+      .stat .value { font-size: 0.95rem; }
+      .truncate { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+
+      input, textarea, select { font-size: 1rem; padding: 0.75rem; }
+      button, .btn { font-size: 1rem; padding: 0.75rem 1rem; width: 100%; }
+      .btn-sm { padding: 0.6rem 0.75rem; width: 100%; }
+      .actions { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="logo">SPECTRA</span>
+    <div class="links">
+      <a href="/">Dashboard</a>
+      <a href="/send">Send</a>
+      <a href="/messages">Messages</a>
+      <a href="/address">Address</a>
+    </div>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -107,6 +107,17 @@ enum WalletAction {
         #[arg(long)]
         file: PathBuf,
     },
+
+    /// Start the wallet web UI.
+    Web {
+        /// Web UI listen host.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Web UI listen port.
+        #[arg(long, default_value = "9734")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -210,6 +221,10 @@ async fn run_wallet_command(
         } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, fee, message).await,
         WalletAction::Messages => wallet_cli::cmd_messages(data_dir),
         WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
+        WalletAction::Web { host, port } => {
+            let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+            spectra::wallet_web::serve(addr, data_dir.to_path_buf(), rpc_addr).await
+        }
     }
 }
 

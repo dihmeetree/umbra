@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if let Some(msg) = flash_success %}
+<div class="flash success">{{ msg }}</div>
+{% endif %}
+{% if let Some(msg) = flash_error %}
+<div class="flash error">{{ msg }}</div>
+{% endif %}
+
+<div class="card">
+  <h2>Balance</h2>
+  <div class="stat">
+    <span class="label">Spendable</span>
+    <span class="value balance">{{ balance }} units</span>
+  </div>
+  <div class="stat">
+    <span class="label">Unspent outputs</span>
+    <span class="value">{{ unspent_count }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">Total outputs</span>
+    <span class="value">{{ total_outputs }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">Scanned to sequence</span>
+    <span class="value">{{ scanned_seq }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Chain State</h2>
+  <div class="stat">
+    <span class="label">Epoch</span>
+    <span class="value">{{ chain_epoch }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">Commitments</span>
+    <span class="value">{{ chain_commitments }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">Nullifiers</span>
+    <span class="value">{{ chain_nullifiers }}</span>
+  </div>
+  <div class="stat">
+    <span class="label">State root</span>
+    <span class="value mono truncate">{{ chain_state_root }}</span>
+  </div>
+</div>
+
+<div class="actions">
+  <form method="post" action="/scan">
+    <button type="submit">Scan Chain</button>
+  </form>
+  <a href="/send" class="btn btn-secondary">Send Transaction</a>
+</div>
+{% endblock %}

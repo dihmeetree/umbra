@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Messages - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Encrypted Messages</h1>
+
+{% if messages.is_empty() %}
+<div class="card">
+  <p class="empty">No messages received.</p>
+</div>
+{% else %}
+<div class="card">
+  <ul class="msg-list">
+    {% for msg in messages %}
+    <li>
+      <div class="msg-tx">TX: {{ msg.tx_hash_hex }}</div>
+      {% if let Some(text) = msg.text %}
+      <div class="msg-content">{{ text }}</div>
+      {% else %}
+      <div class="msg-content" style="color: var(--text-dim);">{{ msg.binary_size }} bytes (binary)</div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<p style="color: var(--text-dim); font-size: 0.8rem; margin-top: 0.5rem;">{{ messages.len() }} message(s) total</p>
+{% endblock %}
