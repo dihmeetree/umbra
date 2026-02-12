@@ -226,6 +226,21 @@ impl ChainState {
     pub fn last_finalized(&self) -> Option<&VertexId> {
         self.last_finalized.as_ref()
     }
+
+    /// Get the current epoch number.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Get the chain ID.
+    pub fn chain_id(&self) -> &Hash {
+        &self.chain_id
+    }
+
+    /// Get the nullifier hash accumulator (for state snapshots).
+    pub fn nullifier_hash(&self) -> &Hash {
+        &self.nullifier_hash
+    }
 }
 
 impl Default for ChainState {

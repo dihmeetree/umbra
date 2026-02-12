@@ -77,6 +77,11 @@ impl NullifierSet {
     pub fn is_empty(&self) -> bool {
         self.nullifiers.is_empty()
     }
+
+    /// Iterate over all nullifiers in the set.
+    pub fn iter(&self) -> impl Iterator<Item = &Nullifier> {
+        self.nullifiers.iter()
+    }
 }
 
 #[cfg(test)]

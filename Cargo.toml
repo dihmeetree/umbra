@@ -27,6 +27,25 @@ bincode = "1"
 # Randomness
 rand = "0.8"
 
+# Async runtime (for P2P and RPC)
+tokio = { version = "1", features = ["full"] }
+
+# Embedded database
+sled = "0.34"
+
+# HTTP RPC server
+axum = "0.7"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# JSON serialization for RPC
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
 # Utilities
 hex = "0.4"
 thiserror = "1"

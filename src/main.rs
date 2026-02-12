@@ -1,15 +1,96 @@
-//! Spectra demonstration — end-to-end walkthrough of the protocol.
+//! Spectra node binary.
+//!
+//! Runs a full Spectra node with P2P networking, mempool, persistent storage,
+//! and JSON RPC API. Use `--demo` to run the protocol walkthrough instead.
 
-use spectra::consensus::bft::{select_committee, Validator};
-use spectra::consensus::dag::{Dag, Vertex, VertexId};
-use spectra::crypto::commitment::BlindingFactor;
-use spectra::crypto::keys::{Signature, SigningKeypair};
-use spectra::crypto::vrf::EpochSeed;
-use spectra::state::ChainState;
-use spectra::transaction::builder::{InputSpec, TransactionBuilder};
-use spectra::wallet::Wallet;
+use clap::Parser;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 
-fn main() {
+/// Spectra post-quantum cryptocurrency node.
+#[derive(Parser, Debug)]
+#[command(
+    name = "spectra",
+    version,
+    about = "Spectra post-quantum private cryptocurrency node"
+)]
+struct Cli {
+    /// P2P listen address.
+    #[arg(long, default_value = "0.0.0.0:9732")]
+    listen_addr: SocketAddr,
+
+    /// Bootstrap peer addresses (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    peers: Vec<SocketAddr>,
+
+    /// Data directory for persistent storage.
+    #[arg(long, default_value = "./spectra-data")]
+    data_dir: PathBuf,
+
+    /// RPC listen port.
+    #[arg(long, default_value = "9733")]
+    rpc_port: u16,
+
+    /// Run the demo walkthrough instead of starting a node.
+    #[arg(long)]
+    demo: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
+    let cli = Cli::parse();
+
+    if cli.demo {
+        run_demo();
+        return Ok(());
+    }
+
+    tracing::info!("Starting Spectra node...");
+    tracing::info!("P2P: {}", cli.listen_addr);
+    tracing::info!("RPC: 0.0.0.0:{}", cli.rpc_port);
+    tracing::info!("Data: {}", cli.data_dir.display());
+
+    // Generate a node keypair (in production, load from storage)
+    let keypair = spectra::crypto::keys::SigningKeypair::generate();
+
+    let rpc_addr: SocketAddr = ([0, 0, 0, 0], cli.rpc_port).into();
+
+    let config = spectra::node::NodeConfig {
+        listen_addr: cli.listen_addr,
+        bootstrap_peers: cli.peers,
+        data_dir: cli.data_dir,
+        rpc_addr,
+        keypair,
+    };
+
+    let mut node = spectra::node::Node::new(config).await?;
+
+    // Start RPC server
+    let rpc_state = spectra::rpc::RpcState {
+        node: node.state(),
+        p2p: node.p2p_handle(),
+    };
+    tokio::spawn(spectra::rpc::serve(rpc_addr, rpc_state));
+
+    // Run the main event loop
+    node.run().await;
+
+    Ok(())
+}
+
+/// Run the original protocol demonstration.
+fn run_demo() {
+    use spectra::consensus::bft::{select_committee, Validator};
+    use spectra::consensus::dag::{Dag, Vertex, VertexId};
+    use spectra::crypto::commitment::BlindingFactor;
+    use spectra::crypto::keys::{Signature, SigningKeypair};
+    use spectra::crypto::vrf::EpochSeed;
+    use spectra::state::ChainState;
+    use spectra::transaction::builder::{InputSpec, TransactionBuilder};
+    use spectra::wallet::Wallet;
+
     println!("=== SPECTRA: Post-Quantum Private Cryptocurrency ===\n");
 
     // ────────────────────────────────────────────────────────

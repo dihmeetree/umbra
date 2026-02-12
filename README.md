@@ -83,13 +83,18 @@ spectra/
       mod.rs                PoVP design documentation
       dag.rs                DAG data structure (vertices, tips, ancestors)
       bft.rs                BFT voting, certification, committee selection
+    mempool.rs              Fee-priority transaction pool with nullifier conflict detection
+    storage.rs              Persistent storage trait + sled backend
+    p2p.rs                  Async TCP P2P networking with channel-based architecture
+    node.rs                 Node orchestrator: event loop, message handling, vertex proposal
+    rpc.rs                  JSON HTTP API (axum)
     state.rs                Chain state, Ledger: Merkle tree, nullifier set, DAG coordination
     network.rs              P2P protocol message types and serialization
     wallet.rs               Key management, output scanning, tx building
-    main.rs                 End-to-end demo
+    main.rs                 Node binary with clap CLI (+ demo mode)
 ```
 
-**~7,800 lines of Rust** across 27 source files with **93 tests**.
+**~9,900 lines of Rust** across 32 source files with **111 tests**.
 
 ## Building
 
@@ -99,13 +104,108 @@ Requires a C compiler (for the PQClean backends used by `pqcrypto-dilithium` and
 cargo build --release
 ```
 
+## Running a Node
+
+```bash
+cargo run --release -- [OPTIONS]
+```
+
+### CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--listen-addr` | `0.0.0.0:9732` | P2P listen address |
+| `--peers` | *(none)* | Comma-separated bootstrap peer addresses |
+| `--data-dir` | `./spectra-data` | Data directory for persistent storage |
+| `--rpc-port` | `9733` | JSON RPC listen port |
+| `--demo` | *(off)* | Run the protocol demo walkthrough instead |
+
+### Examples
+
+```bash
+# Start a node with default settings
+cargo run --release
+
+# Start with custom ports and a bootstrap peer
+cargo run --release -- --listen-addr 127.0.0.1:9000 --rpc-port 9001 --peers 192.168.1.10:9732
+
+# Run the protocol demo
+cargo run --release -- --demo
+```
+
+## RPC API
+
+The node exposes a JSON HTTP API on the RPC port (default 9733).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/tx` | Submit a hex-encoded bincode-serialized transaction |
+| `GET` | `/tx/{id}` | Look up a transaction by ID (checks mempool then storage) |
+| `GET` | `/state` | Query chain state (epoch, commitment/nullifier counts, roots) |
+| `GET` | `/peers` | List connected peers |
+| `GET` | `/mempool` | Get mempool statistics |
+
+### Example
+
+```bash
+# Query chain state
+curl http://localhost:9733/state
+
+# Check mempool stats
+curl http://localhost:9733/mempool
+
+# Look up a transaction
+curl http://localhost:9733/tx/abc123...
+```
+
+## Architecture
+
+### Mempool
+
+Fee-priority transaction pool with configurable limits:
+
+- Transactions are ordered by fee (highest first) using a `BTreeMap` with negated fee keys
+- Nullifier conflict detection prevents double-spend attempts within the pool
+- When full, the lowest-fee transaction is evicted to make room for higher-fee submissions
+- `drain_highest_fee(n)` extracts the top-*n* transactions for vertex proposal
+- Configurable size limits: max 10,000 transactions / 50 MiB (default)
+
+### Persistent Storage
+
+`Storage` trait with a [sled](https://docs.rs/sled) embedded database backend:
+
+- **5 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`
+- All values are bincode-serialized; keys are raw 32-byte hashes
+- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts) for persistence
+- Commitment level storage enables Merkle tree reconstruction on restart
+- `open_temporary()` provides in-memory storage for testing
+
+### P2P Networking
+
+Async TCP transport built on tokio with channel-based architecture:
+
+- `P2pHandle` — clone-friendly handle for sending commands (connect, broadcast, send, shutdown)
+- `P2pEvent` — events received by the node (peer connected/disconnected, message received)
+- Per-connection Hello handshake followed by spawned read/write tasks
+- Uses the existing `network::encode_message/decode_message` framing (4-byte LE length prefix + bincode)
+- Configurable max peers (default 64) and connection timeout (5 seconds)
+
+### Node Orchestrator
+
+The `Node` struct ties everything together with a `tokio::select!` event loop:
+
+- Processes P2P events: new transactions → mempool, new vertices → ledger + storage, votes → gossip
+- Periodic vertex proposal timer drains high-fee transactions from the mempool
+- Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage)
+- Peer discovery via `GetPeers` / `PeersResponse` messages
+
 ## Testing
 
 ```bash
 cargo test
 ```
 
-All 93 tests cover:
+All 111 tests cover:
 
 - Post-quantum key generation, signing, and KEM roundtrips
 - Stealth address generation and detection (correct and wrong recipient)
@@ -125,11 +225,14 @@ All 93 tests cover:
 - Transaction building with STARK proof generation
 - Wallet scanning, balance tracking, spending with change, pending transaction confirm/cancel
 - End-to-end: fund, transfer, message decrypt, bystander non-detection
+- Mempool: fee-priority ordering, nullifier conflict detection, eviction, drain
+- Storage: vertex/transaction/nullifier persistence, chain state meta roundtrips
+- P2P: peer connection establishment, message exchange
 
 ## Demo
 
 ```bash
-cargo run --release
+cargo run --release -- --demo
 ```
 
 Runs an end-to-end demonstration:
@@ -224,6 +327,13 @@ Proves in zero knowledge:
 | `RANGE_BITS` | 59 | Bit width for value range proofs |
 | `MAX_TX_IO` | 16 | Max inputs or outputs per transaction (range-proof safe) |
 | `MIN_TX_FEE` | 1 | Minimum transaction fee (prevents zero-fee spam) |
+| `MEMPOOL_MAX_TXS` | 10,000 | Maximum transactions in the mempool |
+| `MEMPOOL_MAX_BYTES` | 50 MiB | Maximum total mempool size |
+| `DEFAULT_P2P_PORT` | 9,732 | Default P2P listen port |
+| `DEFAULT_RPC_PORT` | 9,733 | Default JSON RPC port |
+| `MAX_PEERS` | 64 | Maximum connected peers |
+| `PEER_CONNECT_TIMEOUT_MS` | 5,000 | Peer connection timeout |
+| `VERTEX_MAX_DRAIN` | 1,000 | Max transactions drained per vertex proposal |
 
 ## Dependencies
 
@@ -239,6 +349,12 @@ Proves in zero knowledge:
 | `rand` | Cryptographic randomness |
 | `hex` | Hex encoding for display |
 | `thiserror` | Error type derivation |
+| `tokio` | Async runtime (P2P networking, node event loop) |
+| `sled` | Embedded database for persistent storage |
+| `axum` | JSON HTTP API framework |
+| `clap` | CLI argument parsing |
+| `serde_json` | JSON serialization for RPC |
+| `tracing` + `tracing-subscriber` | Structured logging |
 
 ## Security Model
 
@@ -292,11 +408,12 @@ All transaction validity is verified via zk-STARKs:
 
 ## Production Roadmap
 
-This is a working prototype demonstrating the full architecture. A production deployment would additionally require:
+Spectra includes a full node implementation with P2P networking, persistent storage, mempool, and RPC API. A production deployment would additionally require:
 
-- **Persistent storage** — on-disk commitment tree and nullifier set (e.g., RocksDB-backed Merkle tree)
-- **P2P networking** — libp2p transport with Noise protocol (Kyber upgrade path for post-quantum handshakes)
-- **Mempool management** — transaction prioritization, conflict resolution, fee market
+- **Post-quantum handshakes** — upgrade the P2P transport layer with Noise/Kyber for quantum-resistant peer connections
+- **Peer reputation and discovery** — DHT-based peer discovery, reputation scoring, and ban management
+- **Block/vertex syncing** — efficient state sync protocol for new nodes joining the network
+- **Wallet CLI/GUI** — user-facing wallet for key management, transaction building, and balance queries
 - **Formal security audit** — cryptographic protocol review and implementation audit
 
 ## License

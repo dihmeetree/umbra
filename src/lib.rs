@@ -10,8 +10,13 @@
 
 pub mod consensus;
 pub mod crypto;
+pub mod mempool;
 pub mod network;
+pub mod node;
+pub mod p2p;
+pub mod rpc;
 pub mod state;
+pub mod storage;
 pub mod transaction;
 pub mod wallet;
 
@@ -51,6 +56,23 @@ pub mod constants {
     /// safe sum is MAX_TX_IO * 2^59 which must be < p (Goldilocks prime ≈ 2^64).
     /// floor(p / 2^59) = 32, so 16 per side is conservative and safe.
     pub const MAX_TX_IO: usize = 16;
+
+    /// Maximum number of transactions in the mempool
+    pub const MEMPOOL_MAX_TXS: usize = 10_000;
+    /// Maximum total byte size of the mempool (50 MiB)
+    pub const MEMPOOL_MAX_BYTES: usize = 50 * 1024 * 1024;
+    /// Default P2P listen port
+    pub const DEFAULT_P2P_PORT: u16 = 9732;
+    /// Default RPC listen port
+    pub const DEFAULT_RPC_PORT: u16 = 9733;
+    /// Maximum number of connected peers
+    pub const MAX_PEERS: usize = 64;
+    /// Vertex proposal interval in milliseconds
+    pub const VERTEX_PROPOSAL_INTERVAL_MS: u64 = 500;
+    /// Peer connection timeout in milliseconds
+    pub const PEER_CONNECT_TIMEOUT_MS: u64 = 5_000;
+    /// Maximum transactions to drain from mempool per vertex proposal
+    pub const VERTEX_MAX_DRAIN: usize = 1_000;
 
     /// Minimum transaction fee (in base units).
     ///
