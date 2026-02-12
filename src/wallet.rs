@@ -437,7 +437,7 @@ impl Wallet {
             last_scanned_sequence: last_scanned_seq,
         };
 
-        let bytes = bincode::serialize(&wallet_file)
+        let bytes = crate::serialize(&wallet_file)
             .map_err(|e| WalletError::Persistence(format!("serialization failed: {}", e)))?;
 
         std::fs::write(path, &bytes)
@@ -460,7 +460,7 @@ impl Wallet {
         let bytes = std::fs::read(path)
             .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
 
-        let wallet_file: WalletFile = bincode::deserialize(&bytes)
+        let wallet_file: WalletFile = crate::deserialize(&bytes)
             .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
 
         if wallet_file.version != WALLET_FILE_VERSION {

@@ -136,6 +136,19 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Serialize a value using bincode with legacy (v1-compatible) encoding.
+pub fn serialize<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::serde::encode_to_vec(val, bincode::config::legacy())
+}
+
+/// Deserialize a value using bincode with legacy (v1-compatible) encoding.
+pub fn deserialize<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, bincode::error::DecodeError> {
+    let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
+    Ok(val)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

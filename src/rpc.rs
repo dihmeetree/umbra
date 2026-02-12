@@ -37,12 +37,12 @@ pub struct RpcState {
 pub fn router(rpc_state: RpcState) -> Router {
     Router::new()
         .route("/tx", post(submit_tx))
-        .route("/tx/:id", get(get_tx))
+        .route("/tx/{id}", get(get_tx))
         .route("/state", get(get_state))
         .route("/peers", get(get_peers))
         .route("/mempool", get(get_mempool))
         .route("/validators", get(get_validators))
-        .route("/validator/:id", get(get_validator))
+        .route("/validator/{id}", get(get_validator))
         .route("/vertices/finalized", get(get_finalized_vertices))
         .with_state(rpc_state)
 }
@@ -78,7 +78,7 @@ async fn submit_tx(
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
     let tx_bytes = hex::decode(&req.tx_hex)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid hex: {}", e)))?;
-    let tx: crate::transaction::Transaction = bincode::deserialize(&tx_bytes).map_err(|e| {
+    let tx: crate::transaction::Transaction = crate::deserialize(&tx_bytes).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("invalid transaction: {}", e),
@@ -131,7 +131,7 @@ async fn get_tx(
 
     // Check mempool first
     if let Some(tx) = node.mempool.get(&tx_id) {
-        let tx_hex = bincode::serialize(tx).map(hex::encode).map_err(|e| {
+        let tx_hex = crate::serialize(tx).map(hex::encode).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("serialization error: {}", e),
@@ -146,7 +146,7 @@ async fn get_tx(
 
     // Then storage
     if let Ok(Some(tx)) = node.storage.get_transaction(&tx_id) {
-        let tx_hex = bincode::serialize(&tx).map(hex::encode).map_err(|e| {
+        let tx_hex = crate::serialize(&tx).map(hex::encode).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("serialization error: {}", e),
@@ -327,12 +327,10 @@ async fn get_finalized_vertices(
     let entries: Vec<FinalizedVertexEntry> = vertices
         .into_iter()
         .filter_map(|(seq, v)| {
-            bincode::serialize(&v)
-                .ok()
-                .map(|bytes| FinalizedVertexEntry {
-                    sequence: seq,
-                    vertex_hex: hex::encode(bytes),
-                })
+            crate::serialize(&v).ok().map(|bytes| FinalizedVertexEntry {
+                sequence: seq,
+                vertex_hex: hex::encode(bytes),
+            })
         })
         .collect();
 
@@ -533,7 +531,7 @@ mod tests {
             .unwrap();
 
         let tx_id = tx.tx_id();
-        let tx_hex = hex::encode(bincode::serialize(&tx).unwrap());
+        let tx_hex = hex::encode(crate::serialize(&tx).unwrap());
 
         // Submit
         let app = router(state.clone());

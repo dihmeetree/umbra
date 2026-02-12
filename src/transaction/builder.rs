@@ -182,7 +182,7 @@ impl TransactionBuilder {
         }
 
         // Build inputs: derive nullifiers, compute proof_links, generate STARK spend proofs
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut tx_inputs = Vec::with_capacity(self.inputs.len());
         let mut input_values = Vec::with_capacity(self.inputs.len());
         let mut input_blindings_felts = Vec::with_capacity(self.inputs.len());
@@ -207,10 +207,10 @@ impl TransactionBuilder {
 
             // Generate random link_nonce and compute proof_link
             let link_nonce: [Felt; 4] = [
-                Felt::new(rng.gen::<u64>()),
-                Felt::new(rng.gen::<u64>()),
-                Felt::new(rng.gen::<u64>()),
-                Felt::new(rng.gen::<u64>()),
+                Felt::new(rng.random::<u64>()),
+                Felt::new(rng.random::<u64>()),
+                Felt::new(rng.random::<u64>()),
+                Felt::new(rng.random::<u64>()),
             ];
             let proof_link_felts = rescue::hash_proof_link(&commitment_felts, &link_nonce);
             let proof_link_hash = felts_to_hash(&proof_link_felts);

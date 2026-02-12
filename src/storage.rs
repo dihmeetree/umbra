@@ -166,7 +166,7 @@ fn commitment_level_key(level: usize, index: usize) -> [u8; 16] {
 impl Storage for SledStorage {
     fn put_vertex(&self, vertex: &Vertex) -> Result<(), StorageError> {
         let value =
-            bincode::serialize(vertex).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            crate::serialize(vertex).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.vertices
             .insert(vertex.id.0, value)
             .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -180,7 +180,7 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?
         {
             Some(bytes) => {
-                let vertex = bincode::deserialize(&bytes)
+                let vertex = crate::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 Ok(Some(vertex))
             }
@@ -196,8 +196,7 @@ impl Storage for SledStorage {
 
     fn put_transaction(&self, tx: &Transaction) -> Result<(), StorageError> {
         let tx_id = tx.tx_id();
-        let value =
-            bincode::serialize(tx).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let value = crate::serialize(tx).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.transactions
             .insert(tx_id.0, value)
             .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -211,7 +210,7 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?
         {
             Some(bytes) => {
-                let tx = bincode::deserialize(&bytes)
+                let tx = crate::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 Ok(Some(tx))
             }
@@ -247,7 +246,7 @@ impl Storage for SledStorage {
 
     fn put_chain_state_meta(&self, meta: &ChainStateMeta) -> Result<(), StorageError> {
         let value =
-            bincode::serialize(meta).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            crate::serialize(meta).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.chain_meta
             .insert(b"current", value)
             .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -261,7 +260,7 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?
         {
             Some(bytes) => {
-                let meta = bincode::deserialize(&bytes)
+                let meta = crate::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 Ok(Some(meta))
             }
@@ -359,7 +358,7 @@ impl Storage for SledStorage {
             bond,
         };
         let value =
-            bincode::serialize(&record).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            crate::serialize(&record).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.validators
             .insert(validator.id, value)
             .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -373,7 +372,7 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?
         {
             Some(bytes) => {
-                let record = bincode::deserialize(&bytes)
+                let record = crate::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
                 Ok(Some(record))
             }
@@ -385,7 +384,7 @@ impl Storage for SledStorage {
         let mut records = Vec::new();
         for entry in self.validators.iter() {
             let (_, value) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
-            let record: ValidatorRecord = bincode::deserialize(&value)
+            let record: ValidatorRecord = crate::deserialize(&value)
                 .map_err(|e| StorageError::Serialization(e.to_string()))?;
             records.push(record);
         }

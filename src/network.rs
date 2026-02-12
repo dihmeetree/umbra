@@ -16,7 +16,6 @@
 //! application-layer authentication (signed votes, signed vertices) for
 //! integrity of consensus-critical messages.
 
-use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::bft::{Certificate, Vote};
@@ -129,8 +128,12 @@ pub enum NetworkError {
 
 /// Size-limited bincode config used for both serialization and deserialization.
 /// Prevents allocation-based DoS from crafted length prefixes within payloads.
-fn bincode_config() -> impl bincode::Options {
-    bincode::DefaultOptions::new().with_limit(crate::constants::MAX_NETWORK_MESSAGE_BYTES as u64)
+fn bincode_config() -> bincode::config::Configuration<
+    bincode::config::LittleEndian,
+    bincode::config::Fixint,
+    bincode::config::Limit<{ 16 * 1024 * 1024 }>,
+> {
+    bincode::config::legacy().with_limit::<{ 16 * 1024 * 1024 }>()
 }
 
 /// Serialize a message to bytes (length-prefixed).
@@ -138,8 +141,7 @@ fn bincode_config() -> impl bincode::Options {
 /// Returns an error if serialization fails or the encoded message exceeds
 /// `MAX_NETWORK_MESSAGE_BYTES`.
 pub fn encode_message(msg: &Message) -> Result<Vec<u8>, NetworkError> {
-    let payload = bincode_config()
-        .serialize(msg)
+    let payload = bincode::serde::encode_to_vec(msg, bincode_config())
         .map_err(|e| NetworkError::SerializationFailed(e.to_string()))?;
     if payload.len() > crate::constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err(NetworkError::MessageTooLarge);
@@ -166,7 +168,8 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
     if data.len() < 4 + len {
         return None;
     }
-    bincode_config().deserialize(&data[4..4 + len]).ok()
+    let (msg, _) = bincode::serde::decode_from_slice(&data[4..4 + len], bincode_config()).ok()?;
+    Some(msg)
 }
 
 #[cfg(test)]

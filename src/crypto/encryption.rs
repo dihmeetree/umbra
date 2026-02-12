@@ -130,12 +130,12 @@ impl EncryptedPayload {
 
 /// Generate a cryptographically random nonce.
 ///
-/// M12: Uses `thread_rng()` which is a CSPRNG (ChaCha20 seeded from OsRng).
+/// M12: Uses `rand::rng()` which is a CSPRNG (ChaCha20 seeded from OsRng).
 /// This provides the same security guarantees as OsRng with better
 /// performance for bulk operations.
 fn random_nonce() -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     nonce
 }
 

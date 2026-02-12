@@ -132,7 +132,7 @@ pub fn cmd_init(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // Also export address file
     let addr = wallet.address();
-    let addr_bytes = bincode::serialize(&addr)?;
+    let addr_bytes = crate::serialize(&addr)?;
     let addr_hex = hex::encode(&addr_bytes);
     std::fs::write(address_path(data_dir), &addr_hex)?;
 
@@ -152,7 +152,7 @@ pub fn cmd_address(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("KEM key: {} bytes", addr.kem.0.len());
 
     // Re-export address file
-    let addr_bytes = bincode::serialize(&addr)?;
+    let addr_bytes = crate::serialize(&addr)?;
     let addr_hex = hex::encode(&addr_bytes);
     std::fs::write(address_path(data_dir), &addr_hex)?;
     println!("Address file: {}", address_path(data_dir).display());
@@ -226,7 +226,7 @@ pub async fn cmd_send(
     let addr_bytes =
         hex::decode(addr_hex.trim()).map_err(|e| format!("invalid address hex: {}", e))?;
     let recipient: PublicAddress =
-        bincode::deserialize(&addr_bytes).map_err(|e| format!("invalid address: {}", e))?;
+        crate::deserialize(&addr_bytes).map_err(|e| format!("invalid address: {}", e))?;
 
     // Build transaction
     let msg_bytes = message.map(|m| m.into_bytes());
@@ -234,7 +234,7 @@ pub async fn cmd_send(
     let tx_id = tx.tx_id();
 
     // Submit to node
-    let tx_bytes = bincode::serialize(&tx)?;
+    let tx_bytes = crate::serialize(&tx)?;
     let tx_hex = hex::encode(&tx_bytes);
 
     let client = RpcClient::new(rpc_addr);
@@ -282,7 +282,7 @@ pub fn cmd_export(data_dir: &Path, file: &Path) -> Result<(), Box<dyn std::error
     let wp = wallet_path(data_dir);
     let (wallet, _) = Wallet::load_from_file(&wp)?;
     let addr = wallet.address();
-    let addr_bytes = bincode::serialize(&addr)?;
+    let addr_bytes = crate::serialize(&addr)?;
     let addr_hex = hex::encode(&addr_bytes);
     std::fs::write(file, &addr_hex)?;
     println!("Address exported to: {}", file.display());
@@ -330,7 +330,7 @@ async fn scan_chain(
             // Deserialize vertex from hex
             let vertex_bytes = hex::decode(&entry.vertex_hex)
                 .map_err(|e| WalletError::Rpc(format!("invalid vertex hex: {}", e)))?;
-            let vertex: crate::consensus::dag::Vertex = bincode::deserialize(&vertex_bytes)
+            let vertex: crate::consensus::dag::Vertex = crate::deserialize(&vertex_bytes)
                 .map_err(|e| WalletError::Rpc(format!("invalid vertex: {}", e)))?;
 
             // Scan each transaction
@@ -405,7 +405,7 @@ mod tests {
         // Exported file should be valid hex that deserializes to PublicAddress
         let hex_content = std::fs::read_to_string(&export_path).unwrap();
         let bytes = hex::decode(hex_content.trim()).unwrap();
-        let _addr: PublicAddress = bincode::deserialize(&bytes).unwrap();
+        let _addr: PublicAddress = crate::deserialize(&bytes).unwrap();
     }
 
     #[test]
