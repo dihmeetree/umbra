@@ -325,6 +325,24 @@ impl Wallet {
         }
     }
 
+    /// Scan a single coinbase output (not part of any transaction).
+    ///
+    /// Coinbase outputs are created during vertex finalization and use
+    /// output_index 0. Call this with the coinbase output returned from
+    /// the RPC `/vertices/finalized` response.
+    pub fn scan_coinbase_output(
+        &mut self,
+        output: &TxOutput,
+        state: Option<&crate::state::ChainState>,
+    ) {
+        if let Some(mut owned) = self.try_claim_output(output, 0) {
+            if let Some(st) = state {
+                owned.commitment_index = st.find_commitment(&owned.commitment);
+            }
+            self.outputs.push(owned);
+        }
+    }
+
     /// Get the number of owned outputs.
     pub fn output_count(&self) -> usize {
         self.outputs.len()

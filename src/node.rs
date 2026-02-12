@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 
 use crate::consensus::bft::{self, BftState, Validator};
 use crate::consensus::dag::{Vertex, VertexId};
-use crate::crypto::keys::SigningKeypair;
+use crate::crypto::keys::{KemKeypair, SigningKeypair};
 use crate::crypto::stark::spend_air::MERKLE_DEPTH;
 use crate::crypto::vrf::VrfOutput;
 use crate::mempool::Mempool;
@@ -69,6 +69,7 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     pub rpc_addr: SocketAddr,
     pub keypair: SigningKeypair,
+    pub kem_keypair: KemKeypair,
     /// If true, register this node as a genesis validator.
     pub genesis_validator: bool,
 }
@@ -88,12 +89,15 @@ pub enum NodeError {
 ///
 /// Reads from `data_dir/validator.key` if it exists; otherwise generates
 /// a new keypair and writes it to that path.
-pub fn load_or_generate_keypair(data_dir: &Path) -> Result<SigningKeypair, std::io::Error> {
+pub fn load_or_generate_keypair(
+    data_dir: &Path,
+) -> Result<(SigningKeypair, KemKeypair), std::io::Error> {
     let key_path = data_dir.join("validator.key");
 
     if key_path.exists() {
         let bytes = std::fs::read(&key_path)?;
-        // Format: [pk_len: u32 LE] [pk_bytes] [sk_bytes]
+        // Format: [pk_len: u32 LE][pk_bytes][sk_bytes]
+        //         [kem_pk_len: u32 LE][kem_pk_bytes][kem_sk_bytes]  (optional, added later)
         if bytes.len() < 4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -107,8 +111,47 @@ pub fn load_or_generate_keypair(data_dir: &Path) -> Result<SigningKeypair, std::
                 "key file truncated",
             ));
         }
-        let pk_bytes = bytes[4..4 + pk_len].to_vec();
-        let sk_bytes = bytes[4 + pk_len..].to_vec();
+
+        // Dilithium5 has fixed secret key size of 4896 bytes
+        let signing_sk_end = 4 + pk_len + 4896;
+        let (pk_bytes, sk_bytes, kem_kp) = if bytes.len() > signing_sk_end + 4 {
+            // KEM section exists
+            let pk_bytes = bytes[4..4 + pk_len].to_vec();
+            let sk_bytes = bytes[4 + pk_len..signing_sk_end].to_vec();
+            let kem_pk_len = u32::from_le_bytes(
+                bytes[signing_sk_end..signing_sk_end + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let kem_pk_start = signing_sk_end + 4;
+            if bytes.len() < kem_pk_start + kem_pk_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "key file truncated (KEM section)",
+                ));
+            }
+            let kem_pk_bytes = bytes[kem_pk_start..kem_pk_start + kem_pk_len].to_vec();
+            let kem_sk_bytes = bytes[kem_pk_start + kem_pk_len..].to_vec();
+            let kem = KemKeypair::from_bytes(kem_pk_bytes, kem_sk_bytes).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid KEM key data")
+            })?;
+            (pk_bytes, sk_bytes, kem)
+        } else {
+            // Legacy file without KEM — use all remaining bytes as signing sk
+            let pk_bytes = bytes[4..4 + pk_len].to_vec();
+            let sk_bytes = bytes[4 + pk_len..].to_vec();
+            let kem = KemKeypair::generate();
+            // Re-save with KEM section appended
+            let mut new_bytes = bytes.clone();
+            let kem_pk_len = (kem.public.0.len() as u32).to_le_bytes();
+            new_bytes.extend_from_slice(&kem_pk_len);
+            new_bytes.extend_from_slice(&kem.public.0);
+            new_bytes.extend_from_slice(&kem.secret.0);
+            std::fs::write(&key_path, &new_bytes)?;
+            tracing::info!("Upgraded key file with KEM keypair");
+            (pk_bytes, sk_bytes, kem)
+        };
+
         let keypair = SigningKeypair::from_bytes(pk_bytes, sk_bytes).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid key data")
         })?;
@@ -116,15 +159,20 @@ pub fn load_or_generate_keypair(data_dir: &Path) -> Result<SigningKeypair, std::
             "Loaded validator key: {}",
             hex::encode(&keypair.public.fingerprint()[..8])
         );
-        Ok(keypair)
+        Ok((keypair, kem_kp))
     } else {
         std::fs::create_dir_all(data_dir)?;
         let keypair = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
         let pk_len = (keypair.public.0.len() as u32).to_le_bytes();
-        let mut bytes = Vec::with_capacity(4 + keypair.public.0.len() + keypair.secret.0.len());
+        let kem_pk_len = (kem_kp.public.0.len() as u32).to_le_bytes();
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&pk_len);
         bytes.extend_from_slice(&keypair.public.0);
         bytes.extend_from_slice(&keypair.secret.0);
+        bytes.extend_from_slice(&kem_pk_len);
+        bytes.extend_from_slice(&kem_kp.public.0);
+        bytes.extend_from_slice(&kem_kp.secret.0);
         std::fs::write(&key_path, &bytes)?;
         // H4: Restrict key file permissions to owner-only
         #[cfg(unix)]
@@ -136,7 +184,7 @@ pub fn load_or_generate_keypair(data_dir: &Path) -> Result<SigningKeypair, std::
             "Generated validator key: {}",
             hex::encode(&keypair.public.fingerprint()[..8])
         );
-        Ok(keypair)
+        Ok((keypair, kem_kp))
     }
 }
 
@@ -180,7 +228,10 @@ impl Node {
         // Genesis validator bootstrap
         let mut our_vrf_output = None;
         if config.genesis_validator {
-            let validator = Validator::new(config.keypair.public.clone());
+            let validator = Validator::with_kem(
+                config.keypair.public.clone(),
+                config.kem_keypair.public.clone(),
+            );
             ledger.state.register_genesis_validator(validator);
 
             // Evaluate VRF for epoch 0
@@ -200,13 +251,46 @@ impl Node {
                 tracing::info!("Not selected for epoch 0 committee");
             }
 
+            // Create genesis coinbase (initial coin distribution)
+            if let Some(genesis_cb) = ledger
+                .state
+                .create_genesis_coinbase(&config.kem_keypair.public)
+            {
+                storage
+                    .put_coinbase_output(0, &genesis_cb)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to persist genesis coinbase: {}", e)
+                    });
+                tracing::info!(
+                    "Genesis coinbase: {} units minted",
+                    crate::constants::GENESIS_MINT
+                );
+            }
+
             // Persist validator to storage
             storage
                 .put_validator(
-                    &Validator::new(config.keypair.public.clone()),
+                    &Validator::with_kem(
+                        config.keypair.public.clone(),
+                        config.kem_keypair.public.clone(),
+                    ),
                     crate::constants::VALIDATOR_BOND,
                 )
                 .unwrap_or_else(|e| tracing::warn!("Failed to persist validator: {}", e));
+
+            // Persist commitment tree nodes from genesis coinbase
+            for level in 0..=MERKLE_DEPTH {
+                for idx in 0..ledger.state.commitment_tree_level_len(level) {
+                    let hash = ledger.state.commitment_tree_node(level, idx);
+                    let _ = storage.put_commitment_level(level, idx, &hash);
+                }
+            }
+
+            // Persist chain state meta after genesis setup
+            let fc = storage.finalized_vertex_count().unwrap_or(0);
+            let meta = ledger.state.to_chain_state_meta(fc);
+            let _ = storage.put_chain_state_meta(&meta);
+            let _ = storage.flush();
 
             tracing::info!(
                 "Registered as genesis validator: {}",
@@ -584,7 +668,7 @@ impl Node {
 
                         // Apply vertex to chain state (skip DAG for already-finalized vertices)
                         match state.ledger.state.apply_vertex(&vertex) {
-                            Ok(_) => {
+                            Ok(coinbase) => {
                                 applied += 1;
 
                                 // Persist the same way as finalize_vertex_inner
@@ -596,6 +680,11 @@ impl Node {
                                     }
                                 }
                                 let _ = state.storage.put_finalized_vertex_index(seq, &vertex.id);
+
+                                // Persist coinbase output if created
+                                if let Some(ref cb) = coinbase {
+                                    let _ = state.storage.put_coinbase_output(seq, cb);
+                                }
 
                                 // Persist modified commitment tree nodes
                                 let new_cc = state.ledger.state.commitment_count();
@@ -706,7 +795,7 @@ impl Node {
         let old_commitment_count = state.ledger.state.commitment_count();
 
         match state.ledger.finalize_vertex(vertex_id) {
-            Ok(_) => {
+            Ok(coinbase) => {
                 // Remove conflicting mempool txs
                 state.mempool.remove_conflicting(&nullifiers);
 
@@ -728,6 +817,11 @@ impl Node {
                 let _ = state
                     .storage
                     .put_finalized_vertex_index(finalized_count, vertex_id);
+
+                // Persist coinbase output if created
+                if let Some(ref cb) = coinbase {
+                    let _ = state.storage.put_coinbase_output(finalized_count, cb);
+                }
 
                 // Persist modified commitment tree nodes (incremental)
                 let new_commitment_count = state.ledger.state.commitment_count();
@@ -937,9 +1031,10 @@ mod tests {
     #[test]
     fn keypair_persistence() {
         let dir = tempfile::tempdir().unwrap();
-        let kp1 = load_or_generate_keypair(dir.path()).unwrap();
-        let kp2 = load_or_generate_keypair(dir.path()).unwrap();
-        // Should load the same key
-        assert_eq!(kp1.public.fingerprint(), kp2.public.fingerprint());
+        let (signing1, kem1) = load_or_generate_keypair(dir.path()).unwrap();
+        let (signing2, kem2) = load_or_generate_keypair(dir.path()).unwrap();
+        // Should load the same keys
+        assert_eq!(signing1.public.fingerprint(), signing2.public.fingerprint());
+        assert_eq!(kem1.public.0, kem2.public.0);
     }
 }

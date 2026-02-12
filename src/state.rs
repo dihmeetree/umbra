@@ -14,14 +14,16 @@ use std::collections::{HashMap, HashSet};
 
 use crate::consensus::bft::Validator;
 use crate::consensus::dag::{Vertex, VertexId};
-use crate::crypto::commitment::Commitment;
+use crate::crypto::commitment::{BlindingFactor, Commitment};
+use crate::crypto::encryption::EncryptedPayload;
 use crate::crypto::nullifier::{Nullifier, NullifierSet};
 use crate::crypto::proof::{IncrementalMerkleTree, MerkleNode};
 use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::SpendPublicInputs;
+use crate::crypto::stealth::StealthAddress;
 use crate::crypto::vrf::EpochSeed;
 use crate::storage::{ChainStateMeta, Storage};
-use crate::transaction::{deregister_sign_data, Transaction, TxType};
+use crate::transaction::{deregister_sign_data, Transaction, TxOutput, TxType};
 use crate::Hash;
 
 /// The full blockchain state.
@@ -65,6 +67,8 @@ pub struct ChainState {
     epoch: u64,
     /// ID of the last finalized vertex
     last_finalized: Option<VertexId>,
+    /// Total coins ever minted via coinbase rewards
+    total_minted: u64,
 }
 
 /// The full ledger coordinating DAG, BFT, and chain state.
@@ -91,25 +95,54 @@ impl ChainState {
             epoch_fees: 0,
             epoch: 0,
             last_finalized: None,
+            total_minted: 0,
         }
     }
 
     /// Apply a finalized vertex to the state.
     ///
     /// Uses two-pass validation: first validates all transactions without
-    /// mutating state, then applies them. This prevents partial state
-    /// corruption if a later transaction in the vertex is invalid.
-    pub fn apply_vertex(&mut self, vertex: &Vertex) -> Result<(), StateError> {
+    /// mutating state, then applies them. Creates a coinbase output for the
+    /// vertex proposer containing the block reward plus transaction fees.
+    ///
+    /// Returns the coinbase `TxOutput` if one was created (requires the
+    /// proposer to be a registered validator with a KEM public key).
+    pub fn apply_vertex(&mut self, vertex: &Vertex) -> Result<Option<TxOutput>, StateError> {
         // H9: Pass 1 — validate all transactions without applying
         for tx in &vertex.transactions {
             self.validate_transaction(tx)?;
         }
+
+        // Record fees before applying transactions
+        let fees_before = self.epoch_fees;
+
         // Pass 2 — apply all transactions (cannot fail after validation)
         for tx in &vertex.transactions {
             self.apply_transaction_unchecked(tx);
         }
+
+        // Compute vertex fees and redirect to proposer (not pooled per-epoch)
+        let vertex_fees = self.epoch_fees.saturating_sub(fees_before);
+        self.epoch_fees = fees_before;
+
+        // Compute total coinbase amount
+        let block_reward = crate::constants::block_reward_for_epoch(vertex.epoch);
+        let total_coinbase = block_reward.saturating_add(vertex_fees);
+
+        // Create coinbase output for the proposer
+        let coinbase = if total_coinbase > 0 {
+            self.create_coinbase_output(&vertex.id, &vertex.proposer, total_coinbase)
+        } else {
+            None
+        };
+
+        // If coinbase creation failed (no KEM key), return fees to epoch pool
+        if coinbase.is_none() && vertex_fees > 0 {
+            self.epoch_fees = self.epoch_fees.saturating_add(vertex_fees);
+        }
+
         self.last_finalized = Some(vertex.id);
-        Ok(())
+        Ok(coinbase)
     }
 
     /// Validate a transaction against the current state (without applying).
@@ -147,7 +180,7 @@ impl ChainState {
         // Validate transaction-type-specific state constraints
         match &tx.tx_type {
             TxType::Transfer => {}
-            TxType::ValidatorRegister { signing_key } => {
+            TxType::ValidatorRegister { signing_key, .. } => {
                 let vid = signing_key.fingerprint();
                 if self.validators.contains_key(&vid) {
                     return Err(StateError::ValidatorAlreadyRegistered);
@@ -225,8 +258,11 @@ impl ChainState {
                 // Standard fee collection
                 self.epoch_fees = self.epoch_fees.saturating_add(tx.fee);
             }
-            TxType::ValidatorRegister { signing_key } => {
-                let validator = Validator::new(signing_key.clone());
+            TxType::ValidatorRegister {
+                signing_key,
+                kem_public_key,
+            } => {
+                let validator = Validator::with_kem(signing_key.clone(), kem_public_key.clone());
                 let vid = validator.id;
 
                 // Escrow bond, remainder goes to epoch fees
@@ -405,6 +441,7 @@ impl ChainState {
             &self.epoch_fees.to_le_bytes(),
             &validator_count.to_le_bytes(),
             &total_bonds.to_le_bytes(),
+            &self.total_minted.to_le_bytes(),
         ])
     }
 
@@ -449,6 +486,7 @@ impl ChainState {
             validator_count: self.validators.values().filter(|v| v.active).count() as u64,
             epoch_seed: self.epoch_seed.seed,
             finalized_count,
+            total_minted: self.total_minted,
         }
     }
 
@@ -465,6 +503,117 @@ impl ChainState {
     /// Return the path of nodes modified by the most recent commitment append.
     pub fn commitment_tree_last_path(&self) -> Vec<(usize, usize, Hash)> {
         self.commitment_tree.last_appended_path()
+    }
+
+    /// Get the total coins ever minted via coinbase rewards.
+    pub fn total_minted(&self) -> u64 {
+        self.total_minted
+    }
+
+    // ── Coinbase Output Creation ──────────────────────────────────────
+
+    /// Derive a deterministic blinding factor for a coinbase output.
+    ///
+    /// Uses the vertex ID and epoch as input so the blinding is publicly
+    /// verifiable (coinbase amounts are public anyway).
+    fn coinbase_blinding(vertex_id: &VertexId, epoch: u64) -> BlindingFactor {
+        let mut data = Vec::with_capacity(40);
+        data.extend_from_slice(&vertex_id.0);
+        data.extend_from_slice(&epoch.to_le_bytes());
+        let hash = crate::hash_domain(b"spectra.coinbase.blinding", &data);
+        BlindingFactor::from_bytes(hash)
+    }
+
+    /// Encode coinbase note data (same 40-byte format as transaction builder).
+    fn encode_coinbase_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
+        let mut data = Vec::with_capacity(40);
+        data.extend_from_slice(&value.to_le_bytes());
+        data.extend_from_slice(&blinding.0);
+        data
+    }
+
+    /// Create a coinbase output for the vertex proposer.
+    ///
+    /// Looks up the proposer's KEM public key from the validator registry,
+    /// generates a stealth address, encrypts the note, and adds the
+    /// commitment to the Merkle tree. Returns `None` if the proposer is
+    /// not a registered validator or lacks a KEM public key.
+    fn create_coinbase_output(
+        &mut self,
+        vertex_id: &VertexId,
+        proposer: &crate::crypto::keys::SigningPublicKey,
+        amount: u64,
+    ) -> Option<TxOutput> {
+        // Look up proposer's validator record
+        let vid = proposer.fingerprint();
+        let kem_pk = self.validators.get(&vid)?.kem_public_key.as_ref()?.clone();
+
+        // Deterministic blinding factor (coinbase amounts are public)
+        let blinding = Self::coinbase_blinding(vertex_id, self.epoch);
+        let commitment = Commitment::commit(amount, &blinding);
+
+        // Generate stealth address (output index 0 — coinbase has a single output)
+        let stealth_result = StealthAddress::generate(&kem_pk, 0)?;
+        let stealth_address = stealth_result.address;
+
+        // Encrypt note data reusing the stealth KEM shared secret
+        let note_data = Self::encode_coinbase_note(amount, &blinding);
+        let encrypted_note = EncryptedPayload::encrypt_with_shared_secret(
+            &stealth_result.shared_secret,
+            stealth_address.kem_ciphertext.clone(),
+            &note_data,
+        )?;
+
+        // Add commitment to the Merkle tree
+        self.add_commitment(commitment);
+
+        // Track total minted
+        self.total_minted = self.total_minted.saturating_add(amount);
+
+        Some(TxOutput {
+            commitment,
+            stealth_address,
+            encrypted_note,
+        })
+    }
+
+    /// Create a genesis coinbase output for the initial coin distribution.
+    ///
+    /// Called once at network bootstrap to mint `GENESIS_MINT` coins to the
+    /// genesis validator. Uses a deterministic blinding factor derived from
+    /// the genesis domain so the amount is publicly verifiable.
+    pub fn create_genesis_coinbase(
+        &mut self,
+        kem_pk: &crate::crypto::keys::KemPublicKey,
+    ) -> Option<TxOutput> {
+        let amount = crate::constants::GENESIS_MINT;
+
+        // Deterministic blinding for genesis (no vertex ID, use a fixed domain)
+        let hash = crate::hash_domain(b"spectra.genesis.blinding", b"genesis-coinbase");
+        let blinding = BlindingFactor::from_bytes(hash);
+        let commitment = Commitment::commit(amount, &blinding);
+
+        // Generate stealth address (output index 0)
+        let stealth_result = StealthAddress::generate(kem_pk, 0)?;
+        let stealth_address = stealth_result.address;
+
+        // Encrypt note data
+        let note_data = Self::encode_coinbase_note(amount, &blinding);
+        let encrypted_note = EncryptedPayload::encrypt_with_shared_secret(
+            &stealth_result.shared_secret,
+            stealth_address.kem_ciphertext.clone(),
+            &note_data,
+        )?;
+
+        // Add commitment to the Merkle tree
+        self.add_commitment(commitment);
+        self.total_minted = self.total_minted.saturating_add(amount);
+
+        Some(TxOutput {
+            commitment,
+            stealth_address,
+            encrypted_note,
+        })
     }
 
     /// Restore chain state from persistent storage.
@@ -551,6 +700,7 @@ impl ChainState {
             epoch_fees: meta.epoch_fees,
             epoch: meta.epoch,
             last_finalized: meta.last_finalized,
+            total_minted: meta.total_minted,
         })
     }
 }
@@ -585,25 +735,31 @@ impl Ledger {
     /// Finalize a vertex: mark as final in DAG and apply transactions to state.
     ///
     /// Call after BFT certification. The vertex must already be in the DAG
-    /// (via `insert_vertex()`).
-    pub fn finalize_vertex(&mut self, vertex_id: &VertexId) -> Result<(), StateError> {
+    /// (via `insert_vertex()`). Returns the coinbase output if one was created.
+    pub fn finalize_vertex(
+        &mut self,
+        vertex_id: &VertexId,
+    ) -> Result<Option<TxOutput>, StateError> {
         self.dag.finalize(vertex_id);
         if let Some(v) = self.dag.get(vertex_id) {
             let v = v.clone();
-            self.state.apply_vertex(&v)?;
+            return self.state.apply_vertex(&v);
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Apply a finalized vertex: insert into DAG, finalize, and update state.
     ///
     /// Convenience method that calls `insert_vertex()` then `finalize_vertex()`.
-    /// Validates vertex structure including proposer signature.
-    pub fn apply_finalized_vertex(&mut self, vertex: Vertex) -> Result<(), StateError> {
+    /// Validates vertex structure including proposer signature. Returns the
+    /// coinbase output if one was created.
+    pub fn apply_finalized_vertex(
+        &mut self,
+        vertex: Vertex,
+    ) -> Result<Option<TxOutput>, StateError> {
         let id = vertex.id;
         self.insert_vertex(vertex)?;
-        self.finalize_vertex(&id)?;
-        Ok(())
+        self.finalize_vertex(&id)
     }
 
     /// Restore a ledger from persistent storage.

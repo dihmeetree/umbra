@@ -28,6 +28,15 @@ All cryptographic primitives are post-quantum secure:
 
 No trusted setup is required. All proofs are transparent.
 
+### Coin Emission
+
+- **Genesis mint** — the genesis validator receives an initial distribution of 100,000,000 units at network bootstrap, seeding the economy before block rewards begin
+- **Block rewards** — each finalized vertex creates new coins for the proposer via a coinbase output (commitment + stealth address + encrypted note), the same format as any other output in the commitment tree
+- **Halving schedule** — initial reward of 50,000 units per vertex, halving every 500 epochs (~500,000 vertices per phase), reaching zero after 63 halvings
+- **Fee distribution** — transaction fees go directly to the vertex proposer (not pooled per-epoch), added on top of the block reward
+- **Deterministic blinding** — coinbase blinding factors are derived from `hash_domain("spectra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while maintaining consistent commitment tree format
+- **Total supply tracking** — `total_minted` is tracked in the chain state and included in the state root hash, enabling consensus-verifiable supply accounting
+
 ### Consensus: Proof of Verifiable Participation (PoVP)
 
 A novel consensus mechanism that is **neither Proof of Work nor Proof of Stake**:
@@ -105,7 +114,7 @@ spectra/
     error.html              Error display
 ```
 
-**~14,500 lines of Rust** across 34 source files with **190 tests**.
+**~14,800 lines of Rust** across 34 source files with **190 tests**.
 
 ## Building
 
@@ -161,7 +170,7 @@ cargo run --release -- --demo
 
 ## Wallet CLI
 
-The wallet runs client-side — it downloads finalized vertices from the node and scans them locally. The node never learns which outputs belong to the wallet.
+The wallet runs client-side — it downloads finalized vertices (including coinbase outputs) from the node and scans them locally. The node never learns which outputs belong to the wallet.
 
 ```bash
 cargo run --release -- wallet <command>
@@ -236,12 +245,12 @@ The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for s
 |--------|----------|-------------|
 | `POST` | `/tx` | Submit a hex-encoded bincode-serialized transaction |
 | `GET` | `/tx/{id}` | Look up a transaction by ID (checks mempool then storage) |
-| `GET` | `/state` | Query chain state (epoch, commitment/nullifier counts, roots) |
+| `GET` | `/state` | Query chain state (epoch, counts, roots, total minted) |
 | `GET` | `/peers` | List connected peers |
 | `GET` | `/mempool` | Get mempool statistics |
 | `GET` | `/validators` | List all validators with bond and status |
 | `GET` | `/validator/{id}` | Get a single validator's info |
-| `GET` | `/vertices/finalized` | Paginated finalized vertices (`?after=N&limit=N`) |
+| `GET` | `/vertices/finalized` | Paginated finalized vertices with coinbase outputs (`?after=N&limit=N`) |
 
 ### Example
 
@@ -278,9 +287,9 @@ Fee-priority transaction pool with configurable limits:
 
 `Storage` trait with a [sled](https://docs.rs/sled) embedded database backend:
 
-- **7 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`, `finalized_index`
-- All values are bincode-serialized; keys are raw 32-byte hashes (finalized_index uses big-endian sequence numbers)
-- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts, finalized count) for persistence
+- **8 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`, `finalized_index`, `coinbase_outputs`
+- All values are bincode-serialized; keys are raw 32-byte hashes (finalized_index and coinbase_outputs use big-endian sequence numbers)
+- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts, finalized count, total minted) for persistence
 - Commitment level storage enables Merkle tree reconstruction on restart
 - Finalized vertex index supports paginated retrieval for wallet sync and state sync
 - `open_temporary()` provides in-memory storage for testing
@@ -299,15 +308,15 @@ Async TCP transport built on tokio with channel-based architecture:
 
 The `Node` struct ties everything together with a `tokio::select!` event loop:
 
-- **Persistent validator identity** — keypair is saved to `data_dir/validator.key` on first run and loaded on subsequent startups
+- **Persistent validator identity** — signing and KEM keypairs are saved to `data_dir/validator.key` on first run and loaded on subsequent startups (legacy key files without KEM are auto-upgraded)
 - **Active consensus participation** — when selected for the committee via VRF, the node proposes vertices (draining high-fee transactions from the mempool) and casts BFT votes on incoming vertices
-- **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, purges conflicting mempool entries, persists to storage, and slashes equivocators
+- **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, creates a coinbase output for the proposer, purges conflicting mempool entries, persists to storage, and slashes equivocators
 - **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root
-- **State persistence** — every finalized vertex persists its transactions, nullifiers, Merkle tree nodes, finalized index, validators, and a `ChainStateMeta` snapshot to storage, then flushes. On restart the full chain state (Merkle tree, nullifier set, validators, epoch state) is restored from the snapshot
+- **State persistence** — every finalized vertex persists its transactions, nullifiers, Merkle tree nodes, finalized index, coinbase output, validators, and a `ChainStateMeta` snapshot to storage, then flushes. On restart the full chain state (Merkle tree, nullifier set, validators, epoch state, total minted) is restored from the snapshot
 - **State sync** — new nodes joining the network request finalized vertices in batches from peers via `GetFinalizedVertices` / `FinalizedVerticesResponse` messages. A three-state machine (`NeedSync → Syncing → Synced`) tracks sync progress
 - Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
 - Peer discovery via `GetPeers` / `PeersResponse` messages
-- Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed, no funding tx required)
+- Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed and KEM key for coinbase, no funding tx required)
 
 ## Testing
 
@@ -335,10 +344,10 @@ All 190 tests cover:
 - **Wallet CLI** — init (creates files, rejects duplicate), address display, export creates valid address file, messages on empty wallet
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
 - **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain
-- **Storage** — vertex/transaction/nullifier/validator persistence, chain state meta roundtrips, finalized index roundtrip and batch retrieval
+- **Storage** — vertex/transaction/nullifier/validator/coinbase persistence, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval
 - **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking
 - **P2P** — peer connection establishment, message exchange
-- **Node** — persistent keypair load/save roundtrip
+- **Node** — persistent signing + KEM keypair load/save roundtrip
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
 
 ## Demo
@@ -383,7 +392,7 @@ Transaction {
 - **tx_binding** — the hash of all transaction content, included in proof challenges. Any modification to inputs, outputs, fee, chain_id, or expiry_epoch invalidates the balance proof.
 - **Messages** are Kyber-encrypted payloads (with 24-byte nonce + BLAKE3 MAC) that only the recipient can decrypt.
 - **Transaction types** — in addition to regular transfers, transactions can carry validator registration or deregistration operations:
-  - `ValidatorRegister` — includes the validator's Dilithium5 signing key. The fee must be at least `VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state, and only the remainder goes to epoch fees. No zk-STARK modifications are needed — the bond is carried through the existing fee field.
+  - `ValidatorRegister` — includes the validator's Dilithium5 signing key and Kyber1024 KEM public key (required for receiving coinbase rewards). The fee must be at least `VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state, and only the remainder goes to epoch fees. No zk-STARK modifications are needed — the bond is carried through the existing fee field.
   - `ValidatorDeregister` — includes the validator ID, an auth signature proving ownership, and a `TxOutput` that receives the returned bond (added to the commitment tree). The bond return is secured by the STARK system: if the validator creates a wrong commitment, it will fail verification when they try to spend.
 
 ## Zero-Knowledge Proof System
@@ -443,6 +452,10 @@ Proves in zero knowledge:
 | `RANGE_BITS` | 59 | Bit width for value range proofs |
 | `MAX_TX_IO` | 16 | Max inputs or outputs per transaction (range-proof safe) |
 | `MIN_TX_FEE` | 1 | Minimum transaction fee (prevents zero-fee spam) |
+| `INITIAL_BLOCK_REWARD` | 50,000 | Coinbase reward per vertex (halves over time) |
+| `HALVING_INTERVAL_EPOCHS` | 500 | Epochs between each reward halving |
+| `MAX_HALVINGS` | 63 | Halvings before reward reaches zero |
+| `GENESIS_MINT` | 100,000,000 | Initial coin distribution to the genesis validator |
 | `MEMPOOL_MAX_TXS` | 10,000 | Maximum transactions in the mempool |
 | `MEMPOOL_MAX_BYTES` | 50 MiB | Maximum total mempool size |
 | `DEFAULT_P2P_PORT` | 9,732 | Default P2P listen port |
@@ -531,7 +544,10 @@ All transaction validity is verified via zk-STARKs:
 - **Slashing** — equivocation evidence (voting for conflicting vertices in the same round) triggers automatic bond forfeiture to epoch fees and permanent validator exclusion
 - **Deregistration auth** — validator deregistration requires a signature over `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`, preventing unauthorized bond withdrawal
 - **Two-phase vertex finalization** — vertices are inserted into the DAG (unfinalized) first, then finalized only after BFT quorum certification, preventing premature state application
-- **Persistent validator keypair** — the validator's Dilithium5 keypair is persisted to disk with raw byte serialization and validated on load, preventing key loss across restarts
+- **Persistent validator keypair** — the validator's Dilithium5 signing and Kyber1024 KEM keypairs are persisted to disk with raw byte serialization and validated on load, preventing key loss across restarts
+- **Deterministic coinbase blinding** — coinbase output blinding factors are derived from `hash_domain("spectra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while using the same commitment format as private outputs
+- **Consensus-verifiable supply** — `total_minted` is included in the state root hash, so any disagreement on emission is detected by state root divergence
+- **Fee redirection fallback** — if a vertex proposer lacks a KEM key (cannot receive coinbase), fees are returned to the epoch fee pool rather than being lost
 - **Inbound connection timeout** — P2P inbound handshakes are wrapped in a configurable timeout (`PEER_CONNECT_TIMEOUT_MS`), preventing slowloris-style connection exhaustion
 - **Merkle tree capacity enforcement** — the incremental Merkle tree rejects appends beyond `2^MERKLE_DEPTH` leaves, preventing silent overflow
 - **Bounded DAG traversal** — ancestor queries are depth-bounded (default `2 * EPOCH_LENGTH`), preventing unbounded memory usage from deep graph exploration
@@ -540,7 +556,7 @@ All transaction validity is verified via zk-STARKs:
 
 ## Production Roadmap
 
-Spectra includes a full node implementation with P2P networking, persistent storage, state sync, mempool, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership, and a client-side wallet CLI. A production deployment would additionally require:
+Spectra includes a full node implementation with P2P networking, persistent storage, state sync, mempool, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership, coin emission with halving schedule, and a client-side wallet (CLI + web UI). A production deployment would additionally require:
 
 - **Post-quantum handshakes** — upgrade the P2P transport layer with Noise/Kyber for quantum-resistant peer connections
 - **Peer reputation and discovery** — DHT-based peer discovery, reputation scoring, and ban management

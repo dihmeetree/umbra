@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::consensus::bft::Validator;
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::nullifier::Nullifier;
-use crate::transaction::{Transaction, TxId};
+use crate::transaction::{Transaction, TxId, TxOutput};
 use crate::Hash;
 
 /// Errors from storage operations.
@@ -37,6 +37,8 @@ pub struct ChainStateMeta {
     pub epoch_seed: Hash,
     #[serde(default)]
     pub finalized_count: u64,
+    #[serde(default)]
+    pub total_minted: u64,
 }
 
 /// Stored validator with bond information.
@@ -91,6 +93,9 @@ pub trait Storage {
     fn get_all_validators(&self) -> Result<Vec<ValidatorRecord>, StorageError>;
     fn remove_validator(&self, id: &Hash) -> Result<(), StorageError>;
 
+    fn put_coinbase_output(&self, sequence: u64, output: &TxOutput) -> Result<(), StorageError>;
+    fn get_coinbase_output(&self, sequence: u64) -> Result<Option<TxOutput>, StorageError>;
+
     fn flush(&self) -> Result<(), StorageError>;
 }
 
@@ -105,6 +110,7 @@ pub struct SledStorage {
     commitment_levels: sled::Tree,
     validators: sled::Tree,
     finalized_index: sled::Tree,
+    coinbase_outputs: sled::Tree,
 }
 
 impl SledStorage {
@@ -143,6 +149,9 @@ impl SledStorage {
         let finalized_index = db
             .open_tree("finalized_index")
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        let coinbase_outputs = db
+            .open_tree("coinbase_outputs")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         Ok(SledStorage {
             db,
             vertices,
@@ -152,6 +161,7 @@ impl SledStorage {
             commitment_levels,
             validators,
             finalized_index,
+            coinbase_outputs,
         })
     }
 }
@@ -398,6 +408,30 @@ impl Storage for SledStorage {
         Ok(())
     }
 
+    fn put_coinbase_output(&self, sequence: u64, output: &TxOutput) -> Result<(), StorageError> {
+        let value =
+            crate::serialize(output).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.coinbase_outputs
+            .insert(sequence.to_be_bytes(), value)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_coinbase_output(&self, sequence: u64) -> Result<Option<TxOutput>, StorageError> {
+        match self
+            .coinbase_outputs
+            .get(sequence.to_be_bytes())
+            .map_err(|e| StorageError::Io(e.to_string()))?
+        {
+            Some(bytes) => {
+                let output = crate::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(output))
+            }
+            None => Ok(None),
+        }
+    }
+
     fn flush(&self) -> Result<(), StorageError> {
         self.db
             .flush()
@@ -489,6 +523,7 @@ mod tests {
             validator_count: 10,
             epoch_seed: [5u8; 32],
             finalized_count: 42,
+            total_minted: 500_000,
         };
 
         assert!(storage.get_chain_state_meta().unwrap().is_none());

@@ -176,6 +176,7 @@ struct ChainStateResponse {
     state_root: String,
     commitment_root: String,
     last_finalized: Option<String>,
+    total_minted: u64,
 }
 
 async fn get_state(State(state): State<RpcState>) -> Json<ChainStateResponse> {
@@ -188,6 +189,7 @@ async fn get_state(State(state): State<RpcState>) -> Json<ChainStateResponse> {
         state_root: hex::encode(s.state_root()),
         commitment_root: hex::encode(s.commitment_root()),
         last_finalized: s.last_finalized().map(|v| hex::encode(v.0)),
+        total_minted: s.total_minted(),
     })
 }
 
@@ -303,6 +305,8 @@ struct FinalizedVerticesResponse {
 struct FinalizedVertexEntry {
     sequence: u64,
     vertex_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coinbase_hex: Option<String>,
 }
 
 async fn get_finalized_vertices(
@@ -327,9 +331,17 @@ async fn get_finalized_vertices(
     let entries: Vec<FinalizedVertexEntry> = vertices
         .into_iter()
         .filter_map(|(seq, v)| {
+            let coinbase_hex = node
+                .storage
+                .get_coinbase_output(seq)
+                .ok()
+                .flatten()
+                .and_then(|cb| crate::serialize(&cb).ok())
+                .map(hex::encode);
             crate::serialize(&v).ok().map(|bytes| FinalizedVertexEntry {
                 sequence: seq,
                 vertex_hex: hex::encode(bytes),
+                coinbase_hex,
             })
         })
         .collect();

@@ -109,6 +109,7 @@ struct FinalizedVerticesResult {
 struct FinalizedVertexEntry {
     sequence: u64,
     vertex_hex: String,
+    coinbase_hex: Option<String>,
 }
 
 pub fn wallet_path(data_dir: &Path) -> PathBuf {
@@ -338,6 +339,18 @@ pub async fn scan_chain(
             for tx in &vertex.transactions {
                 wallet.scan_transaction(tx);
             }
+
+            // Scan coinbase output if present
+            if let Some(ref cb_hex) = entry.coinbase_hex {
+                if let Ok(cb_bytes) = hex::decode(cb_hex) {
+                    if let Ok(cb_output) =
+                        crate::deserialize::<crate::transaction::TxOutput>(&cb_bytes)
+                    {
+                        wallet.scan_coinbase_output(&cb_output, None);
+                    }
+                }
+            }
+
             let new_outputs = wallet.output_count() - old_count;
             if new_outputs > 0 {
                 total_found += new_outputs as u64;

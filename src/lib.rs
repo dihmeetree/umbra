@@ -88,6 +88,27 @@ pub mod constants {
     /// through transaction validation.
     pub const MIN_TX_FEE: u64 = 1;
 
+    /// Initial block (vertex) reward in base units.
+    pub const INITIAL_BLOCK_REWARD: u64 = 50_000;
+
+    /// Halving interval in epochs. The block reward halves every this many epochs.
+    pub const HALVING_INTERVAL_EPOCHS: u64 = 500;
+
+    /// Maximum number of halvings before reward becomes zero.
+    pub const MAX_HALVINGS: u32 = 63;
+
+    /// Genesis mint amount — initial coins created for the genesis validator.
+    pub const GENESIS_MINT: u64 = 100_000_000;
+
+    /// Compute the block reward for a given epoch.
+    pub fn block_reward_for_epoch(epoch: u64) -> u64 {
+        let halvings = epoch / HALVING_INTERVAL_EPOCHS;
+        if halvings > MAX_HALVINGS as u64 {
+            return 0;
+        }
+        INITIAL_BLOCK_REWARD >> halvings as u32
+    }
+
     /// Compute the chain ID for mainnet.
     pub fn chain_id() -> crate::Hash {
         crate::hash_domain(b"spectra.chain_id", b"spectra-mainnet-v1")

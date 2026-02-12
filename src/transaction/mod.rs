@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::commitment::Commitment;
 use crate::crypto::encryption::EncryptedPayload;
-use crate::crypto::keys::{Signature, SigningPublicKey};
+use crate::crypto::keys::{KemPublicKey, Signature, SigningPublicKey};
 use crate::crypto::nullifier::Nullifier;
 use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
@@ -84,6 +84,8 @@ pub enum TxType {
     ValidatorRegister {
         /// The validator's Dilithium5 signing public key.
         signing_key: SigningPublicKey,
+        /// The validator's Kyber1024 KEM public key (for receiving coinbase rewards).
+        kem_public_key: KemPublicKey,
     },
     /// Deregister an active validator and return the bond.
     ValidatorDeregister {
@@ -197,7 +199,10 @@ impl Transaction {
         // Transaction-type-specific validation
         match &self.tx_type {
             TxType::Transfer => {}
-            TxType::ValidatorRegister { signing_key } => {
+            TxType::ValidatorRegister {
+                signing_key,
+                kem_public_key,
+            } => {
                 // Bond must be included in the fee
                 let min_fee =
                     crate::constants::VALIDATOR_BOND.saturating_add(crate::constants::MIN_TX_FEE);
@@ -206,6 +211,10 @@ impl Transaction {
                 }
                 // Signing key must not be empty
                 if signing_key.0.is_empty() {
+                    return Err(TxValidationError::InvalidValidatorKey);
+                }
+                // KEM key must not be empty
+                if kem_public_key.0.is_empty() {
                     return Err(TxValidationError::InvalidValidatorKey);
                 }
             }
@@ -390,10 +399,15 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
         TxType::Transfer => {
             hasher.update(&[0u8]);
         }
-        TxType::ValidatorRegister { signing_key } => {
+        TxType::ValidatorRegister {
+            signing_key,
+            kem_public_key,
+        } => {
             hasher.update(&[1u8]);
             hasher.update(&(signing_key.0.len() as u32).to_le_bytes());
             hasher.update(&signing_key.0);
+            hasher.update(&(kem_public_key.0.len() as u32).to_le_bytes());
+            hasher.update(&kem_public_key.0);
         }
         TxType::ValidatorDeregister {
             validator_id,

@@ -189,7 +189,7 @@ async fn run_node(
     tracing::info!("RPC: {}", rpc_addr);
     tracing::info!("Data: {}", data_dir.display());
 
-    let keypair = spectra::node::load_or_generate_keypair(&data_dir)?;
+    let (keypair, kem_keypair) = spectra::node::load_or_generate_keypair(&data_dir)?;
 
     let config = spectra::node::NodeConfig {
         listen_addr,
@@ -197,6 +197,7 @@ async fn run_node(
         data_dir,
         rpc_addr,
         keypair,
+        kem_keypair,
         genesis_validator,
     };
 

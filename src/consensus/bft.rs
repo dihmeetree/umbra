@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::dag::VertexId;
-use crate::crypto::keys::{Signature, SigningKeypair, SigningPublicKey};
+use crate::crypto::keys::{KemPublicKey, Signature, SigningKeypair, SigningPublicKey};
 use crate::crypto::vrf::{EpochSeed, VrfOutput};
 use crate::Hash;
 
@@ -49,6 +49,9 @@ pub struct EquivocationEvidence {
 pub struct Validator {
     /// The validator's signing public key
     pub public_key: SigningPublicKey,
+    /// KEM public key for receiving coinbase reward outputs.
+    #[serde(default)]
+    pub kem_public_key: Option<KemPublicKey>,
     /// The validator's unique ID (fingerprint of signing key)
     pub id: Hash,
     /// Whether currently active (bonded)
@@ -60,6 +63,17 @@ impl Validator {
         let id = public_key.fingerprint();
         Validator {
             public_key,
+            kem_public_key: None,
+            id,
+            active: true,
+        }
+    }
+
+    pub fn with_kem(public_key: SigningPublicKey, kem_public_key: KemPublicKey) -> Self {
+        let id = public_key.fingerprint();
+        Validator {
+            public_key,
+            kem_public_key: Some(kem_public_key),
             id,
             active: true,
         }
