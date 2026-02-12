@@ -6,9 +6,9 @@
 //! - Validator registry
 //! - Current epoch state
 //!
-//! The commitment Merkle tree uses a canonical depth of 20, matching the
-//! zk-STARK spend proof circuit. Shallower trees are extended to depth 20
-//! using precomputed zero-subtree hashes.
+//! The commitment Merkle tree is an incremental append-only structure at
+//! canonical depth 20, matching the zk-STARK spend proof circuit. Appending
+//! a commitment is O(MERKLE_DEPTH) instead of rebuilding the full tree.
 
 use std::collections::HashMap;
 
@@ -16,9 +16,8 @@ use crate::consensus::bft::Validator;
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::commitment::Commitment;
 use crate::crypto::nullifier::{Nullifier, NullifierSet};
-use crate::crypto::proof::{build_merkle_tree, canonical_root, pad_merkle_path, MerkleNode};
+use crate::crypto::proof::{IncrementalMerkleTree, MerkleNode};
 use crate::crypto::stark::convert::hash_to_felts;
-use crate::crypto::stark::spend_air::MERKLE_DEPTH;
 use crate::crypto::stark::types::SpendPublicInputs;
 use crate::transaction::Transaction;
 use crate::Hash;
@@ -27,16 +26,10 @@ use crate::Hash;
 pub struct ChainState {
     /// Chain identifier for replay protection
     chain_id: Hash,
-    /// All output commitments ever created
+    /// All output commitments ever created (for lookup by index/value)
     commitments: Vec<Commitment>,
-    /// Merkle tree root of all commitments (actual depth, NOT canonical)
-    raw_commitment_root: Hash,
-    /// Actual depth of the Merkle tree (log2 of padded leaf count)
-    tree_depth: usize,
-    /// Canonical depth-20 root (padded from raw root)
-    commitment_root: Hash,
-    /// Merkle paths for each commitment (actual depth, pre-padding)
-    commitment_paths: Vec<Vec<MerkleNode>>,
+    /// Incremental depth-20 Merkle tree over commitments (Rescue Prime)
+    commitment_tree: IncrementalMerkleTree,
     /// Set of revealed nullifiers (spent outputs)
     nullifiers: NullifierSet,
     /// Incremental hash accumulator over nullifiers (for state root)
@@ -65,10 +58,7 @@ impl ChainState {
         ChainState {
             chain_id: crate::constants::chain_id(),
             commitments: Vec::new(),
-            raw_commitment_root: [0u8; 32],
-            tree_depth: 0,
-            commitment_root: canonical_root(&[0u8; 32], 0),
-            commitment_paths: Vec::new(),
+            commitment_tree: IncrementalMerkleTree::new(),
             nullifiers: NullifierSet::new(),
             nullifier_hash: [0u8; 32],
             validators: HashMap::new(),
@@ -111,11 +101,11 @@ impl ChainState {
         // Check spend proof Merkle roots against current canonical commitment root.
         // Spend proofs were already cryptographically verified by validate_structure();
         // here we only need to deserialize the public inputs to check the Merkle root.
+        let root_felts = hash_to_felts(&self.commitment_tree.root());
         for input in &tx.inputs {
             let spend_pub = SpendPublicInputs::from_bytes(&input.spend_proof.public_inputs_bytes)
                 .ok_or(StateError::InvalidSpendProof)?;
 
-            let root_felts = hash_to_felts(&self.commitment_root);
             if spend_pub.merkle_root != root_felts {
                 return Err(StateError::InvalidSpendProof);
             }
@@ -128,13 +118,10 @@ impl ChainState {
             self.record_nullifier(input.nullifier);
         }
 
-        // Add new output commitments
+        // Add new output commitments (incremental tree update, O(log n) each)
         for output in &tx.outputs {
-            self.commitments.push(output.commitment);
+            self.add_commitment(output.commitment);
         }
-
-        // Rebuild Merkle tree
-        self.rebuild_commitment_tree();
 
         // Collect fee with overflow check
         self.epoch_fees = self
@@ -154,40 +141,10 @@ impl ChainState {
         }
     }
 
-    /// Rebuild the commitment Merkle tree after adding new commitments.
-    fn rebuild_commitment_tree(&mut self) {
-        if self.commitments.is_empty() {
-            self.raw_commitment_root = [0u8; 32];
-            self.tree_depth = 0;
-            self.commitment_root = canonical_root(&[0u8; 32], 0);
-            self.commitment_paths.clear();
-            return;
-        }
-
-        let leaves: Vec<Hash> = self.commitments.iter().map(|c| c.0).collect();
-        let (root, paths) = build_merkle_tree(&leaves);
-
-        // Compute actual tree depth
-        let depth = if paths.is_empty() || paths[0].is_empty() {
-            if leaves.len() <= 1 {
-                0
-            } else {
-                1
-            }
-        } else {
-            paths[0].len()
-        };
-
-        self.raw_commitment_root = root;
-        self.tree_depth = depth;
-        self.commitment_root = canonical_root(&root, depth);
-        self.commitment_paths = paths;
-    }
-
-    /// Add a single commitment and rebuild the Merkle tree.
+    /// Add a single commitment to the incremental Merkle tree.
     pub fn add_commitment(&mut self, commitment: Commitment) {
+        self.commitment_tree.append(commitment.0);
         self.commitments.push(commitment);
-        self.rebuild_commitment_tree();
     }
 
     /// Record a nullifier as spent (public API).
@@ -197,14 +154,12 @@ impl ChainState {
 
     /// Get the current canonical (depth-20) commitment Merkle root.
     pub fn commitment_root(&self) -> Hash {
-        self.commitment_root
+        self.commitment_tree.root()
     }
 
-    /// Get the Merkle path for a commitment by index, padded to depth 20.
+    /// Get the depth-20 Merkle path for a commitment by index.
     pub fn commitment_path(&self, index: usize) -> Option<Vec<MerkleNode>> {
-        self.commitment_paths
-            .get(index)
-            .map(|path| pad_merkle_path(path, MERKLE_DEPTH))
+        self.commitment_tree.path(index)
     }
 
     /// Get the index of a commitment in the tree, if it exists.
@@ -257,9 +212,10 @@ impl ChainState {
 
     /// Compute the state root (hash of all state components).
     pub fn state_root(&self) -> Hash {
+        let root = self.commitment_tree.root();
         crate::hash_concat(&[
             b"spectra.state_root",
-            &self.commitment_root,
+            &root,
             &self.nullifier_hash,
             &self.epoch.to_le_bytes(),
             &self.epoch_fees.to_le_bytes(),
@@ -338,6 +294,7 @@ mod tests {
     use super::*;
     use crate::crypto::commitment::{BlindingFactor, Commitment};
     use crate::crypto::nullifier::Nullifier;
+    use crate::crypto::stark::spend_air::MERKLE_DEPTH;
 
     #[test]
     fn state_commitment_tree() {
@@ -345,8 +302,7 @@ mod tests {
         let blind = BlindingFactor::random();
         let c = Commitment::commit(100, &blind);
 
-        state.commitments.push(c);
-        state.rebuild_commitment_tree();
+        state.add_commitment(c);
 
         assert_ne!(state.commitment_root(), [0u8; 32]);
         assert_eq!(state.commitment_count(), 1);
@@ -369,8 +325,7 @@ mod tests {
         let root1 = state.state_root();
 
         let blind = BlindingFactor::random();
-        state.commitments.push(Commitment::commit(100, &blind));
-        state.rebuild_commitment_tree();
+        state.add_commitment(Commitment::commit(100, &blind));
 
         let root2 = state.state_root();
         assert_ne!(root1, root2);
@@ -397,10 +352,10 @@ mod tests {
         let c = Commitment::commit(100, &blind);
         state.add_commitment(c);
 
-        // The padded path should produce the same canonical root
-        let padded_path = state.commitment_path(0).unwrap();
-        assert_eq!(padded_path.len(), MERKLE_DEPTH);
-        let root_from_path = crate::crypto::proof::compute_merkle_root(&c.0, &padded_path);
+        // The path should produce the same root
+        let path = state.commitment_path(0).unwrap();
+        assert_eq!(path.len(), MERKLE_DEPTH);
+        let root_from_path = crate::crypto::proof::compute_merkle_root(&c.0, &path);
         assert_eq!(root_from_path, state.commitment_root());
     }
 }

@@ -89,7 +89,7 @@ spectra/
     main.rs                 End-to-end demo
 ```
 
-**~7,800 lines of Rust** across 27 source files with **90 tests**.
+**~7,800 lines of Rust** across 27 source files with **93 tests**.
 
 ## Building
 
@@ -105,7 +105,7 @@ cargo build --release
 cargo test
 ```
 
-All 90 tests cover:
+All 93 tests cover:
 
 - Post-quantum key generation, signing, and KEM roundtrips
 - Stealth address generation and detection (correct and wrong recipient)

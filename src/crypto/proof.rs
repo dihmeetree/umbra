@@ -136,6 +136,112 @@ pub fn canonical_root(root: &Hash, tree_depth: usize) -> Hash {
     felts_to_hash(&current)
 }
 
+/// An append-only Merkle tree with fixed canonical depth (MERKLE_DEPTH = 20).
+///
+/// Supports O(MERKLE_DEPTH) append and O(MERKLE_DEPTH) path queries, compared
+/// to the O(n) full-rebuild approach. Uses Rescue Prime hashing for STARK
+/// compatibility.
+///
+/// Internally stores nodes at each level in `Vec`s that grow as leaves are
+/// appended. Unoccupied positions implicitly hold precomputed zero-subtree
+/// hashes, so the root and paths are always canonical depth-20 values.
+pub struct IncrementalMerkleTree {
+    /// Number of leaves appended so far.
+    num_leaves: usize,
+    /// Nodes at each level: `levels[0]` = leaves, `levels[MERKLE_DEPTH]` = root.
+    levels: Vec<Vec<Hash>>,
+    /// Precomputed zero-subtree hashes for each level (0..=MERKLE_DEPTH).
+    zero_hashes: Vec<Hash>,
+}
+
+impl IncrementalMerkleTree {
+    /// Create a new empty tree.
+    pub fn new() -> Self {
+        let zero_hashes = zero_subtree_hashes();
+        let levels = (0..=MERKLE_DEPTH).map(|_| Vec::new()).collect();
+        IncrementalMerkleTree {
+            num_leaves: 0,
+            levels,
+            zero_hashes,
+        }
+    }
+
+    /// Append a leaf hash, updating all affected internal nodes.
+    ///
+    /// Runs in O(MERKLE_DEPTH) time (20 hash operations).
+    pub fn append(&mut self, leaf: Hash) {
+        let leaf_index = self.num_leaves;
+        self.set_node(0, leaf_index, leaf);
+
+        let mut idx = leaf_index;
+        for level in 1..=MERKLE_DEPTH {
+            let parent_idx = idx / 2;
+            let left = self.get_node(level - 1, parent_idx * 2);
+            let right = self.get_node(level - 1, parent_idx * 2 + 1);
+            let merged = rescue::hash_merge(&hash_to_felts(&left), &hash_to_felts(&right));
+            self.set_node(level, parent_idx, felts_to_hash(&merged));
+            idx = parent_idx;
+        }
+
+        self.num_leaves += 1;
+    }
+
+    /// Get the canonical depth-20 Merkle root.
+    pub fn root(&self) -> Hash {
+        self.get_node(MERKLE_DEPTH, 0)
+    }
+
+    /// Get the depth-20 authentication path for a leaf by index.
+    ///
+    /// Returns `None` if the index is out of bounds.
+    pub fn path(&self, leaf_index: usize) -> Option<Vec<MerkleNode>> {
+        if leaf_index >= self.num_leaves {
+            return None;
+        }
+        let mut path = Vec::with_capacity(MERKLE_DEPTH);
+        let mut idx = leaf_index;
+        for level in 0..MERKLE_DEPTH {
+            let sibling_idx = idx ^ 1;
+            path.push(MerkleNode {
+                hash: self.get_node(level, sibling_idx),
+                is_left: idx % 2 == 1,
+            });
+            idx >>= 1;
+        }
+        Some(path)
+    }
+
+    /// Get the number of leaves in the tree.
+    pub fn num_leaves(&self) -> usize {
+        self.num_leaves
+    }
+
+    /// Get a node, defaulting to the zero-subtree hash for that level.
+    fn get_node(&self, level: usize, index: usize) -> Hash {
+        if index < self.levels[level].len() {
+            self.levels[level][index]
+        } else {
+            self.zero_hashes[level]
+        }
+    }
+
+    /// Set a node, extending the level's Vec with zero hashes if needed.
+    fn set_node(&mut self, level: usize, index: usize, hash: Hash) {
+        let zero = self.zero_hashes[level];
+        let level_vec = &mut self.levels[level];
+        if index >= level_vec.len() {
+            level_vec.resize(index + 1, zero);
+        }
+        level_vec[index] = hash;
+    }
+}
+
+impl Default for IncrementalMerkleTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Convert a MerkleNode path to STARK witness format: Vec<([Felt; 4], bool)>.
 ///
 /// `is_left` in MerkleNode (sibling on left) maps to `is_right` in STARK witness
@@ -209,6 +315,61 @@ mod tests {
         // Single leaf tree has depth 0 (root = leaf)
         let canon = canonical_root(&c.0, 0);
         assert_ne!(canon, c.0); // Should be different due to padding
+    }
+
+    #[test]
+    fn incremental_tree_matches_batch() {
+        // Verify that the incremental tree produces the same canonical root
+        // and paths as build_merkle_tree + canonical_root + pad_merkle_path.
+        let leaves: Vec<Hash> = (0..5u64)
+            .map(|i| Commitment::commit(i * 100 + 1, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+
+        // Batch approach
+        let (batch_root, batch_paths) = build_merkle_tree(&leaves);
+        let batch_canon_root = canonical_root(&batch_root, batch_paths[0].len());
+
+        // Incremental approach
+        let mut tree = IncrementalMerkleTree::new();
+        for leaf in &leaves {
+            tree.append(*leaf);
+        }
+
+        assert_eq!(tree.root(), batch_canon_root);
+        assert_eq!(tree.num_leaves(), leaves.len());
+
+        for (i, leaf) in leaves.iter().enumerate() {
+            let inc_path = tree.path(i).unwrap();
+            let batch_padded = pad_merkle_path(&batch_paths[i], MERKLE_DEPTH);
+            assert_eq!(inc_path.len(), MERKLE_DEPTH);
+            assert_eq!(compute_merkle_root(leaf, &inc_path), tree.root());
+            // Each sibling hash and direction must match
+            for (inc_node, batch_node) in inc_path.iter().zip(batch_padded.iter()) {
+                assert_eq!(inc_node.hash, batch_node.hash);
+                assert_eq!(inc_node.is_left, batch_node.is_left);
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_tree_empty() {
+        let tree = IncrementalMerkleTree::new();
+        assert_eq!(tree.num_leaves(), 0);
+        assert!(tree.path(0).is_none());
+        // Empty root should match canonical_root of an empty tree
+        assert_eq!(tree.root(), canonical_root(&[0u8; 32], 0));
+    }
+
+    #[test]
+    fn incremental_tree_single_leaf() {
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        let mut tree = IncrementalMerkleTree::new();
+        tree.append(c.0);
+
+        let path = tree.path(0).unwrap();
+        assert_eq!(path.len(), MERKLE_DEPTH);
+        assert_eq!(compute_merkle_root(&c.0, &path), tree.root());
+        assert_eq!(tree.root(), canonical_root(&c.0, 0));
     }
 
     #[test]
