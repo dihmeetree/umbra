@@ -1,0 +1,269 @@
+//! Post-quantum authenticated encryption for transaction messages and note data.
+//!
+//! Uses Kyber1024 KEM to establish a shared secret, then BLAKE3 in keyed mode
+//! for authenticated encryption (encrypt-then-MAC).
+//!
+//! Message flow:
+//! 1. Sender encapsulates against recipient's KEM public key -> (shared_secret, ciphertext)
+//! 2. Derive encryption key and MAC key from shared_secret + nonce
+//! 3. XOR-encrypt the plaintext with a BLAKE3-derived keystream
+//! 4. Compute MAC over (nonce || ciphertext || kem_ciphertext)
+//!
+//! A random 24-byte nonce is included in every payload, ensuring that even if
+//! the same shared secret is reused (via encrypt_with_shared_secret), the
+//! keystream and MAC are unique.
+
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+
+use super::keys::{KemCiphertext, KemKeypair, KemPublicKey, SharedSecret};
+use crate::Hash;
+
+/// Nonce size in bytes.
+const NONCE_SIZE: usize = 24;
+
+/// An encrypted message with its KEM ciphertext for the recipient.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EncryptedPayload {
+    /// KEM ciphertext — recipient decapsulates to get shared secret
+    pub kem_ciphertext: KemCiphertext,
+    /// Random nonce (unique per encryption, prevents keystream reuse)
+    pub nonce: [u8; NONCE_SIZE],
+    /// Encrypted data (XOR keystream cipher)
+    pub ciphertext: Vec<u8>,
+    /// Authentication tag (BLAKE3 keyed hash)
+    pub mac: Hash,
+}
+
+impl EncryptedPayload {
+    /// Encrypt a plaintext message to a recipient's KEM public key.
+    ///
+    /// Returns `None` if the KEM encapsulation fails or if the plaintext
+    /// exceeds `MAX_ENCRYPT_PLAINTEXT`.
+    pub fn encrypt(recipient: &KemPublicKey, plaintext: &[u8]) -> Option<Self> {
+        if plaintext.len() > crate::constants::MAX_ENCRYPT_PLAINTEXT {
+            return None;
+        }
+        let (shared_secret, kem_ct) = recipient.encapsulate()?;
+        let nonce = random_nonce();
+        let (enc_key, mac_key) = derive_keys(&shared_secret, &nonce);
+
+        let ciphertext = xor_keystream(&enc_key, &nonce, plaintext);
+        let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ct);
+
+        Some(EncryptedPayload {
+            kem_ciphertext: kem_ct,
+            nonce,
+            ciphertext,
+            mac,
+        })
+    }
+
+    /// Decrypt using the recipient's KEM keypair.
+    pub fn decrypt(&self, recipient_kp: &KemKeypair) -> Option<Vec<u8>> {
+        let shared_secret = recipient_kp.decapsulate(&self.kem_ciphertext)?;
+        let (enc_key, mac_key) = derive_keys(&shared_secret, &self.nonce);
+
+        // Verify MAC first (authenticate-then-decrypt) using constant-time comparison
+        let expected_mac = compute_mac(
+            &mac_key,
+            &self.nonce,
+            &self.ciphertext,
+            &self.kem_ciphertext,
+        );
+        if !crate::constant_time_eq(&expected_mac, &self.mac) {
+            return None;
+        }
+
+        Some(xor_keystream(&enc_key, &self.nonce, &self.ciphertext))
+    }
+
+    /// Encrypt with a pre-established shared secret (for stealth address outputs
+    /// where the KEM exchange already happened). A fresh nonce ensures unique
+    /// keystreams even when the shared secret is reused.
+    ///
+    /// Returns `None` if the plaintext exceeds `MAX_ENCRYPT_PLAINTEXT`.
+    pub fn encrypt_with_shared_secret(
+        shared_secret: &SharedSecret,
+        kem_ciphertext: KemCiphertext,
+        plaintext: &[u8],
+    ) -> Option<Self> {
+        if plaintext.len() > crate::constants::MAX_ENCRYPT_PLAINTEXT {
+            return None;
+        }
+        let nonce = random_nonce();
+        let (enc_key, mac_key) = derive_keys(shared_secret, &nonce);
+        let ciphertext = xor_keystream(&enc_key, &nonce, plaintext);
+        let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ciphertext);
+
+        Some(EncryptedPayload {
+            kem_ciphertext,
+            nonce,
+            ciphertext,
+            mac,
+        })
+    }
+
+    /// Decrypt with a pre-established shared secret.
+    pub fn decrypt_with_shared_secret(&self, shared_secret: &SharedSecret) -> Option<Vec<u8>> {
+        let (enc_key, mac_key) = derive_keys(shared_secret, &self.nonce);
+        let expected_mac = compute_mac(
+            &mac_key,
+            &self.nonce,
+            &self.ciphertext,
+            &self.kem_ciphertext,
+        );
+        if !crate::constant_time_eq(&expected_mac, &self.mac) {
+            return None;
+        }
+        Some(xor_keystream(&enc_key, &self.nonce, &self.ciphertext))
+    }
+}
+
+/// Generate a cryptographically random nonce.
+fn random_nonce() -> [u8; NONCE_SIZE] {
+    let mut nonce = [0u8; NONCE_SIZE];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    nonce
+}
+
+/// Derive encryption and MAC keys from a shared secret and nonce.
+fn derive_keys(ss: &SharedSecret, nonce: &[u8; NONCE_SIZE]) -> ([u8; 32], [u8; 32]) {
+    let mut enc_input = [0u8; 56]; // 32 + 24
+    enc_input[..32].copy_from_slice(&ss.0);
+    enc_input[32..].copy_from_slice(nonce);
+    let enc_key = crate::hash_domain(b"spectra.encrypt.key", &enc_input);
+
+    let mut mac_input = [0u8; 56];
+    mac_input[..32].copy_from_slice(&ss.0);
+    mac_input[32..].copy_from_slice(nonce);
+    let mac_key = crate::hash_domain(b"spectra.encrypt.mac", &mac_input);
+
+    (enc_key, mac_key)
+}
+
+/// XOR-based stream cipher using BLAKE3 as the keystream generator.
+/// Keystream block i = H("spectra.keystream" || key || nonce || counter_i).
+fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(data.len());
+    let mut counter = 0u64;
+    let mut pos = 0;
+
+    while pos < data.len() {
+        let mut block_input = Vec::with_capacity(32 + NONCE_SIZE + 8);
+        block_input.extend_from_slice(key);
+        block_input.extend_from_slice(nonce);
+        block_input.extend_from_slice(&counter.to_le_bytes());
+        let block = crate::hash_domain(b"spectra.keystream", &block_input);
+
+        let remaining = data.len() - pos;
+        let take = remaining.min(32);
+        for i in 0..take {
+            output.push(data[pos + i] ^ block[i]);
+        }
+        pos += take;
+        counter += 1;
+    }
+
+    output
+}
+
+/// Compute MAC over (nonce || ciphertext || kem_ciphertext) using BLAKE3 keyed mode.
+fn compute_mac(
+    mac_key: &[u8; 32],
+    nonce: &[u8; NONCE_SIZE],
+    ciphertext: &[u8],
+    kem_ct: &KemCiphertext,
+) -> Hash {
+    let mut hasher = blake3::Hasher::new_keyed(mac_key);
+    hasher.update(nonce);
+    hasher.update(ciphertext);
+    hasher.update(&kem_ct.0);
+    *hasher.finalize().as_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::KemKeypair;
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let kp = KemKeypair::generate();
+        let msg = b"hello spectra! this is an encrypted transaction message.";
+        let encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn wrong_key_fails_decrypt() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        let msg = b"secret message";
+        let encrypted = EncryptedPayload::encrypt(&kp1.public, msg).unwrap();
+        assert!(encrypted.decrypt(&kp2).is_none());
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails_mac() {
+        let kp = KemKeypair::generate();
+        let msg = b"integrity test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        if !encrypted.ciphertext.is_empty() {
+            encrypted.ciphertext[0] ^= 0xff;
+        }
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn tampered_nonce_fails_mac() {
+        let kp = KemKeypair::generate();
+        let msg = b"nonce test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        encrypted.nonce[0] ^= 0xff;
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn empty_message() {
+        let kp = KemKeypair::generate();
+        let encrypted = EncryptedPayload::encrypt(&kp.public, b"").unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn large_message() {
+        let kp = KemKeypair::generate();
+        let msg = vec![0xABu8; 10_000];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn shared_secret_reuse_produces_different_ciphertexts() {
+        let kp = KemKeypair::generate();
+        let (ss, ct) = kp.public.encapsulate().unwrap();
+        let msg = b"same message";
+
+        let e1 = EncryptedPayload::encrypt_with_shared_secret(&ss, ct.clone(), msg).unwrap();
+        let e2 = EncryptedPayload::encrypt_with_shared_secret(&ss, ct, msg).unwrap();
+
+        // Different nonces -> different ciphertexts (with overwhelming probability)
+        assert_ne!(e1.nonce, e2.nonce);
+        assert_ne!(e1.ciphertext, e2.ciphertext);
+
+        // Both decrypt correctly
+        assert_eq!(e1.decrypt_with_shared_secret(&ss).unwrap(), msg);
+        assert_eq!(e2.decrypt_with_shared_secret(&ss).unwrap(), msg);
+    }
+
+    #[test]
+    fn oversized_plaintext_rejected() {
+        let kp = KemKeypair::generate();
+        let huge = vec![0u8; crate::constants::MAX_ENCRYPT_PLAINTEXT + 1];
+        assert!(EncryptedPayload::encrypt(&kp.public, &huge).is_none());
+    }
+}

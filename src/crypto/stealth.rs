@@ -1,0 +1,148 @@
+//! Stealth addresses for receiver privacy.
+//!
+//! When Alice sends to Bob, she doesn't send to Bob's public address directly.
+//! Instead, she derives a unique one-time stealth address for each transaction
+//! output. Only Bob can detect and spend outputs sent to him.
+//!
+//! Protocol (Kyber-based):
+//! 1. Alice encapsulates against Bob's KEM public key → (shared_secret, ciphertext)
+//! 2. Alice derives: one_time_key = H("stealth" || shared_secret || output_index)
+//! 3. The output is "addressed" to this one_time_key
+//! 4. Bob scans outputs by decapsulating the ciphertext and re-deriving the key
+//! 5. Bob can spend using knowledge of shared_secret + his signing key
+
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use super::keys::{KemCiphertext, KemKeypair, KemPublicKey};
+use crate::Hash;
+
+/// A one-time stealth address attached to a transaction output.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StealthAddress {
+    /// The one-time public identifier for this output
+    pub one_time_key: Hash,
+    /// The KEM ciphertext needed for the recipient to derive the shared secret
+    pub kem_ciphertext: KemCiphertext,
+}
+
+/// Data the recipient needs to spend an output sent to a stealth address.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct StealthSpendInfo {
+    /// The shared secret derived from KEM decapsulation
+    pub shared_secret: [u8; 32],
+    /// The derived one-time spending key
+    pub one_time_key: Hash,
+}
+
+/// Result of stealth address generation, including the shared secret
+/// so it can be reused for encrypting note data (avoiding a second KEM).
+pub struct StealthGenResult {
+    pub address: StealthAddress,
+    pub shared_secret: super::keys::SharedSecret,
+}
+
+impl StealthAddress {
+    /// Generate a stealth address for a recipient.
+    ///
+    /// Returns the address and the KEM shared secret, which callers should
+    /// reuse for encrypting note data (via `encrypt_with_shared_secret`)
+    /// instead of performing a second KEM encapsulation.
+    ///
+    /// `recipient_kem_pk`: the recipient's KEM public key
+    /// `output_index`: the index of this output within the transaction
+    pub fn generate(
+        recipient_kem_pk: &KemPublicKey,
+        output_index: u32,
+    ) -> Option<StealthGenResult> {
+        let (shared_secret, ciphertext) = recipient_kem_pk.encapsulate()?;
+        let one_time_key = derive_one_time_key(&shared_secret.0, output_index);
+        Some(StealthGenResult {
+            address: StealthAddress {
+                one_time_key,
+                kem_ciphertext: ciphertext,
+            },
+            shared_secret,
+        })
+    }
+
+    /// Try to detect if this stealth address belongs to us.
+    /// Returns the spend info if it does.
+    pub fn try_detect(&self, our_kem_kp: &KemKeypair) -> Option<StealthSpendInfo> {
+        let shared_secret = our_kem_kp.decapsulate(&self.kem_ciphertext)?;
+        // Try output indices 0..MAX_TX_IO
+        for idx in 0..crate::constants::MAX_TX_IO as u32 {
+            let derived = derive_one_time_key(&shared_secret.0, idx);
+            if crate::constant_time_eq(&derived, &self.one_time_key) {
+                return Some(StealthSpendInfo {
+                    shared_secret: shared_secret.0,
+                    one_time_key: derived,
+                });
+            }
+        }
+        None
+    }
+
+    /// Detect with a known output index (faster than scanning).
+    pub fn try_detect_at_index(
+        &self,
+        our_kem_kp: &KemKeypair,
+        output_index: u32,
+    ) -> Option<StealthSpendInfo> {
+        let shared_secret = our_kem_kp.decapsulate(&self.kem_ciphertext)?;
+        let derived = derive_one_time_key(&shared_secret.0, output_index);
+        if crate::constant_time_eq(&derived, &self.one_time_key) {
+            Some(StealthSpendInfo {
+                shared_secret: shared_secret.0,
+                one_time_key: derived,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Derive the one-time key from a shared secret and output index.
+///
+/// Uses `hash_domain` (BLAKE3 `new_derive_key`) for proper domain separation.
+/// Inputs are fixed-length (32 + 4 bytes), so concatenation is unambiguous.
+fn derive_one_time_key(shared_secret: &[u8; 32], output_index: u32) -> Hash {
+    let mut data = [0u8; 36];
+    data[..32].copy_from_slice(shared_secret);
+    data[32..].copy_from_slice(&output_index.to_le_bytes());
+    crate::hash_domain(b"spectra.stealth.one_time_key", &data)
+}
+
+/// Derive the spending authorization key from shared secret + owner's signing key fingerprint.
+/// This ties the stealth spend capability to the recipient's identity.
+///
+/// Uses `hash_domain` (BLAKE3 `new_derive_key`) for proper domain separation.
+/// Inputs are fixed-length (32 + 32 bytes), so concatenation is unambiguous.
+pub fn derive_spend_auth(shared_secret: &[u8; 32], signing_key_fingerprint: &Hash) -> Hash {
+    let mut data = [0u8; 64];
+    data[..32].copy_from_slice(shared_secret);
+    data[32..].copy_from_slice(signing_key_fingerprint);
+    crate::hash_domain(b"spectra.stealth.spend_auth", &data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::KemKeypair;
+
+    #[test]
+    fn stealth_address_roundtrip() {
+        let recipient = KemKeypair::generate();
+        let result = StealthAddress::generate(&recipient.public, 0).unwrap();
+        let info = result.address.try_detect_at_index(&recipient, 0).unwrap();
+        assert_eq!(info.one_time_key, result.address.one_time_key);
+    }
+
+    #[test]
+    fn stealth_address_wrong_recipient() {
+        let recipient = KemKeypair::generate();
+        let wrong = KemKeypair::generate();
+        let result = StealthAddress::generate(&recipient.public, 0).unwrap();
+        assert!(result.address.try_detect_at_index(&wrong, 0).is_none());
+    }
+}

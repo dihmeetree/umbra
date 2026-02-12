@@ -1,0 +1,37 @@
+[package]
+name = "spectra"
+version = "0.1.0"
+edition = "2021"
+description = """
+Spectra: A post-quantum private cryptocurrency with DAG-BFT consensus.
+Features: zk-STARK-ready proofs, stealth addresses, encrypted messaging,
+instant finality, and no trusted setup.
+"""
+
+[dependencies]
+# Post-quantum cryptography (NIST PQC standards)
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+
+# Hashing (256-bit post-quantum security via Grover bound)
+blake3 = "1"
+
+# zk-STARK proving system (no trusted setup, post-quantum)
+winterfell = "0.13"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+# Randomness
+rand = "0.8"
+
+# Utilities
+hex = "0.4"
+thiserror = "1"
+zeroize = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true

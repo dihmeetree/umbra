@@ -1,0 +1,101 @@
+//! # Spectra
+//!
+//! A post-quantum private cryptocurrency with:
+//! - **DAG-BFT consensus** — not PoW, not PoS; instant deterministic finality
+//! - **Post-quantum security** — CRYSTALS-Dilithium signatures + CRYSTALS-Kyber KEM
+//! - **Full privacy** — stealth addresses, nullifier-based spend privacy, confidential amounts
+//! - **No trusted setup** — all proofs are transparent (zk-STARK compatible)
+//! - **Encrypted messaging** — send arbitrary encrypted messages within transactions
+//! - **Scalability** — DAG structure enables parallel transaction processing
+
+pub mod consensus;
+pub mod crypto;
+pub mod network;
+pub mod state;
+pub mod transaction;
+pub mod wallet;
+
+/// Protocol constants
+pub mod constants {
+    /// Maximum transaction message size in bytes (64 KiB)
+    pub const MAX_MESSAGE_SIZE: usize = 65_536;
+    /// Number of validators in each BFT committee
+    pub const COMMITTEE_SIZE: usize = 21;
+    /// Minimum committee size for BFT safety (need at least 4 for f=1)
+    pub const MIN_COMMITTEE_SIZE: usize = 4;
+    /// Minimum bond required to become a validator (in base units)
+    pub const VALIDATOR_BOND: u64 = 1_000_000;
+    /// Maximum transactions per DAG vertex
+    pub const MAX_TXS_PER_VERTEX: usize = 10_000;
+    /// Target vertex interval in milliseconds
+    pub const VERTEX_INTERVAL_MS: u64 = 500;
+    /// BFT quorum threshold: 2f+1 where f = (COMMITTEE_SIZE-1)/3
+    pub const BFT_QUORUM: usize = (COMMITTEE_SIZE * 2) / 3 + 1;
+    /// Epoch length in vertices before committee rotation
+    pub const EPOCH_LENGTH: u64 = 1000;
+    /// Maximum number of parent references per DAG vertex
+    pub const MAX_PARENTS: usize = 8;
+    /// Maximum network message size (16 MiB)
+    pub const MAX_NETWORK_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+    /// Maximum plaintext size for encryption (1 MiB)
+    pub const MAX_ENCRYPT_PLAINTEXT: usize = 1024 * 1024;
+    /// Maximum number of encrypted messages per transaction
+    pub const MAX_MESSAGES_PER_TX: usize = 16;
+    /// Canonical Merkle tree depth for commitment trees
+    pub const MERKLE_DEPTH: usize = 20;
+    /// Number of bits for value range proofs
+    pub const RANGE_BITS: usize = 59;
+    /// Maximum inputs or outputs per transaction.
+    ///
+    /// Constrained by the range proof system: with RANGE_BITS = 59, the maximum
+    /// safe sum is MAX_TX_IO * 2^59 which must be < p (Goldilocks prime ≈ 2^64).
+    /// floor(p / 2^59) = 32, so 16 per side is conservative and safe.
+    pub const MAX_TX_IO: usize = 16;
+
+    /// Compute the chain ID for mainnet.
+    pub fn chain_id() -> crate::Hash {
+        crate::hash_domain(b"spectra.chain_id", b"spectra-mainnet-v1")
+    }
+}
+
+/// 32-byte hash used throughout the protocol
+pub type Hash = [u8; 32];
+
+/// Compute a domain-separated BLAKE3 hash.
+///
+/// The domain MUST be valid UTF-8 (all Spectra domains use ASCII).
+/// Panics at runtime if domain is not valid UTF-8 — this is a programming error.
+pub fn hash_domain(domain: &[u8], data: &[u8]) -> Hash {
+    let domain_str = std::str::from_utf8(domain).expect("hash_domain: domain must be valid UTF-8");
+    let mut hasher = blake3::Hasher::new_derive_key(domain_str);
+    hasher.update(data);
+    *hasher.finalize().as_bytes()
+}
+
+/// Compute BLAKE3 hash of length-prefixed concatenated slices.
+///
+/// Each part is prefixed with its length as a little-endian u64, preventing
+/// ambiguous concatenation (e.g., `["AB","C"]` vs `["A","BC"]`).
+pub fn hash_concat(parts: &[&[u8]]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Constant-time comparison of two byte slices.
+///
+/// Returns true only if the slices have equal length and identical contents.
+/// Runs in time proportional to the length, independent of where bytes differ.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
