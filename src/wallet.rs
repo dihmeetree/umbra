@@ -7,11 +7,24 @@
 //! - Builds and signs transactions for spending
 
 use crate::crypto::commitment::{BlindingFactor, Commitment};
-use crate::crypto::keys::FullKeypair;
+use crate::crypto::keys::{FullKeypair, SharedSecret};
 use crate::crypto::stealth::derive_spend_auth;
 use crate::transaction::builder::{decode_note, InputSpec, TransactionBuilder};
 use crate::transaction::{Transaction, TxOutput};
 use crate::Hash;
+
+/// Spend status of a wallet output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpendStatus {
+    /// Output is available for spending.
+    Unspent,
+    /// Output is used in a pending (unconfirmed) transaction.
+    /// Contains the `tx_binding` of the pending transaction so
+    /// it can be confirmed or cancelled.
+    Pending { tx_binding: Hash },
+    /// Output has been confirmed spent on-chain.
+    Spent,
+}
 
 /// A spendable output owned by this wallet.
 #[derive(Clone, Debug)]
@@ -24,8 +37,8 @@ pub struct OwnedOutput {
     pub blinding: BlindingFactor,
     /// The spend authorization key
     pub spend_auth: Hash,
-    /// Whether this output has been spent
-    pub spent: bool,
+    /// Spend status (unspent / pending / spent)
+    pub status: SpendStatus,
     /// Index in the global commitment tree
     pub commitment_index: Option<usize>,
 }
@@ -111,8 +124,13 @@ impl Wallet {
         let signing_fingerprint = self.keypair.signing.public.fingerprint();
         let spend_auth = derive_spend_auth(&stealth_info.shared_secret, &signing_fingerprint);
 
-        // Decrypt the note data to get value and blinding
-        let note_data = output.encrypted_note.decrypt(&self.keypair.kem)?;
+        // Decrypt the note data reusing the shared secret from stealth detection,
+        // avoiding a redundant second KEM decapsulation and reducing side-channel
+        // exposure of the KEM secret key.
+        let shared_secret = SharedSecret(stealth_info.shared_secret);
+        let note_data = output
+            .encrypted_note
+            .decrypt_with_shared_secret(&shared_secret)?;
         let (value, blinding) = decode_note(&note_data)?;
 
         // Verify the commitment matches
@@ -126,23 +144,29 @@ impl Wallet {
             value,
             blinding,
             spend_auth,
-            spent: false,
+            status: SpendStatus::Unspent,
             commitment_index: None,
         })
     }
 
-    /// Get our spendable balance.
+    /// Get our spendable balance (only fully unspent outputs, not pending).
+    ///
+    /// Uses checked arithmetic to prevent silent overflow when many outputs
+    /// are held simultaneously.
     pub fn balance(&self) -> u64 {
         self.outputs
             .iter()
-            .filter(|o| !o.spent)
-            .map(|o| o.value)
-            .sum()
+            .filter(|o| o.status == SpendStatus::Unspent)
+            .try_fold(0u64, |acc, o| acc.checked_add(o.value))
+            .unwrap_or(u64::MAX)
     }
 
-    /// Get unspent outputs.
+    /// Get unspent outputs (excludes pending and spent).
     pub fn unspent_outputs(&self) -> Vec<&OwnedOutput> {
-        self.outputs.iter().filter(|o| !o.spent).collect()
+        self.outputs
+            .iter()
+            .filter(|o| o.status == SpendStatus::Unspent)
+            .collect()
     }
 
     /// Get all received messages.
@@ -174,12 +198,12 @@ impl Wallet {
             .checked_add(fee)
             .ok_or(WalletError::ArithmeticOverflow)?;
 
-        // Select outputs to spend (simple greedy)
+        // Select outputs to spend (simple greedy, only fully unspent)
         let mut selected: Vec<usize> = Vec::new();
         let mut selected_total = 0u64;
 
         for (i, output) in self.outputs.iter().enumerate() {
-            if output.spent {
+            if output.status != SpendStatus::Unspent {
                 continue;
             }
             selected.push(i);
@@ -233,12 +257,43 @@ impl Wallet {
 
         let tx = builder.build().map_err(WalletError::Build)?;
 
-        // Mark outputs as spent
+        // Mark outputs as pending (not fully spent until confirmed on-chain).
+        // Use `confirm_transaction` after the tx is finalized, or
+        // `cancel_transaction` if it fails to be included.
+        let tx_binding = tx.tx_binding;
         for &idx in &selected {
-            self.outputs[idx].spent = true;
+            self.outputs[idx].status = SpendStatus::Pending { tx_binding };
         }
 
         Ok(tx)
+    }
+
+    /// Confirm that a pending transaction was included on-chain.
+    /// Moves all outputs with matching `tx_binding` from `Pending` to `Spent`.
+    pub fn confirm_transaction(&mut self, tx_binding: &Hash) {
+        for output in &mut self.outputs {
+            if output.status
+                == (SpendStatus::Pending {
+                    tx_binding: *tx_binding,
+                })
+            {
+                output.status = SpendStatus::Spent;
+            }
+        }
+    }
+
+    /// Cancel a pending transaction (e.g., it was not included before expiry).
+    /// Moves all outputs with matching `tx_binding` from `Pending` back to `Unspent`.
+    pub fn cancel_transaction(&mut self, tx_binding: &Hash) {
+        for output in &mut self.outputs {
+            if output.status
+                == (SpendStatus::Pending {
+                    tx_binding: *tx_binding,
+                })
+            {
+                output.status = SpendStatus::Unspent;
+            }
+        }
     }
 
     /// Get the number of owned outputs.
@@ -365,16 +420,16 @@ mod tests {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
 
-        // Give Alice some funds
+        // Give Alice some funds (coinbase — bypasses min-fee via direct build)
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10000,
+                value: 10001,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(alice.kem_public_key().clone(), 10000)
-            .set_fee(0)
+            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -389,10 +444,45 @@ mod tests {
 
         assert_eq!(tx.fee, 100);
         assert_eq!(tx.outputs.len(), 2); // Payment + change
-        assert_eq!(alice.balance(), 0); // All outputs now spent
+        assert_eq!(alice.balance(), 0); // All outputs now pending
+
+        // Confirm the transaction
+        alice.confirm_transaction(&tx.tx_binding);
 
         // Alice scans her own transaction to pick up change
         alice.scan_transaction(&tx);
         assert_eq!(alice.balance(), 6900); // 10000 - 3000 - 100
+    }
+
+    #[test]
+    fn wallet_cancel_pending_transaction() {
+        let mut alice = Wallet::new();
+        let bob = Wallet::new();
+
+        let funding_tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 10001,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(alice.kem_public_key().clone(), 10000)
+            .set_fee(1)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        alice.scan_transaction(&funding_tx);
+        assert_eq!(alice.balance(), 10000);
+
+        // Build a transaction — outputs become pending
+        let tx = alice
+            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .unwrap();
+        assert_eq!(alice.balance(), 0); // All pending
+
+        // Cancel the transaction — outputs return to unspent
+        alice.cancel_transaction(&tx.tx_binding);
+        assert_eq!(alice.balance(), 10000); // Restored
     }
 }

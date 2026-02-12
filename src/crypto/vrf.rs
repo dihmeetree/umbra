@@ -66,20 +66,17 @@ impl VrfOutput {
         }
     }
 
-    /// Verify that the VRF output is correct for the given public key and input.
+    /// Verify the VRF output against a pre-registered commitment (full anti-grinding).
     ///
-    /// If `expected_commitment` is provided, also verifies that the proof
-    /// matches the pre-committed hash (anti-grinding check).
-    pub fn verify(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
-        self.verify_with_commitment(public_key, input, None)
-    }
-
-    /// Verify with optional anti-grinding commitment check.
-    pub fn verify_with_commitment(
+    /// `expected_commitment` is the commitment hash that was submitted on-chain
+    /// before the epoch seed was revealed. This MUST be checked to prevent
+    /// grinding attacks where a validator re-evaluates the VRF until they get
+    /// a favorable committee selection.
+    pub fn verify(
         &self,
         public_key: &SigningPublicKey,
         input: &[u8],
-        expected_commitment: Option<&Hash>,
+        expected_commitment: &Hash,
     ) -> bool {
         let tagged_input = crate::hash_concat(&[b"spectra.vrf.input", input]);
 
@@ -101,11 +98,34 @@ impl VrfOutput {
             return false;
         }
 
-        // If an expected commitment was pre-registered, verify it matches
-        if let Some(expected) = expected_commitment {
-            if !crate::constant_time_eq(expected, &computed_commitment) {
-                return false;
-            }
+        // Verify against the pre-registered on-chain commitment
+        if !crate::constant_time_eq(expected_commitment, &computed_commitment) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Verify the VRF proof cryptographically without checking against a
+    /// pre-registered commitment. Use ONLY for local self-checks (e.g., after
+    /// `evaluate()`). For on-chain verification, always use `verify()` with
+    /// the pre-registered commitment.
+    pub fn verify_locally(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
+        let tagged_input = crate::hash_concat(&[b"spectra.vrf.input", input]);
+
+        let sig = super::keys::Signature(self.proof.clone());
+        if !public_key.verify(&tagged_input, &sig) {
+            return false;
+        }
+
+        let expected_value = crate::hash_domain(b"spectra.vrf.output", &self.proof);
+        if !crate::constant_time_eq(&self.value, &expected_value) {
+            return false;
+        }
+
+        let computed_commitment = crate::hash_domain(b"spectra.vrf.proof_commitment", &self.proof);
+        if !crate::constant_time_eq(&self.proof_commitment, &computed_commitment) {
+            return false;
         }
 
         true
@@ -187,7 +207,10 @@ mod tests {
         let kp = SigningKeypair::generate();
         let input = b"epoch-42-committee-selection";
         let output = VrfOutput::evaluate(&kp, input);
-        assert!(output.verify(&kp.public, input));
+        // Full verify with the pre-registered commitment
+        assert!(output.verify(&kp.public, input, &output.proof_commitment));
+        // Local verify (no commitment check)
+        assert!(output.verify_locally(&kp.public, input));
     }
 
     #[test]
@@ -195,14 +218,22 @@ mod tests {
         let kp1 = SigningKeypair::generate();
         let kp2 = SigningKeypair::generate();
         let output = VrfOutput::evaluate(&kp1, b"test");
-        assert!(!output.verify(&kp2.public, b"test"));
+        assert!(!output.verify(&kp2.public, b"test", &output.proof_commitment));
     }
 
     #[test]
     fn vrf_wrong_input_fails() {
         let kp = SigningKeypair::generate();
         let output = VrfOutput::evaluate(&kp, b"input1");
-        assert!(!output.verify(&kp.public, b"input2"));
+        assert!(!output.verify(&kp.public, b"input2", &output.proof_commitment));
+    }
+
+    #[test]
+    fn vrf_wrong_commitment_fails() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"test");
+        let fake_commitment = [0xFFu8; 32];
+        assert!(!output.verify(&kp.public, b"test", &fake_commitment));
     }
 
     #[test]

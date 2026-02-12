@@ -249,34 +249,45 @@ impl Dag {
     }
 
     /// Get all finalized vertices in causal order (topological sort).
+    ///
+    /// Uses Kahn's algorithm (in-degree counting) to produce a correct
+    /// topological order. This handles all DAG shapes including diamonds,
+    /// and correctly includes finalized vertices whose only paths from
+    /// genesis pass through non-finalized ancestors.
     pub fn finalized_order(&self) -> Vec<VertexId> {
-        // BFS from genesis, only including finalized vertices
-        let mut ordered = Vec::new();
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-
-        // Find genesis (round 0)
-        for (id, v) in &self.vertices {
-            if v.round == 0 && self.finalized.contains(id) {
-                queue.push_back(*id);
-            }
+        // Compute in-degree for each finalized vertex, counting only finalized parents
+        let mut in_degree: HashMap<VertexId, usize> = HashMap::new();
+        for &vid in &self.finalized {
+            let degree = self.vertices[&vid]
+                .parents
+                .iter()
+                .filter(|p| self.finalized.contains(p))
+                .count();
+            in_degree.insert(vid, degree);
         }
 
+        // Collect seed vertices (no finalized parents), sorted for determinism
+        let mut seeds: Vec<VertexId> = in_degree
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&v, _)| v)
+            .collect();
+        seeds.sort_by(|a, b| {
+            let ra = self.vertices[a].round;
+            let rb = self.vertices[b].round;
+            ra.cmp(&rb).then_with(|| a.0.cmp(&b.0))
+        });
+
+        let mut queue: VecDeque<VertexId> = seeds.into_iter().collect();
+        let mut ordered = Vec::with_capacity(self.finalized.len());
+
         while let Some(vid) = queue.pop_front() {
-            if !visited.insert(vid) {
-                continue;
-            }
             ordered.push(vid);
             if let Some(children) = self.children.get(&vid) {
                 for child in children {
-                    if self.finalized.contains(child) {
-                        // Only add if all parents are visited
-                        let vertex = &self.vertices[child];
-                        let all_parents_visited = vertex
-                            .parents
-                            .iter()
-                            .all(|p| visited.contains(p) || !self.finalized.contains(p));
-                        if all_parents_visited {
+                    if let Some(degree) = in_degree.get_mut(child) {
+                        *degree -= 1;
+                        if *degree == 0 {
                             queue.push_back(*child);
                         }
                     }

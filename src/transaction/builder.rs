@@ -336,8 +336,11 @@ fn encode_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
 }
 
 /// Decode note data from decrypted bytes.
+///
+/// Expects exactly 40 bytes (8 bytes value + 32 bytes blinding factor).
+/// Rejects payloads of any other length to prevent trailing-data confusion.
 pub fn decode_note(data: &[u8]) -> Option<(u64, BlindingFactor)> {
-    if data.len() < 40 {
+    if data.len() != 40 {
         return None;
     }
     let value = u64::from_le_bytes(data[..8].try_into().ok()?);

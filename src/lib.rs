@@ -52,6 +52,13 @@ pub mod constants {
     /// floor(p / 2^59) = 32, so 16 per side is conservative and safe.
     pub const MAX_TX_IO: usize = 16;
 
+    /// Minimum transaction fee (in base units).
+    ///
+    /// Enforced by `validate_structure()` to prevent zero-fee spam. Coinbase or
+    /// genesis funding should add outputs directly to state rather than going
+    /// through transaction validation.
+    pub const MIN_TX_FEE: u64 = 1;
+
     /// Compute the chain ID for mainnet.
     pub fn chain_id() -> crate::Hash {
         crate::hash_domain(b"spectra.chain_id", b"spectra-mainnet-v1")

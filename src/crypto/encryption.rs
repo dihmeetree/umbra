@@ -168,7 +168,12 @@ fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u
     output
 }
 
-/// Compute MAC over (nonce || ciphertext || kem_ciphertext) using BLAKE3 keyed mode.
+/// Compute MAC over (nonce || len(ciphertext) || ciphertext || len(kem_ct) || kem_ct)
+/// using BLAKE3 keyed mode.
+///
+/// Each variable-length field is prefixed with its length as a little-endian u64,
+/// preventing boundary-ambiguity attacks where an adversary shifts bytes between
+/// the ciphertext and KEM ciphertext while preserving the same MAC input.
 fn compute_mac(
     mac_key: &[u8; 32],
     nonce: &[u8; NONCE_SIZE],
@@ -177,7 +182,9 @@ fn compute_mac(
 ) -> Hash {
     let mut hasher = blake3::Hasher::new_keyed(mac_key);
     hasher.update(nonce);
+    hasher.update(&(ciphertext.len() as u64).to_le_bytes());
     hasher.update(ciphertext);
+    hasher.update(&(kem_ct.0.len() as u64).to_le_bytes());
     hasher.update(&kem_ct.0);
     *hasher.finalize().as_bytes()
 }

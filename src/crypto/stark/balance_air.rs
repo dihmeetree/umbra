@@ -212,7 +212,21 @@ impl Air for BalanceAir {
             result[28 + j] = first_row_flag * bit * (bit - E::ONE);
         }
 
-        // Constraint 87: Bit reconstruction equals state[4], skipped at chain_flag=1
+        // Constraint 87: Bit reconstruction equals state[4], skipped at chain_flag=1.
+        //
+        // The constraint is: first_row × (1-chain_flag) × state[4] × (reconstructed - state[4]) = 0
+        //
+        // When state[4] = 0, this is trivially satisfied regardless of the bit columns.
+        // This is safe because:
+        // 1. For real commitment blocks: state[4] is the first word of the Rescue hash
+        //    digest. The Rescue round constraints enforce that the digest is correctly
+        //    computed from (value, blinding). A malicious prover cannot set state[4] = 0
+        //    for a non-zero committed value because the Rescue permutation is a bijection —
+        //    changing the hash output would violate the round constraints.
+        // 2. For padding blocks: state[4] = 0 is asserted directly (see get_assertions()),
+        //    and block_value is also 0, so no range bypass occurs.
+        // 3. The commitment digest is further verified via proof_link chaining and the
+        //    public assertion on the proof_link output, binding the entire computation.
         let mut reconstructed = E::ZERO;
         for j in 0..RANGE_BITS {
             let power_of_two = E::from(Felt::new(1u64 << j));

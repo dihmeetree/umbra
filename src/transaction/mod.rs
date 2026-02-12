@@ -153,6 +153,11 @@ impl Transaction {
             return Err(TxValidationError::TooManyMessages);
         }
 
+        // Enforce minimum fee to prevent zero-fee spam
+        if self.fee < crate::constants::MIN_TX_FEE {
+            return Err(TxValidationError::FeeTooLow);
+        }
+
         // Enforce transaction expiry
         if self.expiry_epoch > 0 && current_epoch > 0 && current_epoch > self.expiry_epoch {
             return Err(TxValidationError::Expired);
@@ -342,4 +347,6 @@ pub enum TxValidationError {
     InvalidBinding,
     #[error("transaction has expired")]
     Expired,
+    #[error("fee below minimum ({} required)", crate::constants::MIN_TX_FEE)]
+    FeeTooLow,
 }

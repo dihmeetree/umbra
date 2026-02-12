@@ -89,7 +89,7 @@ spectra/
     main.rs                 End-to-end demo
 ```
 
-**~7,500 lines of Rust** across 27 source files with **87 tests**.
+**~7,800 lines of Rust** across 27 source files with **90 tests**.
 
 ## Building
 
@@ -105,7 +105,7 @@ cargo build --release
 cargo test
 ```
 
-All 87 tests cover:
+All 90 tests cover:
 
 - Post-quantum key generation, signing, and KEM roundtrips
 - Stealth address generation and detection (correct and wrong recipient)
@@ -115,7 +115,7 @@ All 87 tests cover:
 - Encrypted message roundtrips, authentication, and tamper detection
 - VRF evaluation, verification, and committee selection statistics
 - DAG insertion, diamond merges, finalized ordering
-- BFT vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention
+- BFT vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection
 - Network message serialization roundtrips, oversized message rejection
 - Proof_link derivation and domain separation
 - zk-STARK proof generation and verification (balance and spend roundtrips)
@@ -123,7 +123,7 @@ All 87 tests cover:
 - Proof transplant rejection: tampered tx_content_hash fails verification
 - Public input deserialization: allocation bounds, truncation, roundtrips
 - Transaction building with STARK proof generation
-- Wallet scanning, balance tracking, spending with change
+- Wallet scanning, balance tracking, spending with change, pending transaction confirm/cancel
 - End-to-end: fund, transfer, message decrypt, bystander non-detection
 
 ## Demo
@@ -223,6 +223,7 @@ Proves in zero knowledge:
 | `MERKLE_DEPTH` | 20 | Canonical commitment tree depth (~1M outputs) |
 | `RANGE_BITS` | 59 | Bit width for value range proofs |
 | `MAX_TX_IO` | 16 | Max inputs or outputs per transaction (range-proof safe) |
+| `MIN_TX_FEE` | 1 | Minimum transaction fee (prevents zero-fee spam) |
 
 ## Dependencies
 
@@ -283,6 +284,11 @@ All transaction validity is verified via zk-STARKs:
 - **Complete content hash binding** — `tx_content_hash` covers all encrypted payload fields including MACs and KEM ciphertexts, preventing undetected tampering of encrypted notes or messages
 - **Domain-separated hashing** — all critical hashes (`tx_id`, `vertex_id`, stealth key derivation, content hash) use BLAKE3 `new_derive_key` for proper cryptographic domain separation
 - **Chain ID enforcement** — `apply_transaction()` explicitly checks `chain_id` against the chain state, providing defense-in-depth beyond the implicit binding via balance proofs
+- **Minimum transaction fee** — `validate_structure()` enforces `MIN_TX_FEE`, preventing zero-fee spam; coinbase funding bypasses validation by adding outputs directly to state
+- **MAC boundary protection** — the encrypt-then-MAC construction length-prefixes each variable-length field (ciphertext, KEM ciphertext) before computing the MAC, preventing boundary-ambiguity attacks
+- **Equivocation detection** — BFT tracks `(voter_id, round) → vertex_id` and records `EquivocationEvidence` when a validator votes for conflicting vertices in the same round
+- **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` to prevent double-spend of outputs in unconfirmed transactions
+- **VRF commitment verification** — `VrfOutput::verify()` requires a pre-registered proof commitment, enforcing the commit-reveal anti-grinding scheme; `verify_locally()` is available for self-checks only
 
 ## Production Roadmap
 

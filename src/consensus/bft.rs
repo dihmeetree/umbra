@@ -27,6 +27,23 @@ use crate::crypto::keys::{Signature, SigningKeypair, SigningPublicKey};
 use crate::crypto::vrf::{EpochSeed, VrfOutput};
 use crate::Hash;
 
+/// Evidence of equivocation: a validator voted for different vertices in the same round.
+///
+/// This is slashable misbehaviour. Honest validators produce at most one vote per round.
+#[derive(Clone, Debug)]
+pub struct EquivocationEvidence {
+    /// The misbehaving validator
+    pub voter_id: Hash,
+    /// Epoch in which equivocation occurred
+    pub epoch: u64,
+    /// Round in which equivocation occurred
+    pub round: u64,
+    /// The first vertex the validator voted for
+    pub first_vertex: VertexId,
+    /// The conflicting second vertex
+    pub second_vertex: VertexId,
+}
+
 /// A validator registered in the system.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Validator {
@@ -143,6 +160,11 @@ pub struct BftState {
     votes: HashMap<VertexId, Vec<Vote>>,
     /// Certificates issued
     certificates: HashMap<VertexId, Certificate>,
+    /// Tracks (voter_id, round) -> VertexId for equivocation detection.
+    /// An honest validator votes for exactly one vertex per round.
+    round_votes: HashMap<(Hash, u64), VertexId>,
+    /// Detected equivocation evidence (slashable misbehaviour)
+    equivocations: Vec<EquivocationEvidence>,
 }
 
 impl BftState {
@@ -157,6 +179,8 @@ impl BftState {
             our_id: None,
             votes: HashMap::new(),
             certificates: HashMap::new(),
+            round_votes: HashMap::new(),
+            equivocations: Vec::new(),
         }
     }
 
@@ -243,6 +267,25 @@ impl BftState {
         }
 
         let vid = vote.vertex_id;
+
+        // Check for equivocation: same voter, same round, different vertex.
+        // An honest validator must vote for at most one vertex per round.
+        let round_key = (vote.voter_id, vote.round);
+        if let Some(&prev_vertex) = self.round_votes.get(&round_key) {
+            if prev_vertex != vote.vertex_id {
+                self.equivocations.push(EquivocationEvidence {
+                    voter_id: vote.voter_id,
+                    epoch: vote.epoch,
+                    round: vote.round,
+                    first_vertex: prev_vertex,
+                    second_vertex: vote.vertex_id,
+                });
+                return None; // Reject equivocating vote
+            }
+        } else {
+            self.round_votes.insert(round_key, vote.vertex_id);
+        }
+
         let votes = self.votes.entry(vid).or_default();
 
         // Don't accept duplicate votes from the same validator
@@ -301,6 +344,11 @@ impl BftState {
     /// Get all certificates.
     pub fn all_certificates(&self) -> Vec<&Certificate> {
         self.certificates.values().collect()
+    }
+
+    /// Get all detected equivocation evidence.
+    pub fn equivocations(&self) -> &[EquivocationEvidence] {
+        &self.equivocations
     }
 }
 
@@ -493,6 +541,48 @@ mod tests {
 
         assert!(bft.receive_vote(vote).is_none());
         assert!(!bft.votes.contains_key(&vertex_id));
+    }
+
+    #[test]
+    fn equivocation_detected() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        let vertex_a = VertexId([1u8; 32]);
+        let vertex_b = VertexId([2u8; 32]);
+
+        // Validator 0 votes for vertex A
+        let msg_a = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
+        let sig_a = keypairs[0].sign(&msg_a);
+        let vote_a = Vote {
+            vertex_id: vertex_a,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig_a,
+        };
+        bft.receive_vote(vote_a);
+
+        // Same validator votes for vertex B in the same round — equivocation!
+        let msg_b = vote_sign_data(&vertex_b, 0, 0, &VoteType::Accept, &chain_id);
+        let sig_b = keypairs[0].sign(&msg_b);
+        let vote_b = Vote {
+            vertex_id: vertex_b,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig_b,
+        };
+        assert!(bft.receive_vote(vote_b).is_none()); // Rejected
+
+        // Equivocation evidence should be recorded
+        assert_eq!(bft.equivocations().len(), 1);
+        assert_eq!(bft.equivocations()[0].voter_id, validators[0].id);
+        assert_eq!(bft.equivocations()[0].first_vertex, vertex_a);
+        assert_eq!(bft.equivocations()[0].second_vertex, vertex_b);
     }
 
     #[test]

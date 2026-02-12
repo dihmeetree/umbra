@@ -24,7 +24,17 @@ pub fn felts_to_hash(elements: &[Felt; DIGEST_SIZE]) -> Hash {
 
 /// Convert a 32-byte hash to 4 Goldilocks field elements.
 ///
-/// Each 8-byte chunk is interpreted as a little-endian u64 and reduced mod p.
+/// Each 8-byte chunk is interpreted as a little-endian u64 and reduced mod p
+/// (where p = 2^64 - 2^32 + 1, the Goldilocks prime).
+///
+/// **Important:** This conversion is lossy for non-field-native values. A u64 value
+/// in `[p, 2^64)` will be reduced mod p, so `felts_to_hash(hash_to_felts(h))` may
+/// differ from `h` when `h` originates from BLAKE3 or another source of uniformly
+/// random bytes. The probability of reduction per element is ~2^(-32), giving a
+/// negligible full-digest collision probability of ~2^(-128).
+///
+/// For field-native digests (e.g., Rescue Prime outputs where all elements are
+/// already in `[0, p)`), the round-trip is lossless.
 pub fn hash_to_felts(bytes: &Hash) -> [Felt; DIGEST_SIZE] {
     let mut result = [Felt::ZERO; DIGEST_SIZE];
     for i in 0..DIGEST_SIZE {

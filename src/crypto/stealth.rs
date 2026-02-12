@@ -68,19 +68,24 @@ impl StealthAddress {
 
     /// Try to detect if this stealth address belongs to us.
     /// Returns the spend info if it does.
+    ///
+    /// Always iterates all candidate indices to avoid leaking which index
+    /// matched via timing side-channels.
     pub fn try_detect(&self, our_kem_kp: &KemKeypair) -> Option<StealthSpendInfo> {
         let shared_secret = our_kem_kp.decapsulate(&self.kem_ciphertext)?;
-        // Try output indices 0..MAX_TX_IO
+        let mut result: Option<StealthSpendInfo> = None;
+        // Try output indices 0..MAX_TX_IO; do NOT return early to prevent
+        // timing leaks that reveal which output index matched.
         for idx in 0..crate::constants::MAX_TX_IO as u32 {
             let derived = derive_one_time_key(&shared_secret.0, idx);
             if crate::constant_time_eq(&derived, &self.one_time_key) {
-                return Some(StealthSpendInfo {
+                result = Some(StealthSpendInfo {
                     shared_secret: shared_secret.0,
                     one_time_key: derived,
                 });
             }
         }
-        None
+        result
     }
 
     /// Detect with a known output index (faster than scanning).
