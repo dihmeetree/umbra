@@ -208,4 +208,102 @@ mod tests {
         data.extend_from_slice(&[0u8; 10]);
         assert!(decode_message(&data).is_none());
     }
+
+    #[test]
+    fn get_finalized_vertices_roundtrip() {
+        let msg = Message::GetFinalizedVertices {
+            after_sequence: 42,
+            limit: 100,
+        };
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::GetFinalizedVertices {
+                after_sequence,
+                limit,
+            } => {
+                assert_eq!(after_sequence, 42);
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn finalized_vertices_response_roundtrip() {
+        let msg = Message::FinalizedVerticesResponse {
+            vertices: vec![],
+            has_more: false,
+            total_finalized: 500,
+        };
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::FinalizedVerticesResponse {
+                vertices,
+                has_more,
+                total_finalized,
+            } => {
+                assert!(vertices.is_empty());
+                assert!(!has_more);
+                assert_eq!(total_finalized, 500);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn peers_response_roundtrip() {
+        let kp = SigningKeypair::generate();
+        let peer = PeerInfo {
+            peer_id: kp.public.fingerprint(),
+            public_key: kp.public,
+            address: "127.0.0.1:9732".to_string(),
+            last_seen: 12345,
+        };
+        let msg = Message::PeersResponse(vec![peer]);
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::PeersResponse(peers) => {
+                assert_eq!(peers.len(), 1);
+                assert_eq!(peers[0].address, "127.0.0.1:9732");
+                assert_eq!(peers[0].last_seen, 12345);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn get_peers_roundtrip() {
+        let msg = Message::GetPeers;
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        assert!(matches!(decoded, Message::GetPeers));
+    }
+
+    #[test]
+    fn epoch_state_response_roundtrip() {
+        let msg = Message::EpochStateResponse {
+            epoch: 5,
+            committee: vec![[1u8; 32], [2u8; 32]],
+            commitment_root: [3u8; 32],
+            nullifier_count: 100,
+        };
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::EpochStateResponse {
+                epoch,
+                committee,
+                nullifier_count,
+                ..
+            } => {
+                assert_eq!(epoch, 5);
+                assert_eq!(committee.len(), 2);
+                assert_eq!(nullifier_count, 100);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
 }

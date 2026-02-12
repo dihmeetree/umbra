@@ -524,4 +524,114 @@ mod tests {
         assert_eq!(order[0], gid);
         assert_eq!(order[1], v1.id);
     }
+
+    #[test]
+    fn finalize_marks_vertex_as_finalized() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex(vec![gid], 1);
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+
+        assert!(!dag.is_finalized(&v1_id));
+        dag.finalize(&v1_id);
+        assert!(dag.is_finalized(&v1_id));
+    }
+
+    #[test]
+    fn tips_updated_on_insert() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Genesis is the only tip
+        assert!(dag.tips().contains(&gid));
+        assert_eq!(dag.tips().len(), 1);
+
+        // Insert child — genesis is no longer a tip
+        let v1 = make_vertex(vec![gid], 1);
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+
+        assert!(!dag.tips().contains(&gid));
+        assert!(dag.tips().contains(&v1_id));
+    }
+
+    #[test]
+    fn len_and_is_empty() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let dag = Dag::new(genesis);
+
+        assert!(!dag.is_empty());
+        assert_eq!(dag.len(), 1);
+
+        let mut dag2 = dag;
+        let v1 = make_vertex(vec![gid], 1);
+        dag2.insert_unchecked(v1).unwrap();
+        assert_eq!(dag2.len(), 2);
+    }
+
+    #[test]
+    fn insert_duplicate_rejected() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex(vec![gid], 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+        let result = dag.insert_unchecked(v1);
+        assert!(matches!(result, Err(VertexError::DuplicateVertex)));
+    }
+
+    #[test]
+    fn finalized_order_complex_diamond() {
+        // Build a more complex DAG:
+        //        genesis
+        //        /     \
+        //      v1       v2
+        //       \      / \
+        //        v3       v4
+        //         \      /
+        //          v5
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex_with_nonce(vec![gid], 1, 0);
+        let v2 = make_vertex_with_nonce(vec![gid], 1, 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+        dag.insert_unchecked(v2.clone()).unwrap();
+
+        let v3 = make_vertex_with_nonce(vec![v1.id, v2.id], 2, 0);
+        let v4 = make_vertex_with_nonce(vec![v2.id], 2, 1);
+        dag.insert_unchecked(v3.clone()).unwrap();
+        dag.insert_unchecked(v4.clone()).unwrap();
+
+        let v5 = make_vertex(vec![v3.id, v4.id], 3);
+        dag.insert_unchecked(v5.clone()).unwrap();
+
+        // Finalize all
+        dag.finalize(&v1.id);
+        dag.finalize(&v2.id);
+        dag.finalize(&v3.id);
+        dag.finalize(&v4.id);
+        dag.finalize(&v5.id);
+
+        let order = dag.finalized_order();
+        assert_eq!(order.len(), 6); // genesis + 5 vertices
+
+        // Genesis must be first
+        assert_eq!(order[0], gid);
+
+        // v1 and v2 must come before v3, v4
+        let pos = |id: &VertexId| order.iter().position(|x| x == id).unwrap();
+        assert!(pos(&v1.id) < pos(&v3.id));
+        assert!(pos(&v2.id) < pos(&v3.id));
+        assert!(pos(&v2.id) < pos(&v4.id));
+        assert!(pos(&v3.id) < pos(&v5.id));
+        assert!(pos(&v4.id) < pos(&v5.id));
+    }
 }

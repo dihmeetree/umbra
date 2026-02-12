@@ -460,3 +460,207 @@ pub enum TxValidationError {
     #[error("invalid bond return output")]
     InvalidBondReturn,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::commitment::BlindingFactor;
+    use crate::crypto::keys::FullKeypair;
+    use crate::transaction::builder::{InputSpec, TransactionBuilder};
+
+    fn test_proof_options() -> winterfell::ProofOptions {
+        winterfell::ProofOptions::new(
+            42,
+            8,
+            10,
+            winterfell::FieldExtension::Quadratic,
+            8,
+            255,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        )
+    }
+
+    fn make_test_tx() -> Transaction {
+        let recipient = FullKeypair::generate();
+        TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 900)
+            .set_fee(100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn tx_id_deterministic() {
+        let tx = make_test_tx();
+        assert_eq!(tx.tx_id(), tx.tx_id());
+    }
+
+    #[test]
+    fn tx_content_hash_deterministic() {
+        let tx = make_test_tx();
+        assert_eq!(tx.tx_content_hash(), tx.tx_content_hash());
+        assert_eq!(tx.tx_content_hash(), tx.tx_binding);
+    }
+
+    #[test]
+    fn validate_accepts_valid_tx() {
+        let tx = make_test_tx();
+        assert!(tx.validate_structure(0).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_no_inputs() {
+        let mut tx = make_test_tx();
+        tx.inputs.clear();
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::NoInputs)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_no_outputs() {
+        let mut tx = make_test_tx();
+        tx.outputs.clear();
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::NoOutputs)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_inputs() {
+        let mut tx = make_test_tx();
+        let extra = tx.inputs[0].clone();
+        while tx.inputs.len() <= crate::constants::MAX_TX_IO {
+            tx.inputs.push(extra.clone());
+        }
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::TooManyInputs)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_outputs() {
+        let mut tx = make_test_tx();
+        let extra = tx.outputs[0].clone();
+        while tx.outputs.len() <= crate::constants::MAX_TX_IO {
+            tx.outputs.push(extra.clone());
+        }
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::TooManyOutputs)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_nullifier() {
+        let mut tx = make_test_tx();
+        let dup = tx.inputs[0].clone();
+        tx.inputs.push(dup);
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::DuplicateNullifier)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_expired() {
+        let mut tx = make_test_tx();
+        tx.expiry_epoch = 5;
+        // current_epoch=10 > expiry_epoch=5 → expired
+        assert!(matches!(
+            tx.validate_structure(10),
+            Err(TxValidationError::Expired)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_fee_too_low() {
+        let mut tx = make_test_tx();
+        tx.fee = 0;
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::FeeTooLow)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_binding() {
+        let mut tx = make_test_tx();
+        tx.tx_binding = [0u8; 32]; // tamper
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::InvalidBinding)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_messages() {
+        let mut tx = make_test_tx();
+        let msg = TxMessage {
+            payload: crate::crypto::encryption::EncryptedPayload {
+                ciphertext: vec![0u8; 10],
+                nonce: [0u8; 24],
+                mac: [0u8; 32],
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
+            },
+        };
+        for _ in 0..=crate::constants::MAX_MESSAGES_PER_TX {
+            tx.messages.push(msg.clone());
+        }
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::TooManyMessages)
+        ));
+    }
+
+    #[test]
+    fn estimated_size_nonzero() {
+        let tx = make_test_tx();
+        assert!(tx.estimated_size() > 0);
+    }
+
+    #[test]
+    fn compute_tx_content_hash_deterministic() {
+        let tx = make_test_tx();
+        let h1 = compute_tx_content_hash(
+            &tx.inputs,
+            &tx.outputs,
+            &tx.messages,
+            tx.fee,
+            &tx.chain_id,
+            tx.expiry_epoch,
+            &tx.tx_type,
+        );
+        let h2 = compute_tx_content_hash(
+            &tx.inputs,
+            &tx.outputs,
+            &tx.messages,
+            tx.fee,
+            &tx.chain_id,
+            tx.expiry_epoch,
+            &tx.tx_type,
+        );
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn deregister_sign_data_deterministic() {
+        let chain_id = [1u8; 32];
+        let vid = [2u8; 32];
+        let content = [3u8; 32];
+        let a = deregister_sign_data(&chain_id, &vid, &content);
+        let b = deregister_sign_data(&chain_id, &vid, &content);
+        assert_eq!(a, b);
+    }
+}

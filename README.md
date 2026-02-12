@@ -95,7 +95,7 @@ spectra/
     main.rs                 Node + wallet binary with clap subcommands
 ```
 
-**~12,750 lines of Rust** across 33 source files with **124 tests**.
+**~13,900 lines of Rust** across 33 source files with **190 tests**.
 
 ## Building
 
@@ -283,34 +283,31 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 124 tests cover:
+All 190 tests cover:
 
-- Post-quantum key generation, signing, and KEM roundtrips
-- Stealth address generation and detection (correct and wrong recipient)
-- Rescue Prime commitments and field element conversions
-- Nullifier determinism and double-spend detection
-- Merkle tree construction, path verification, and depth-20 canonical padding
-- Encrypted message roundtrips, authentication, and tamper detection
-- VRF evaluation, verification, and committee selection statistics
-- DAG insertion, diamond merges, finalized ordering
-- BFT vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection
-- Network message serialization roundtrips, oversized message rejection
-- Proof_link derivation and domain separation
-- zk-STARK proof generation and verification (balance and spend roundtrips)
-- Range proof enforcement: values >= 2^59 rejected, boundary value accepted
-- Proof transplant rejection: tampered tx_content_hash fails verification
-- Public input deserialization: allocation bounds, truncation, roundtrips
-- Transaction building with STARK proof generation
-- Wallet scanning, balance tracking, spending with change, pending transaction confirm/cancel
-- End-to-end: fund, transfer, message decrypt, bystander non-detection
-- Mempool: fee-priority ordering, nullifier conflict detection, eviction, drain
-- Storage: vertex/transaction/nullifier/validator persistence, chain state meta roundtrips, finalized index roundtrip and batch retrieval
-- P2P: peer connection establishment, message exchange
-- Node: persistent keypair load/save roundtrip
-- Merkle tree restore from stored level data, last-appended path coverage
-- Chain state persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state)
-- Ledger restore from storage
-- Wallet file save/load roundtrip (keys, outputs, messages, pending status)
+- **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
+- **Post-quantum crypto** — key generation, signing, KEM roundtrips
+- **Stealth addresses** — generation, detection, multi-index scanning, spend auth derivation determinism, index-dependent key uniqueness
+- **Rescue Prime** — commitments, field element conversions
+- **Nullifiers** — determinism, double-spend detection
+- **Merkle tree** — construction, path verification, depth-20 canonical padding, restore from stored level data, last-appended path coverage
+- **Encryption** — message roundtrips, authentication, tamper detection
+- **VRF** — evaluation, verification, committee selection statistics
+- **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs
+- **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement
+- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses
+- **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages)
+- **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
+- **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found and not-found), /vertices/finalized; POST /tx (valid submission, invalid hex rejection); full submit-and-retrieve roundtrip
+- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status)
+- **Wallet CLI** — init (creates files, rejects duplicate), address display, export creates valid address file, messages on empty wallet
+- **End-to-end** — fund, transfer, message decrypt, bystander non-detection
+- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain
+- **Storage** — vertex/transaction/nullifier/validator persistence, chain state meta roundtrips, finalized index roundtrip and batch retrieval
+- **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking
+- **P2P** — peer connection establishment, message exchange
+- **Node** — persistent keypair load/save roundtrip
+- **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
 
 ## Demo
 

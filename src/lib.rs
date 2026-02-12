@@ -135,3 +135,44 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     a.ct_eq(b).into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_domain_deterministic() {
+        let a = hash_domain(b"spectra.test", b"hello");
+        let b = hash_domain(b"spectra.test", b"hello");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_domain_different_domains() {
+        let a = hash_domain(b"spectra.domain_a", b"data");
+        let b = hash_domain(b"spectra.domain_b", b"data");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_concat_deterministic() {
+        let a = hash_concat(&[b"hello", b"world"]);
+        let b = hash_concat(&[b"hello", b"world"]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_concat_length_prefix_prevents_ambiguity() {
+        let ab_c = hash_concat(&[b"ab", b"c"]);
+        let a_bc = hash_concat(&[b"a", b"bc"]);
+        assert_ne!(ab_c, a_bc);
+    }
+
+    #[test]
+    fn constant_time_eq_works() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"short", b"longer"));
+        assert!(constant_time_eq(b"", b""));
+    }
+}

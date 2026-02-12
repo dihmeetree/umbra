@@ -360,3 +360,60 @@ async fn scan_chain(
 
     Ok(current_after)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cmd_init_creates_wallet_and_address() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init(dir.path()).unwrap();
+
+        assert!(wallet_path(dir.path()).exists());
+        assert!(address_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn cmd_init_rejects_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init(dir.path()).unwrap();
+
+        // Second init should fail
+        let result = cmd_init(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_address_shows_info() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init(dir.path()).unwrap();
+
+        // address should succeed after init
+        cmd_address(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn cmd_export_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init(dir.path()).unwrap();
+
+        let export_path = dir.path().join("exported.spectra-address");
+        cmd_export(dir.path(), &export_path).unwrap();
+        assert!(export_path.exists());
+
+        // Exported file should be valid hex that deserializes to PublicAddress
+        let hex_content = std::fs::read_to_string(&export_path).unwrap();
+        let bytes = hex::decode(hex_content.trim()).unwrap();
+        let _addr: PublicAddress = bincode::deserialize(&bytes).unwrap();
+    }
+
+    #[test]
+    fn cmd_messages_empty_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init(dir.path()).unwrap();
+
+        // messages on a fresh wallet should succeed (just print "No messages")
+        cmd_messages(dir.path()).unwrap();
+    }
+}

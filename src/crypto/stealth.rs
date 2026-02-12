@@ -150,4 +150,44 @@ mod tests {
         let result = StealthAddress::generate(&recipient.public, 0).unwrap();
         assert!(result.address.try_detect_at_index(&wrong, 0).is_none());
     }
+
+    #[test]
+    fn try_detect_scans_all_indices() {
+        let recipient = KemKeypair::generate();
+        // Generate at index 3
+        let result = StealthAddress::generate(&recipient.public, 3).unwrap();
+        // try_detect (no index hint) should still find it
+        let info = result.address.try_detect(&recipient).unwrap();
+        assert_eq!(info.one_time_key, result.address.one_time_key);
+    }
+
+    #[test]
+    fn derive_spend_auth_deterministic() {
+        let secret = [42u8; 32];
+        let fingerprint = crate::hash_domain(b"test", b"fp");
+        let a = derive_spend_auth(&secret, &fingerprint);
+        let b = derive_spend_auth(&secret, &fingerprint);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn derive_spend_auth_differs_by_key() {
+        let secret = [42u8; 32];
+        let fp1 = crate::hash_domain(b"test", b"key1");
+        let fp2 = crate::hash_domain(b"test", b"key2");
+        assert_ne!(
+            derive_spend_auth(&secret, &fp1),
+            derive_spend_auth(&secret, &fp2)
+        );
+    }
+
+    #[test]
+    fn stealth_different_indices_different_keys() {
+        let recipient = KemKeypair::generate();
+        let r0 = StealthAddress::generate(&recipient.public, 0).unwrap();
+        let r1 = StealthAddress::generate(&recipient.public, 1).unwrap();
+        // Different indices must produce different one_time_keys
+        // (they also use different KEM encapsulations, so different ciphertexts)
+        assert_ne!(r0.address.one_time_key, r1.address.one_time_key);
+    }
 }

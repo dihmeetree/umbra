@@ -832,6 +832,94 @@ mod tests {
     }
 
     #[test]
+    fn register_genesis_validator_and_query() {
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+
+        state.register_genesis_validator(v);
+
+        assert!(state.is_active_validator(&vid));
+        assert!(state.get_validator(&vid).is_some());
+        assert_eq!(state.active_validators().len(), 1);
+        assert_eq!(state.total_validators(), 1);
+        assert_eq!(
+            state.validator_bond(&vid),
+            Some(crate::constants::VALIDATOR_BOND)
+        );
+    }
+
+    #[test]
+    fn slash_validator_forfeits_bond() {
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+
+        state.register_genesis_validator(v);
+        assert_eq!(state.epoch_fees(), 0);
+
+        state.slash_validator(&vid).unwrap();
+
+        assert!(state.is_slashed(&vid));
+        assert!(!state.is_active_validator(&vid));
+        assert_eq!(state.epoch_fees(), crate::constants::VALIDATOR_BOND);
+        assert_eq!(state.validator_bond(&vid), None); // Bond forfeited
+    }
+
+    #[test]
+    fn advance_epoch_clears_fees_and_rotates_seed() {
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        state.register_genesis_validator(v);
+
+        // Slash to accumulate fees
+        let vid = kp.public.fingerprint();
+        state.slash_validator(&vid).unwrap();
+        assert!(state.epoch_fees() > 0);
+
+        let seed_before = state.epoch_seed().clone();
+        assert_eq!(state.epoch(), 0);
+
+        let (fees, _new_seed) = state.advance_epoch();
+
+        assert_eq!(fees, crate::constants::VALIDATOR_BOND);
+        assert_eq!(state.epoch(), 1);
+        assert_eq!(state.epoch_fees(), 0);
+        assert_ne!(state.epoch_seed().seed, seed_before.seed);
+    }
+
+    #[test]
+    fn all_validators_includes_inactive() {
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+        state.register_genesis_validator(v);
+
+        // Slash makes it inactive
+        state.slash_validator(&vid).unwrap();
+        assert!(!state.is_active_validator(&vid));
+
+        // But still in all_validators
+        let all = state.all_validators();
+        assert_eq!(all.len(), 1);
+        assert!(!all[0].active);
+    }
+
+    #[test]
+    fn state_tracks_last_finalized() {
+        let mut state = ChainState::new();
+        assert!(state.last_finalized().is_none());
+
+        let vid = VertexId([42u8; 32]);
+        state.last_finalized = Some(vid);
+        assert_eq!(state.last_finalized(), Some(&vid));
+    }
+
+    #[test]
     fn ledger_restore_from_storage() {
         let storage = SledStorage::open_temporary().unwrap();
 

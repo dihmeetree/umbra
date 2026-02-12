@@ -702,6 +702,84 @@ mod tests {
     }
 
     #[test]
+    fn wallet_confirm_transaction_marks_spent() {
+        let mut alice = Wallet::new();
+        let bob = Wallet::new();
+
+        let funding_tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 10001,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(alice.kem_public_key().clone(), 10000)
+            .set_fee(1)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        alice.scan_transaction(&funding_tx);
+        assert_eq!(alice.balance(), 10000);
+
+        let tx = alice
+            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .unwrap();
+
+        // Pending — balance is 0
+        assert_eq!(alice.balance(), 0);
+
+        // Confirm makes them Spent (not Pending)
+        alice.confirm_transaction(&tx.tx_binding);
+
+        // Still 0 balance (input is Spent, not Unspent)
+        assert_eq!(alice.balance(), 0);
+
+        // Scan to pick up change
+        alice.scan_transaction(&tx);
+        assert_eq!(alice.balance(), 6900);
+    }
+
+    #[test]
+    fn wallet_from_keypair_preserves_keys() {
+        let kp = FullKeypair::generate();
+        let addr_id = kp.public_address().address_id();
+        let wallet = Wallet::from_keypair(kp);
+        assert_eq!(wallet.address().address_id(), addr_id);
+    }
+
+    #[test]
+    fn wallet_balance_excludes_pending() {
+        let mut alice = Wallet::new();
+        let bob = Wallet::new();
+
+        let funding_tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 5001,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(alice.kem_public_key().clone(), 5000)
+            .set_fee(1)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        alice.scan_transaction(&funding_tx);
+        assert_eq!(alice.balance(), 5000);
+
+        // Build tx puts outputs in Pending
+        let _tx = alice
+            .build_transaction(bob.kem_public_key(), 1000, 100, None)
+            .unwrap();
+
+        // Pending outputs excluded from balance
+        assert_eq!(alice.balance(), 0);
+        assert_eq!(alice.unspent_outputs().len(), 0);
+    }
+
+    #[test]
     fn wallet_cancel_pending_transaction() {
         let mut alice = Wallet::new();
         let bob = Wallet::new();

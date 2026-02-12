@@ -99,6 +99,12 @@ enum InternalEvent {
 }
 
 impl P2pHandle {
+    /// Create a handle from a raw sender (for testing).
+    #[cfg(test)]
+    pub fn from_sender(command_tx: mpsc::Sender<P2pCommand>) -> Self {
+        P2pHandle { command_tx }
+    }
+
     /// Send a command to connect to a peer.
     pub async fn connect(&self, addr: SocketAddr) -> Result<(), P2pError> {
         self.command_tx

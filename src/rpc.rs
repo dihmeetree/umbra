@@ -37,12 +37,12 @@ pub struct RpcState {
 pub fn router(rpc_state: RpcState) -> Router {
     Router::new()
         .route("/tx", post(submit_tx))
-        .route("/tx/{id}", get(get_tx))
+        .route("/tx/:id", get(get_tx))
         .route("/state", get(get_state))
         .route("/peers", get(get_peers))
         .route("/mempool", get(get_mempool))
         .route("/validators", get(get_validators))
-        .route("/validator/{id}", get(get_validator))
+        .route("/validator/:id", get(get_validator))
         .route("/vertices/finalized", get(get_finalized_vertices))
         .with_state(rpc_state)
 }
@@ -341,4 +341,223 @@ async fn get_finalized_vertices(
         has_more,
         total,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{Request, StatusCode as HttpStatus};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::consensus::bft::{BftState, Validator};
+    use crate::mempool::Mempool;
+    use crate::p2p::P2pHandle;
+    use crate::state::Ledger;
+    use crate::storage::SledStorage;
+
+    fn test_rpc_state() -> RpcState {
+        let storage = SledStorage::open_temporary().unwrap();
+        let ledger = Ledger::new();
+        let mempool = Mempool::with_defaults();
+        let chain_id = *ledger.state.chain_id();
+        let bft = BftState::new(0, vec![], chain_id);
+        let node_state = Arc::new(RwLock::new(crate::node::NodeState {
+            ledger,
+            mempool,
+            storage,
+            bft,
+        }));
+        // Create a P2pHandle from a channel (we won't use it in most tests)
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let p2p = P2pHandle::from_sender(tx);
+        RpcState {
+            node: node_state,
+            p2p,
+        }
+    }
+
+    async fn get_json(app: &axum::Router, path: &str) -> (HttpStatus, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|e| {
+            panic!(
+                "JSON parse error: {} (status={}, body={:?})",
+                e,
+                status,
+                String::from_utf8_lossy(&body)
+            )
+        });
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn get_state_returns_json() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/state").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["epoch"], 0);
+        assert_eq!(json["commitment_count"], 0);
+        assert_eq!(json["nullifier_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_mempool_returns_stats() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/mempool").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["transaction_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_validators_empty() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/validators").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_validators_with_registered() {
+        let state = test_rpc_state();
+        // Register a validator
+        {
+            let mut node = state.node.write().await;
+            let kp = crate::crypto::keys::SigningKeypair::generate();
+            let v = Validator::new(kp.public);
+            node.ledger.state.register_genesis_validator(v);
+        }
+        let app = router(state);
+        let (status, json) = get_json(&app, "/validators").await;
+        assert_eq!(status, HttpStatus::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["active"], true);
+    }
+
+    #[tokio::test]
+    async fn get_validator_not_found() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let fake_id = hex::encode([0u8; 32]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/validator/{}", fake_id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn submit_tx_invalid_hex() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"tx_hex":"not_valid_hex!!!"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_tx_not_found() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let fake_id = hex::encode([0u8; 32]);
+        let (status, json) = get_json(&app, &format!("/tx/{}", fake_id)).await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["found"], false);
+        assert_eq!(json["source"], "none");
+    }
+
+    #[tokio::test]
+    async fn get_finalized_vertices_empty() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/vertices/finalized?after=0&limit=10").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(json["vertices"].as_array().unwrap().is_empty());
+        assert_eq!(json["has_more"], false);
+    }
+
+    #[tokio::test]
+    async fn submit_and_retrieve_tx() {
+        let state = test_rpc_state();
+
+        // Build a valid transaction
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = crate::transaction::builder::TransactionBuilder::new()
+            .add_input(crate::transaction::builder::InputSpec {
+                value: 1000,
+                blinding: crate::crypto::commitment::BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 900)
+            .set_fee(100)
+            .set_proof_options(winterfell::ProofOptions::new(
+                42,
+                8,
+                10,
+                winterfell::FieldExtension::Quadratic,
+                8,
+                255,
+                winterfell::BatchingMethod::Linear,
+                winterfell::BatchingMethod::Linear,
+            ))
+            .build()
+            .unwrap();
+
+        let tx_id = tx.tx_id();
+        let tx_hex = hex::encode(bincode::serialize(&tx).unwrap());
+
+        // Submit
+        let app = router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"tx_hex": tx_hex}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::OK);
+
+        // Retrieve
+        let app2 = router(state);
+        let tx_id_hex = hex::encode(tx_id.0);
+        let (status, json) = get_json(&app2, &format!("/tx/{}", tx_id_hex)).await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["found"], true);
+        assert_eq!(json["source"], "mempool");
+    }
 }

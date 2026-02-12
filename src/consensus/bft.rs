@@ -723,4 +723,145 @@ mod tests {
         // All 3 should be included (fallback triggers)
         assert_eq!(committee.len(), 3);
     }
+
+    #[test]
+    fn vote_produces_signed_vote() {
+        let (keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        bft.set_our_keypair(keypairs[0].clone());
+
+        let vertex_id = VertexId([5u8; 32]);
+        let vote = bft.vote(vertex_id, true);
+        assert!(vote.is_some());
+        let vote = vote.unwrap();
+        assert_eq!(vote.vertex_id, vertex_id);
+        assert_eq!(vote.voter_id, validators[0].id);
+        assert_eq!(vote.epoch, 0);
+        assert!(matches!(vote.vote_type, VoteType::Accept));
+    }
+
+    #[test]
+    fn is_committee_member_when_in_committee() {
+        let (keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        bft.set_our_keypair(keypairs[1].clone());
+        assert!(bft.is_committee_member());
+    }
+
+    #[test]
+    fn get_certificate_after_quorum() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([7u8; 32]);
+
+        for (i, kp) in keypairs.iter().enumerate().take(3) {
+            let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            let vote = Vote {
+                vertex_id,
+                voter_id: validators[i].id,
+                epoch: 0,
+                round: 0,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            };
+            bft.receive_vote(vote);
+        }
+
+        let cert = bft.get_certificate(&vertex_id);
+        assert!(cert.is_some());
+        assert_eq!(cert.unwrap().vertex_id, vertex_id);
+    }
+
+    #[test]
+    fn all_certificates_returns_all() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Certify vertex in round 0
+        let vertex_a = VertexId([10u8; 32]);
+        for (i, kp) in keypairs.iter().enumerate().take(3) {
+            let msg = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            bft.receive_vote(Vote {
+                vertex_id: vertex_a,
+                voter_id: validators[i].id,
+                epoch: 0,
+                round: 0,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            });
+        }
+
+        // Advance round and certify another vertex
+        bft.advance_round();
+        let vertex_b = VertexId([20u8; 32]);
+        for (i, kp) in keypairs.iter().enumerate().take(3) {
+            let msg = vote_sign_data(&vertex_b, 0, 1, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            bft.receive_vote(Vote {
+                vertex_id: vertex_b,
+                voter_id: validators[i].id,
+                epoch: 0,
+                round: 1,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            });
+        }
+
+        assert_eq!(bft.all_certificates().len(), 2);
+    }
+
+    #[test]
+    fn advance_round_increments() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+        assert_eq!(bft.round, 0);
+        bft.advance_round();
+        assert_eq!(bft.round, 1);
+        bft.advance_round();
+        assert_eq!(bft.round, 2);
+    }
+
+    #[test]
+    fn clear_equivocations_empties() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Create equivocation
+        let vertex_a = VertexId([1u8; 32]);
+        let vertex_b = VertexId([2u8; 32]);
+        let msg_a = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
+        bft.receive_vote(Vote {
+            vertex_id: vertex_a,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: keypairs[0].sign(&msg_a),
+            vrf_proof: None,
+        });
+        let msg_b = vote_sign_data(&vertex_b, 0, 0, &VoteType::Accept, &chain_id);
+        bft.receive_vote(Vote {
+            vertex_id: vertex_b,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: keypairs[0].sign(&msg_b),
+            vrf_proof: None,
+        });
+
+        assert!(!bft.equivocations().is_empty());
+        bft.clear_equivocations();
+        assert!(bft.equivocations().is_empty());
+    }
 }

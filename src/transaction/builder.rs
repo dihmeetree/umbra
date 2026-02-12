@@ -495,4 +495,97 @@ mod tests {
         assert_eq!(dec_value, value);
         assert_eq!(dec_blinding.0, blinding.0);
     }
+
+    #[test]
+    fn build_with_chain_id_and_expiry() {
+        let recipient = FullKeypair::generate();
+        let chain_id = crate::hash_domain(b"test.chain", b"my-chain");
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 500,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 400)
+            .set_fee(100)
+            .set_chain_id(chain_id)
+            .set_expiry_epoch(42)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert_eq!(tx.chain_id, chain_id);
+        assert_eq!(tx.expiry_epoch, 42);
+    }
+
+    #[test]
+    fn build_multi_input_multi_output() {
+        let r1 = FullKeypair::generate();
+        let r2 = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 600,
+                blinding: BlindingFactor::from_bytes([1u8; 32]),
+                spend_auth: crate::hash_domain(b"test", b"auth1"),
+                merkle_path: vec![],
+            })
+            .add_input(InputSpec {
+                value: 400,
+                blinding: BlindingFactor::from_bytes([2u8; 32]),
+                spend_auth: crate::hash_domain(b"test", b"auth2"),
+                merkle_path: vec![],
+            })
+            .add_output(r1.kem.public.clone(), 500)
+            .add_output(r2.kem.public.clone(), 450)
+            .set_fee(50)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert_eq!(tx.inputs.len(), 2);
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(tx.fee, 50);
+    }
+
+    #[test]
+    fn build_rejects_too_many_inputs() {
+        let recipient = FullKeypair::generate();
+        let mut builder = TransactionBuilder::new();
+        let total_value = (crate::constants::MAX_TX_IO as u64 + 1) * 100;
+        for i in 0..=crate::constants::MAX_TX_IO {
+            builder = builder.add_input(InputSpec {
+                value: 100,
+                blinding: BlindingFactor::from_bytes([i as u8; 32]),
+                spend_auth: crate::hash_domain(b"test", &[i as u8]),
+                merkle_path: vec![],
+            });
+        }
+        builder = builder
+            .add_output(recipient.kem.public.clone(), total_value - 10)
+            .set_fee(10)
+            .set_proof_options(test_proof_options());
+        let result = builder.build();
+        assert!(matches!(result, Err(TxBuildError::TooManyInputs)));
+    }
+
+    #[test]
+    fn build_rejects_too_many_outputs() {
+        let mut builder = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 100_000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .set_fee(10)
+            .set_proof_options(test_proof_options());
+        let per_output = (100_000 - 10) / (crate::constants::MAX_TX_IO as u64 + 1);
+        for _ in 0..=crate::constants::MAX_TX_IO {
+            let r = FullKeypair::generate();
+            builder = builder.add_output(r.kem.public.clone(), per_output);
+        }
+        let result = builder.build();
+        assert!(matches!(result, Err(TxBuildError::TooManyOutputs)));
+    }
 }
