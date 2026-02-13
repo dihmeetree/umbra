@@ -111,6 +111,7 @@ pub struct SledStorage {
     validators: sled::Tree,
     finalized_index: sled::Tree,
     coinbase_outputs: sled::Tree,
+    finalized_count: std::sync::atomic::AtomicU64,
 }
 
 impl SledStorage {
@@ -152,6 +153,7 @@ impl SledStorage {
         let coinbase_outputs = db
             .open_tree("coinbase_outputs")
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        let finalized_count = std::sync::atomic::AtomicU64::new(finalized_index.len() as u64);
         Ok(SledStorage {
             db,
             vertices,
@@ -162,6 +164,7 @@ impl SledStorage {
             validators,
             finalized_index,
             coinbase_outputs,
+            finalized_count,
         })
     }
 }
@@ -322,6 +325,8 @@ impl Storage for SledStorage {
         self.finalized_index
             .insert(sequence.to_be_bytes(), &vertex_id.0)
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.finalized_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -359,7 +364,9 @@ impl Storage for SledStorage {
     }
 
     fn finalized_vertex_count(&self) -> Result<u64, StorageError> {
-        Ok(self.finalized_index.len() as u64)
+        Ok(self
+            .finalized_count
+            .load(std::sync::atomic::Ordering::Relaxed))
     }
 
     fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError> {

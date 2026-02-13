@@ -73,7 +73,7 @@ impl SpectraConfig {
                     config
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         "Failed to parse {}: {}, using defaults",
                         config_path.display(),
                         e
@@ -90,7 +90,13 @@ impl SpectraConfig {
         self.node
             .bootstrap_peers
             .iter()
-            .filter_map(|s| s.parse().ok())
+            .filter_map(|s| match s.parse() {
+                Ok(addr) => Some(addr),
+                Err(_) => {
+                    tracing::warn!("Ignoring unparseable bootstrap peer address: {}", s);
+                    None
+                }
+            })
             .collect()
     }
 }

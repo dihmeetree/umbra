@@ -58,7 +58,10 @@ impl WalletWebState {
         if !path.exists() {
             return Ok(None);
         }
-        let (wallet, seq) = Wallet::load_from_file(&path)?;
+        let result = tokio::task::spawn_blocking(move || Wallet::load_from_file(&path))
+            .await
+            .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))?;
+        let (wallet, seq) = result?;
         *cache = Some((wallet.clone(), seq));
         Ok(Some((wallet, seq)))
     }
@@ -66,7 +69,10 @@ impl WalletWebState {
     /// Save wallet to disk and update cache.
     async fn save_wallet(&self, wallet: &Wallet, seq: u64) -> Result<(), WalletError> {
         let path = wallet_cli::wallet_path(&self.data_dir);
-        wallet.save_to_file(&path, seq)?;
+        let wallet_clone = wallet.clone();
+        tokio::task::spawn_blocking(move || wallet_clone.save_to_file(&path, seq))
+            .await
+            .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))??;
         let mut cache = self.wallet.write().await;
         *cache = Some((wallet.clone(), seq));
         Ok(())
@@ -186,6 +192,25 @@ pub struct SendForm {
 
 // ── Router ──
 
+/// Middleware that adds security headers to every response.
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert("X-Frame-Options", "DENY".parse().unwrap());
+    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("Cache-Control", "no-store".parse().unwrap());
+    headers.insert(
+        "Content-Security-Policy",
+        "default-src 'self'; style-src 'self' 'unsafe-inline'"
+            .parse()
+            .unwrap(),
+    );
+    response
+}
+
 /// Build the wallet web router.
 pub fn router(state: WalletWebState) -> Router {
     Router::new()
@@ -197,6 +222,7 @@ pub fn router(state: WalletWebState) -> Router {
         .route("/messages", get(messages_page))
         .route("/history", get(history_page))
         .route("/scan", post(scan_action))
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
 }
 

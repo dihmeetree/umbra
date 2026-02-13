@@ -73,6 +73,8 @@ pub struct ChainState {
     last_finalized: Option<VertexId>,
     /// Total coins ever minted via coinbase rewards
     total_minted: u64,
+    /// O(1) commitment lookup index (commitment -> position in commitments vec)
+    commitment_index: HashMap<Commitment, usize>,
 }
 
 /// The full ledger coordinating DAG, BFT, and chain state.
@@ -101,6 +103,7 @@ impl ChainState {
             epoch: 0,
             last_finalized: None,
             total_minted: 0,
+            commitment_index: HashMap::new(),
         }
     }
 
@@ -114,6 +117,44 @@ impl ChainState {
     /// Returns the coinbase `TxOutput` if one was created (requires the
     /// proposer to be a registered validator with a KEM public key).
     pub fn apply_vertex(&mut self, vertex: &Vertex) -> Result<Option<TxOutput>, StateError> {
+        if vertex.transactions.len() > crate::constants::MAX_TXS_PER_VERTEX {
+            return Err(StateError::TooManyTransactions);
+        }
+
+        // Check for intra-vertex nullifier duplicates (cross-tx double-spend within a single vertex)
+        {
+            let mut seen_nullifiers = HashSet::new();
+            for tx in &vertex.transactions {
+                for input in &tx.inputs {
+                    if !seen_nullifiers.insert(input.nullifier) {
+                        return Err(StateError::DoubleSpend(input.nullifier));
+                    }
+                }
+            }
+        }
+
+        // Check for duplicate validator operations within vertex
+        {
+            let mut registering = HashSet::new();
+            let mut deregistering = HashSet::new();
+            for tx in &vertex.transactions {
+                match &tx.tx_type {
+                    TxType::ValidatorRegister { signing_key, .. } => {
+                        let vid = signing_key.fingerprint();
+                        if !registering.insert(vid) {
+                            return Err(StateError::ValidatorAlreadyRegistered);
+                        }
+                    }
+                    TxType::ValidatorDeregister { validator_id, .. } => {
+                        if !deregistering.insert(*validator_id) {
+                            return Err(StateError::ValidatorNotFound);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // H9: Pass 1 — validate all transactions without applying.
         // F14: Use rayon parallel iteration for independent tx validation.
         if vertex.transactions.len() > 1 {
@@ -180,7 +221,7 @@ impl ChainState {
 
         // Check all nullifiers are fresh
         for input in &tx.inputs {
-            if self.nullifiers.contains(&input.nullifier) {
+            if self.is_spent(&input.nullifier) {
                 return Err(StateError::DoubleSpend(input.nullifier));
             }
         }
@@ -319,7 +360,9 @@ impl ChainState {
         if self.nullifiers.insert(nullifier) {
             // Persist to sled if available
             if let Some(ref tree) = self.nullifier_storage {
-                let _ = tree.insert(nullifier.0, &[1u8]);
+                if let Err(e) = tree.insert(nullifier.0, &[1u8]) {
+                    tracing::error!("Failed to persist nullifier to sled: {}", e);
+                }
             }
             // Update incremental hash: new = H(old || nullifier)
             self.nullifier_hash =
@@ -331,6 +374,8 @@ impl ChainState {
     pub fn add_commitment(&mut self, commitment: Commitment) {
         self.commitment_tree.append(commitment.0);
         self.commitments.push(commitment);
+        self.commitment_index
+            .insert(commitment, self.commitments.len() - 1);
     }
 
     /// Record a nullifier as spent (public API).
@@ -350,7 +395,7 @@ impl ChainState {
 
     /// Get the index of a commitment in the tree, if it exists.
     pub fn find_commitment(&self, commitment: &Commitment) -> Option<usize> {
-        self.commitments.iter().position(|c| c == commitment)
+        self.commitment_index.get(commitment).copied()
     }
 
     /// Check if a nullifier has been used.
@@ -522,14 +567,15 @@ impl ChainState {
     /// Writes all current in-memory nullifiers to the sled tree, then clears
     /// the in-memory set to free RAM. After migration, `is_spent()` reads from
     /// sled and new nullifiers are written to both sled and a fresh in-memory set.
-    pub fn migrate_nullifiers_to_storage(&mut self, tree: sled::Tree) -> usize {
+    pub fn migrate_nullifiers_to_storage(&mut self, tree: sled::Tree) -> Result<usize, String> {
         let count = self.nullifiers.len();
         for nullifier in self.nullifiers.iter() {
-            let _ = tree.insert(nullifier.0, &[1u8]);
+            tree.insert(nullifier.0, &[1u8])
+                .map_err(|e| format!("sled write failed during migration: {}", e))?;
         }
         self.nullifiers = NullifierSet::new();
         self.nullifier_storage = Some(tree);
-        count
+        Ok(count)
     }
 
     /// Get the current epoch seed for VRF evaluation.
@@ -711,6 +757,11 @@ impl ChainState {
             commitments.push(Commitment(commitment_tree.get_node_public(0, i)));
         }
 
+        let mut commitment_index = HashMap::new();
+        for (i, c) in commitments.iter().enumerate() {
+            commitment_index.insert(*c, i);
+        }
+
         // 2. Load all nullifiers from storage
         let stored_nullifiers = storage
             .get_all_nullifiers()
@@ -769,6 +820,7 @@ impl ChainState {
             epoch: meta.epoch,
             last_finalized: meta.last_finalized,
             total_minted: meta.total_minted,
+            commitment_index,
         })
     }
 }
@@ -883,6 +935,8 @@ pub enum StateError {
     FeeOverflow,
     #[error("storage error during state restoration: {0}")]
     StorageError(String),
+    #[error("vertex contains too many transactions")]
+    TooManyTransactions,
 }
 
 #[cfg(test)]
@@ -1204,7 +1258,7 @@ mod tests {
         // Migrate to sled
         let db = sled::Config::new().temporary(true).open().unwrap();
         let tree = db.open_tree("nullifiers").unwrap();
-        let migrated = state.migrate_nullifiers_to_storage(tree);
+        let migrated = state.migrate_nullifiers_to_storage(tree).unwrap();
         assert_eq!(migrated, 2);
 
         // In-memory is empty, but is_spent still works via sled

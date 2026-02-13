@@ -290,7 +290,6 @@ pub struct P2pConfig {
 }
 
 /// Peer reputation tracking (F7).
-#[allow(dead_code)]
 struct PeerReputation {
     score: i32,
     violations: u32,
@@ -306,7 +305,6 @@ impl PeerReputation {
         }
     }
 
-    #[allow(dead_code)]
     fn penalize(&mut self, amount: i32) {
         self.score -= amount;
         self.violations += 1;
@@ -350,6 +348,8 @@ enum InternalEvent {
     Message { from: PeerId, message: Box<Message> },
     /// A peer disconnected.
     Disconnected(PeerId),
+    /// A peer misbehaved and should be penalized.
+    Misbehavior { peer_id: PeerId, penalty: i32 },
 }
 
 // ── P2pHandle ──
@@ -452,6 +452,7 @@ async fn p2p_loop(
     let max_inbound = config.max_peers / 2;
     let max_outbound = config.max_peers - max_inbound;
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalEvent>(256);
+    let handshake_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
 
     loop {
         tokio::select! {
@@ -463,7 +464,12 @@ async fn p2p_loop(
                     }
                     let config_clone = config.clone();
                     let internal_tx_clone = internal_tx.clone();
+                    let hs_permit = handshake_semaphore.clone();
                     tokio::spawn(async move {
+                        let _permit = match hs_permit.acquire().await {
+                            Ok(p) => p,
+                            Err(_) => return,
+                        };
                         if let Err(e) = handle_inbound(stream, addr, &config_clone, internal_tx_clone).await {
                             tracing::debug!("Inbound connection from {} failed: {}", addr, e);
                         }
@@ -480,7 +486,12 @@ async fn p2p_loop(
                         }
                         let config_clone = config.clone();
                         let internal_tx_clone = internal_tx.clone();
+                        let hs_permit = handshake_semaphore.clone();
                         tokio::spawn(async move {
+                            let _permit = match hs_permit.acquire().await {
+                                Ok(p) => p,
+                                Err(_) => return,
+                            };
                             if let Err(e) = handle_outbound(addr, &config_clone, internal_tx_clone).await {
                                 tracing::debug!("Outbound connection to {} failed: {}", addr, e);
                             }
@@ -517,6 +528,11 @@ async fn p2p_loop(
             Some(event) = internal_rx.recv() => {
                 match event {
                     InternalEvent::Connected { peer_id, public_key, addr, msg_tx, is_outbound } => {
+                        // Self-connection prevention
+                        if peer_id == config.our_peer_id {
+                            tracing::debug!("Rejected self-connection");
+                            continue;
+                        }
                         // F7: Check if peer is banned
                         if let Some(rep) = reputations.get(&peer_id) {
                             if rep.is_banned() {
@@ -555,6 +571,27 @@ async fn p2p_loop(
                             }
                         }
                         let _ = event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await;
+                    }
+                    InternalEvent::Misbehavior { peer_id, penalty } => {
+                        let rep = reputations.entry(peer_id).or_insert_with(PeerReputation::new);
+                        rep.penalize(penalty);
+                        if rep.is_banned() {
+                            tracing::warn!(
+                                "Banning peer {} (score={}, violations={})",
+                                hex::encode(&peer_id[..8]),
+                                rep.score,
+                                rep.violations,
+                            );
+                            // Disconnect the banned peer
+                            if let Some(peer) = peers.remove(&peer_id) {
+                                if peer.is_outbound {
+                                    outbound_count = outbound_count.saturating_sub(1);
+                                } else {
+                                    inbound_count = inbound_count.saturating_sub(1);
+                                }
+                            }
+                            let _ = event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await;
+                        }
                     }
                 }
             }
@@ -809,6 +846,13 @@ async fn spawn_encrypted_connection_tasks(
                             violations,
                             crate::constants::PEER_RATE_LIMIT_STRIKES
                         );
+                        // Report misbehavior for rate limit violation
+                        let _ = internal_tx_read
+                            .send(InternalEvent::Misbehavior {
+                                peer_id,
+                                penalty: 10,
+                            })
+                            .await;
                         if violations >= crate::constants::PEER_RATE_LIMIT_STRIKES {
                             tracing::warn!(
                                 "Disconnecting peer {} for repeated rate violations",
@@ -833,6 +877,13 @@ async fn spawn_encrypted_connection_tasks(
                     }
                 }
                 Err(_) => {
+                    // Report misbehavior for message read/decrypt error
+                    let _ = internal_tx_read
+                        .send(InternalEvent::Misbehavior {
+                            peer_id,
+                            penalty: 5,
+                        })
+                        .await;
                     let _ = internal_tx_read
                         .send(InternalEvent::Disconnected(peer_id))
                         .await;

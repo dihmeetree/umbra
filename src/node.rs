@@ -29,6 +29,12 @@ use crate::storage::{SledStorage, Storage};
 use crate::transaction::TxId;
 use crate::Hash;
 
+/// Maximum number of entries in the seen_messages dedup set before clearing.
+const SEEN_MESSAGES_CAPACITY: usize = 10_000;
+
+/// Maximum number of sync batch rounds before giving up on the current peer.
+const MAX_SYNC_ROUNDS: u64 = 1000;
+
 /// Shared node state accessible from RPC handlers.
 pub struct NodeState {
     pub ledger: Ledger,
@@ -79,6 +85,10 @@ pub struct Node {
     stem_txs: HashMap<Hash, (u8, Instant)>,
     /// Peers recently attempted for discovery (cleared each round).
     recently_attempted: HashSet<SocketAddr>,
+    /// Gossip deduplication: recently seen message IDs to avoid rebroadcasting.
+    seen_messages: HashSet<Hash>,
+    /// Counter for sync batch rounds (reset on new sync peer).
+    sync_rounds: u64,
 }
 
 /// Node configuration.
@@ -373,6 +383,8 @@ impl Node {
             sync_failed_peers: HashMap::new(),
             stem_txs: HashMap::new(),
             recently_attempted: HashSet::new(),
+            seen_messages: HashSet::new(),
+            sync_rounds: 0,
         })
     }
 
@@ -449,6 +461,10 @@ impl Node {
         match event {
             P2pEvent::MessageReceived { from, message } => {
                 self.handle_message(from, *message).await;
+                // After message handling, sync our VRF output with BFT state.
+                // Epoch transitions in finalize_vertex_inner update bft but
+                // cannot update self.our_vrf_output since it takes &self.
+                self.refresh_vrf_from_bft().await;
             }
             P2pEvent::PeerConnected(peer_id) => {
                 tracing::info!("Peer connected: {}", hex::encode(&peer_id[..8]));
@@ -474,21 +490,27 @@ impl Node {
 
     async fn handle_message(&mut self, from: crate::network::PeerId, message: Message) {
         match message {
+            // Fix 5: For received stem-phase txs, defer mempool insertion until fluff.
             Message::NewTransaction(tx) => {
                 let tx_hash = tx.tx_id().0;
+
+                // Check if this is a continuation of an existing stem phase
+                if let Some(&(hops, _)) = self.stem_txs.get(&tx_hash) {
+                    if hops > 0 {
+                        // Continue stem phase -- do NOT insert into mempool yet
+                        // to preserve Dandelion++ privacy for the originator.
+                        self.stem_forward(tx, hops - 1).await;
+                        return;
+                    }
+                    // hops == 0: fall through to fluff (insert + broadcast)
+                }
+
+                // Fluff phase or new transaction: validate and insert into mempool
                 let mut state = self.state.write().await;
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
                         drop(state);
-                        // Dandelion++ stem relay: forward to one random peer
-                        if let Some(&(hops, _)) = self.stem_txs.get(&tx_hash) {
-                            if hops > 0 {
-                                // Continue stem phase
-                                self.stem_forward(tx, hops - 1).await;
-                                return;
-                            }
-                        }
-                        // Start new stem phase
+                        // Start new stem phase for received transactions
                         self.stem_forward(
                             tx,
                             crate::constants::DANDELION_STEM_HOPS.saturating_sub(1),
@@ -501,6 +523,14 @@ impl Node {
                 }
             }
             Message::NewVertex(vertex) => {
+                // Fix 6: Gossip deduplication -- skip already-seen vertices
+                if self.seen_messages.len() > SEEN_MESSAGES_CAPACITY {
+                    self.seen_messages.clear();
+                }
+                if !self.seen_messages.insert(vertex.id.0) {
+                    return; // Already processed this vertex
+                }
+
                 let mut state = self.state.write().await;
 
                 // Track peer's highest round for view change detection
@@ -528,7 +558,7 @@ impl Node {
                     }
                 }
 
-                // Insert into DAG (but don't finalize yet — wait for BFT)
+                // Insert into DAG (but don't finalize yet -- wait for BFT)
                 match state.ledger.insert_vertex(*vertex.clone()) {
                     Ok(_) => {
                         // If we're on committee, vote Accept
@@ -544,7 +574,7 @@ impl Node {
                             );
                             // Process vote locally
                             if let Some(cert) = state.bft.receive_vote(vote.clone()) {
-                                // Quorum reached — finalize
+                                // Quorum reached -- finalize
                                 self.finalize_vertex_inner(&mut state, &cert.vertex_id)
                                     .await;
                                 let _ = self
@@ -567,6 +597,15 @@ impl Node {
                 }
             }
             Message::BftVote(vote) => {
+                // Fix 6: Gossip deduplication for votes
+                let vote_dedup_key = crate::hash_concat(&[&vote.voter_id, &vote.vertex_id.0]);
+                if self.seen_messages.len() > SEEN_MESSAGES_CAPACITY {
+                    self.seen_messages.clear();
+                }
+                if !self.seen_messages.insert(vote_dedup_key) {
+                    return; // Already processed this vote
+                }
+
                 let mut state = self.state.write().await;
                 // Track peer's highest round for view change detection
                 if vote.round > state.peer_highest_round {
@@ -574,7 +613,7 @@ impl Node {
                 }
                 // H5: Only re-broadcast if the vote was accepted
                 if let Some(cert) = state.bft.receive_vote(vote.clone()) {
-                    // Quorum reached — finalize
+                    // Quorum reached -- finalize
                     self.finalize_vertex_inner(&mut state, &cert.vertex_id)
                         .await;
                     let _ = self
@@ -584,11 +623,19 @@ impl Node {
                     // Broadcast the vote that completed the certificate
                     let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                 } else if state.bft.is_vote_accepted(&vote) {
-                    // Vote was accepted (not rejected) — forward to peers
+                    // Vote was accepted (not rejected) -- forward to peers
                     let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                 }
             }
             Message::BftCertificate(cert) => {
+                // Fix 6: Gossip deduplication for certificates
+                if self.seen_messages.len() > SEEN_MESSAGES_CAPACITY {
+                    self.seen_messages.clear();
+                }
+                if !self.seen_messages.insert(cert.vertex_id.0) {
+                    return; // Already processed certificate for this vertex
+                }
+
                 let mut state = self.state.write().await;
                 // C1: Verify certificate before finalizing
                 let committee = state.bft.committee.clone();
@@ -740,6 +787,8 @@ impl Node {
                         } else {
                             u64::MAX // will be wrapped to 0 by the range query
                         };
+                        // Fix 7: Reset sync round counter for new peer
+                        self.sync_rounds = 0;
                         self.sync_state = SyncState::Syncing {
                             peer: from,
                             next_seq: start_after,
@@ -772,6 +821,43 @@ impl Node {
                         return; // Ignore responses from unexpected peers
                     }
 
+                    // Fix 7: Verify total_finalized is within reasonable bounds
+                    let our_finalized_count = {
+                        let st = self.state.read().await;
+                        st.storage.finalized_vertex_count().unwrap_or(0)
+                    };
+                    let max_reasonable = our_finalized_count + crate::constants::EPOCH_LENGTH * 10;
+                    if total_finalized > max_reasonable {
+                        tracing::warn!(
+                            "Sync: peer claims {} finalized vertices (our: {}, max reasonable: {}), aborting",
+                            total_finalized,
+                            our_finalized_count,
+                            max_reasonable,
+                        );
+                        let peer_id = from;
+                        self.sync_failed_peers.insert(peer_id, Instant::now());
+                        self.sync_state = SyncState::NeedSync {
+                            our_finalized: our_finalized_count,
+                        };
+                        return;
+                    }
+
+                    // Fix 7: Check max sync rounds
+                    self.sync_rounds += 1;
+                    if self.sync_rounds > MAX_SYNC_ROUNDS {
+                        tracing::warn!(
+                            "Sync: exceeded {} rounds with peer {}, giving up",
+                            MAX_SYNC_ROUNDS,
+                            hex::encode(&from[..8])
+                        );
+                        let peer_id = from;
+                        self.sync_failed_peers.insert(peer_id, Instant::now());
+                        self.sync_state = SyncState::NeedSync {
+                            our_finalized: our_finalized_count,
+                        };
+                        return;
+                    }
+
                     let batch_len = vertices.len();
                     let mut last_seq = 0u64;
                     let mut applied = 0usize;
@@ -783,8 +869,9 @@ impl Node {
                         // Record commitment count for incremental persistence
                         let old_cc = state.ledger.state.commitment_count();
 
-                        // Apply vertex to chain state (skip DAG for already-finalized vertices)
-                        match state.ledger.state.apply_vertex(&vertex) {
+                        // Fix 1: Apply vertex via validated path (insert_vertex validates
+                        // structure + signature, then finalize applies to state).
+                        match state.ledger.apply_finalized_vertex(*vertex.clone()) {
                             Ok(coinbase) => {
                                 applied += 1;
 
@@ -896,11 +983,20 @@ impl Node {
                     let _ = self.p2p.send_to(from, Message::GetVertex(tip)).await;
                 }
             }
+            // Fix 4: VRF validation for VertexResponse
             Message::VertexResponse(maybe_vertex) => {
                 if let Some(vertex) = maybe_vertex {
-                    // Insert into DAG if we don't have it yet
                     let mut state = self.state.write().await;
                     if state.ledger.dag.get(&vertex.id).is_none() {
+                        // Validate VRF proof before inserting (same as NewVertex handler)
+                        if vertex.round > 0 {
+                            let epoch_seed = state.ledger.state.epoch_seed().clone();
+                            let total_validators = state.ledger.state.total_validators();
+                            if let Err(e) = vertex.validate_vrf(&epoch_seed, total_validators) {
+                                tracing::warn!("VertexResponse failed VRF validation: {}", e);
+                                return;
+                            }
+                        }
                         let _ = state.ledger.insert_vertex(*vertex);
                     }
                 }
@@ -941,7 +1037,7 @@ impl Node {
                 // Remove conflicting mempool txs
                 state.mempool.remove_conflicting(&nullifiers);
 
-                // ── Persist finalized vertex and state ──
+                // -- Persist finalized vertex and state --
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
                     let _ = state.storage.put_vertex(v);
 
@@ -1036,12 +1132,18 @@ impl Node {
                     state.bft.epoch = dag_epoch;
                     state.bft.set_epoch_context(new_seed, total_validators);
 
+                    // Fix 2: Update committee from current active validators
+                    state.bft.committee = state
+                        .ledger
+                        .state
+                        .active_validators()
+                        .into_iter()
+                        .cloned()
+                        .collect();
+
                     if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
                         tracing::info!("Selected for epoch {} committee via VRF", dag_epoch);
                         state.bft.set_our_vrf_proof(vrf);
-                        // Note: self.our_vrf_output is not updated here because
-                        // it's behind &self. The next proposal interval will
-                        // pick up the VRF from bft state.
                     } else {
                         tracing::info!("Not selected for epoch {} committee", dag_epoch);
                     }
@@ -1078,7 +1180,7 @@ impl Node {
                     }
                     state.version_signals.clear();
 
-                    // F13: DAG memory pruning — remove old finalized vertices
+                    // F13: DAG memory pruning -- remove old finalized vertices
                     if dag_epoch > crate::constants::PRUNING_RETAIN_EPOCHS {
                         let before = dag_epoch - crate::constants::PRUNING_RETAIN_EPOCHS;
                         let pruned = state.ledger.dag.prune_finalized(before);
@@ -1163,8 +1265,9 @@ impl Node {
         }
     }
 
-    /// Dandelion++ stem-forward: send tx to one random peer, track hops.
+    /// Fix 3: Dandelion++ stem-forward: send tx to one *random* peer, track hops.
     async fn stem_forward(&mut self, tx: crate::transaction::Transaction, hops_remaining: u8) {
+        use rand::prelude::IndexedRandom;
         let tx_hash = tx.tx_id().0;
         if hops_remaining == 0 {
             // Fluff: broadcast to all
@@ -1175,7 +1278,7 @@ impl Node {
             self.stem_txs
                 .insert(tx_hash, (hops_remaining, Instant::now()));
             if let Ok(peers) = self.p2p.get_peers().await {
-                if let Some(peer) = peers.first() {
+                if let Some(peer) = peers.choose(&mut rand::rng()) {
                     let _ = self
                         .p2p
                         .send_to(peer.peer_id, Message::NewTransaction(tx))
@@ -1221,6 +1324,36 @@ impl Node {
         }
     }
 
+    /// Fix 2: Sync our VRF output from BFT state after epoch transitions.
+    ///
+    /// Called after message handling since `finalize_vertex_inner` (which takes
+    /// `&self`) cannot update `self.our_vrf_output` directly. This method
+    /// re-evaluates our VRF for the current epoch and updates the cached output.
+    async fn refresh_vrf_from_bft(&mut self) {
+        let state = self.state.read().await;
+        let epoch_seed = state.ledger.state.epoch_seed().clone();
+        let total_validators = state.ledger.state.total_validators();
+        drop(state);
+
+        // Re-evaluate VRF for the current epoch seed
+        let vrf_input = epoch_seed.vrf_input(&self.our_validator_id);
+        let vrf = VrfOutput::evaluate(&self.keypair, &vrf_input);
+
+        if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
+            // Update if VRF value changed (new epoch) or was previously None
+            if self
+                .our_vrf_output
+                .as_ref()
+                .map(|v| v.value != vrf.value)
+                .unwrap_or(true)
+            {
+                self.our_vrf_output = Some(vrf);
+            }
+        } else if self.our_vrf_output.is_some() {
+            self.our_vrf_output = None;
+        }
+    }
+
     /// Try to propose a new vertex if we're on the committee.
     async fn try_propose_vertex(&self) {
         let vrf = match &self.our_vrf_output {
@@ -1230,7 +1363,7 @@ impl Node {
 
         let mut state = self.state.write().await;
 
-        // Drain transactions from mempool (may be empty — empty vertices are
+        // Drain transactions from mempool (may be empty -- empty vertices are
         // allowed for liveness so that epochs advance and coinbase rewards
         // are distributed even during low-activity periods).
         let transactions = state

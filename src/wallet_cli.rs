@@ -222,8 +222,10 @@ pub async fn cmd_send(
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr).await?;
 
     // Load recipient address
-    let addr_hex = std::fs::read_to_string(to_file)
-        .map_err(|e| format!("failed to read address file: {}", e))?;
+    let addr_hex = std::fs::read_to_string(to_file).map_err(|e| {
+        tracing::error!("Failed to read address file {}: {}", to_file.display(), e);
+        "failed to read recipient address file".to_string()
+    })?;
     let addr_bytes =
         hex::decode(addr_hex.trim()).map_err(|e| format!("invalid address hex: {}", e))?;
     let recipient: PublicAddress =
@@ -362,7 +364,7 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
     let wallet = Wallet::new();
 
     // Create recovery backup
-    let (words, backup) = wallet.create_recovery_backup();
+    let (mut words, backup) = wallet.create_recovery_backup();
     let recovery_path = data_dir.join("wallet.recovery");
     std::fs::write(&recovery_path, &backup)?;
 
@@ -391,6 +393,13 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
     println!("WARNING: This phrase will NOT be shown again.");
     println!("Both the phrase AND the wallet.recovery file are needed to recover.");
 
+    // Zeroize mnemonic words
+    use zeroize::Zeroize;
+    for word in &mut words {
+        word.zeroize();
+    }
+    drop(words);
+
     Ok(())
 }
 
@@ -403,11 +412,19 @@ pub fn cmd_recover(data_dir: &Path, phrase: &str) -> Result<(), Box<dyn std::err
 
     let recovery_path = data_dir.join("wallet.recovery");
     if !recovery_path.exists() {
-        return Err(format!("recovery backup not found at {}", recovery_path.display()).into());
+        tracing::error!("Recovery backup not found at {}", recovery_path.display());
+        return Err("recovery backup file not found".into());
     }
 
     let words: Vec<String> = phrase.split_whitespace().map(|s| s.to_string()).collect();
-    let backup = std::fs::read(&recovery_path)?;
+    let backup = std::fs::read(&recovery_path).map_err(|e| {
+        tracing::error!(
+            "Failed to read recovery backup at {}: {}",
+            recovery_path.display(),
+            e
+        );
+        "failed to read recovery backup file"
+    })?;
 
     let wallet = Wallet::recover_from_backup(&words, &backup)?;
     std::fs::create_dir_all(data_dir)?;
@@ -457,7 +474,7 @@ pub async fn scan_chain(
         state.epoch,
         state.commitment_count,
         state.nullifier_count,
-        &state.state_root[..16]
+        &state.state_root[..std::cmp::min(16, state.state_root.len())]
     );
 
     let mut current_after = last_seq;

@@ -235,6 +235,13 @@ impl Dag {
     fn insert_impl(&mut self, vertex: Vertex, skip_signature: bool) -> Result<(), VertexError> {
         vertex.validate_structure(skip_signature)?;
 
+        // Limit unfinalized vertices to prevent memory exhaustion
+        const MAX_UNFINALIZED: usize = 10_000;
+        let unfinalized_count = self.vertices.len().saturating_sub(self.finalized.len());
+        if unfinalized_count >= MAX_UNFINALIZED {
+            return Err(VertexError::TooManyUnfinalized);
+        }
+
         // Verify all parents exist
         for parent_id in &vertex.parents {
             if !self.vertices.contains_key(parent_id) {
@@ -463,6 +470,8 @@ pub enum VertexError {
     InvalidVrf,
     #[error("proposer was not selected by VRF")]
     NotSelected,
+    #[error("too many unfinalized vertices in DAG")]
+    TooManyUnfinalized,
 }
 
 #[cfg(test)]

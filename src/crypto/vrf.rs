@@ -154,8 +154,9 @@ impl VrfOutput {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&self.value[..8]);
         let random_val = u64::from_le_bytes(bytes);
-        let threshold = (u64::MAX / total_validators as u64) * committee_size as u64;
-        random_val < threshold
+        // Use u128 to avoid overflow: selected if random_val/u64::MAX < committee_size/total_validators
+        (random_val as u128) * (total_validators as u128)
+            < (committee_size as u128) * ((u64::MAX as u128) + 1)
     }
 
     /// Derive a sort key from the VRF output.

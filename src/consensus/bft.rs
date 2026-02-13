@@ -321,10 +321,13 @@ impl BftState {
         let voter = self.committee.iter().find(|v| v.id == vote.voter_id)?;
 
         // H1: Verify VRF proof on the vote to confirm the voter was genuinely selected.
-        // This prevents accepting votes from validators who aren't actually on the
-        // committee (e.g., if local committee list is stale or manipulated).
-        if let Some(vrf) = &vote.vrf_proof {
-            if let Some(seed) = &self.epoch_seed {
+        if let Some(seed) = &self.epoch_seed {
+            if self.total_validators > self.committee.len() {
+                // VRF proof is mandatory when committee is a subset of all validators
+                let vrf = match &vote.vrf_proof {
+                    Some(v) => v,
+                    None => return None,
+                };
                 let vrf_input = seed.vrf_input(&vote.voter_id);
                 if !vrf.verify_locally(&voter.public_key, &vrf_input) {
                     return None;
@@ -440,6 +443,20 @@ impl BftState {
     /// Clear processed equivocation evidence (call after slashing).
     pub fn clear_equivocations(&mut self) {
         self.equivocations.clear();
+    }
+
+    /// Advance to a new epoch, clearing all per-epoch state.
+    pub fn advance_epoch(&mut self, epoch: u64, committee: Vec<Validator>) {
+        self.epoch = epoch;
+        self.round = 0;
+        self.committee = committee;
+        self.votes.clear();
+        self.certificates.clear();
+        self.round_votes.clear();
+        self.equivocations.clear();
+        self.our_vrf_proof = None;
+        self.epoch_seed = None;
+        self.total_validators = 0;
     }
 
     /// Get a certificate for a vertex.

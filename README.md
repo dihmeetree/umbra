@@ -666,13 +666,33 @@ All transaction validity is verified via zk-STARKs:
 - **Peer reputation and banning** — peers accumulate reputation penalties for rate limit violations, invalid messages, and handshake failures; peers below threshold are temporarily banned (1 hour) with bans persisted to storage
 - **DAG memory pruning** — finalized vertices older than `PRUNING_RETAIN_EPOCHS` are pruned from in-memory maps on epoch transition, preventing unbounded memory growth while retaining data in sled for sync
 - **Protocol version signaling** — vertices carry a protocol version; upgrade activation requires 75% of signals in an epoch, with a two-epoch grace period before enforcement
+- **Intra-vertex double-spend prevention** — before validating a vertex's transactions, all nullifiers within the vertex are checked for duplicates, preventing cross-transaction double-spends within a single vertex
+- **Duplicate validator operation prevention** — a vertex cannot contain multiple `ValidatorRegister` or `ValidatorDeregister` operations for the same validator, preventing state confusion from duplicate operations
+- **Unfinalized vertex limit** — the DAG rejects new vertices when unfinalized count exceeds 10,000, preventing memory exhaustion from spam vertices that never achieve BFT certification
+- **VRF safe arithmetic** — committee selection threshold uses u128 cross-multiplication to prevent integer overflow that could bias selection probability
+- **RPC body size limit** — all RPC requests are capped at 2 MB via `DefaultBodyLimit`, preventing memory exhaustion from oversized payloads
+- **Transaction hex validation** — `POST /tx` rejects hex payloads exceeding `2 * MAX_NETWORK_MESSAGE_BYTES` before attempting deserialization, preventing allocation-based DoS
+- **Sync vertex validation** — vertices received during state sync are validated through `apply_finalized_vertex()` (full signature verification + DAG insertion), not applied directly to state
+- **Gossip deduplication** — a bounded `seen_messages` set (10K capacity) prevents re-processing and re-broadcasting of duplicate vertices, votes, and certificates
+- **Sync bounds checking** — sync is cancelled after 1,000 rounds or if a peer claims an unreasonably high finalized count, preventing infinite sync attacks from malicious peers
+- **Self-connection prevention** — P2P connections to the node's own peer ID are rejected on establishment
+- **Handshake concurrency limit** — a semaphore limits concurrent P2P handshakes to 64, preventing resource exhaustion from handshake flooding
+- **Deferred stem mempool insertion** — Dandelion++ stem-phase transactions are forwarded without being added to the local mempool, preventing timing analysis that could deanonymize the transaction origin
+- **Wallet web security headers** — the wallet web UI sets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and `Content-Security-Policy` on all responses
+- **Atomic wallet file writes** — wallet data is written to a temporary file then atomically renamed, preventing data loss from interrupted writes
+- **Non-blocking wallet I/O** — synchronous wallet file operations are wrapped in `spawn_blocking()` to avoid blocking the async runtime
+- **XOR keystream per-block derivation** — the BLAKE3 keystream incorporates the block index into each `derive_key` call, ensuring unique keystream blocks for wallet recovery encryption
+- **Error message sanitization** — wallet CLI error messages do not expose internal file paths to users; details are logged server-side via `tracing::error!`
+- **Mnemonic zeroization** — recovery phrase words are zeroized from memory immediately after display to minimize secret exposure window
+- **Multi-transaction mempool eviction** — when the mempool is full, lowest-fee transactions are evicted in a loop until space is available, rather than evicting only one
+- **Cached finalized vertex count** — `finalized_vertex_count()` uses an `AtomicU64` cache instead of scanning the sled tree, improving performance for health and metrics endpoints
 
 ## Production Roadmap
 
 Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **Formal security audit** — cryptographic protocol review and implementation audit
+- **External security audit** — independent cryptographic protocol review and penetration testing (an internal security audit has been completed, addressing 30 findings across all severity levels)
 
 ## License
 

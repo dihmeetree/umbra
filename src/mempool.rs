@@ -148,8 +148,8 @@ impl Mempool {
         let fee = tx.fee;
         let size = tx.estimated_size();
 
-        // 4. Size-limit eviction
-        if self.txs.len() >= self.config.max_transactions
+        // 4. Size-limit eviction: evict lowest-fee txs until there is space
+        while self.txs.len() >= self.config.max_transactions
             || self.total_bytes + size > self.config.max_bytes
         {
             // Find the lowest-fee transaction (last entry in BTreeMap)
@@ -164,6 +164,8 @@ impl Mempool {
                 // Evict the lowest-fee tx
                 let lowest_id = self.fee_index[&lowest_key];
                 self.remove_entry(&lowest_id);
+            } else {
+                break;
             }
         }
 

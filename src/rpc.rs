@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -51,6 +51,7 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/commitment-proof/{index}", get(get_commitment_proof))
         .route("/state-summary", get(get_state_summary))
         .with_state(rpc_state)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB max body
 }
 
 /// Start the RPC server.
@@ -82,6 +83,11 @@ async fn submit_tx(
     State(state): State<RpcState>,
     Json(req): Json<SubmitTxRequest>,
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
+    // Reject oversized payloads before decoding
+    if req.tx_hex.len() > 2 * crate::constants::MAX_NETWORK_MESSAGE_BYTES {
+        return Err((StatusCode::BAD_REQUEST, "transaction too large".to_string()));
+    }
+
     let tx_bytes = hex::decode(&req.tx_hex)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid hex: {}", e)))?;
     let tx: crate::transaction::Transaction = crate::deserialize(&tx_bytes).map_err(|e| {

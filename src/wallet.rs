@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::crypto::commitment::{BlindingFactor, Commitment};
 use crate::crypto::keys::{FullKeypair, KemKeypair, SharedSecret, SigningKeypair};
@@ -16,6 +17,9 @@ use crate::crypto::stealth::derive_spend_auth;
 use crate::transaction::builder::{decode_note, InputSpec, TransactionBuilder};
 use crate::transaction::{Transaction, TxOutput};
 use crate::Hash;
+
+/// Maximum number of transaction history entries retained by the wallet.
+const MAX_HISTORY_ENTRIES: usize = 10_000;
 
 /// Direction of a transaction relative to this wallet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -155,7 +159,7 @@ impl Wallet {
 
         // Record receive history if we claimed any outputs
         if received_amount > 0 {
-            self.history.push(TxHistoryEntry {
+            self.push_history(TxHistoryEntry {
                 tx_id: tx_id.0,
                 direction: TxDirection::Receive,
                 amount: received_amount,
@@ -339,7 +343,7 @@ impl Wallet {
         }
 
         // Record send in history
-        self.history.push(TxHistoryEntry {
+        self.push_history(TxHistoryEntry {
             tx_id: tx.tx_id().0,
             direction: TxDirection::Send,
             amount,
@@ -395,7 +399,7 @@ impl Wallet {
             }
             let amount = owned.value;
             self.outputs.push(owned);
-            self.history.push(TxHistoryEntry {
+            self.push_history(TxHistoryEntry {
                 tx_id: [0u8; 32], // coinbase has no tx_id
                 direction: TxDirection::Coinbase,
                 amount,
@@ -413,6 +417,15 @@ impl Wallet {
     /// Get the transaction history.
     pub fn history(&self) -> &[TxHistoryEntry] {
         &self.history
+    }
+
+    /// Push a history entry and cap the total size to [`MAX_HISTORY_ENTRIES`].
+    fn push_history(&mut self, entry: TxHistoryEntry) {
+        self.history.push(entry);
+        if self.history.len() > MAX_HISTORY_ENTRIES {
+            self.history
+                .drain(..self.history.len() - MAX_HISTORY_ENTRIES);
+        }
     }
 
     /// Build a consolidation transaction that merges all unspent outputs into one.
@@ -478,7 +491,7 @@ impl Wallet {
         }
 
         // Record in history
-        self.history.push(TxHistoryEntry {
+        self.push_history(TxHistoryEntry {
             tx_id: tx.tx_id().0,
             direction: TxDirection::Send,
             amount: consolidated_amount,
@@ -559,9 +572,8 @@ pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
     for word in words {
         let lower = word.to_lowercase();
         let index = WORDLIST
-            .iter()
-            .position(|&w| w == lower)
-            .ok_or_else(|| WalletError::Recovery(format!("unknown word: {}", word)))?;
+            .binary_search(&lower.as_str())
+            .map_err(|_| WalletError::Recovery(format!("unknown word: {}", word)))?;
         for i in (0..11).rev() {
             bits.push(((index >> i) & 1) as u8);
         }
@@ -596,13 +608,14 @@ impl Wallet {
     /// to recover the wallet — the mnemonic derives the encryption key,
     /// and the backup contains the actual PQ key material.
     pub fn create_recovery_backup(&self) -> (Vec<String>, Vec<u8>) {
-        let (words, entropy) = generate_mnemonic();
+        let (words, mut entropy) = generate_mnemonic();
 
         // Derive encryption key from entropy
-        let key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+        let mut key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+        entropy.zeroize();
 
         // Serialize key material
-        let mut material = Vec::new();
+        let mut material = zeroize::Zeroizing::new(Vec::new());
         let spk = &self.keypair.signing.public.0;
         let ssk = &self.keypair.signing.secret.0;
         let kpk = &self.keypair.kem.public.0;
@@ -619,9 +632,11 @@ impl Wallet {
 
         // Encrypt with BLAKE3 keystream XOR
         let encrypted = xor_keystream(&key, &material);
+        // material is auto-zeroized on drop via Zeroizing wrapper
 
         // Prepend a MAC for integrity
         let mac = blake3::keyed_hash(&key, &encrypted);
+        key.zeroize();
         let mut backup = mac.as_bytes().to_vec();
         backup.extend_from_slice(&encrypted);
 
@@ -633,10 +648,12 @@ impl Wallet {
         words: &[String],
         encrypted_backup: &[u8],
     ) -> Result<Self, WalletError> {
-        let entropy = words_to_entropy(words)?;
-        let key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+        let mut entropy = words_to_entropy(words)?;
+        let mut key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+        entropy.zeroize();
 
         if encrypted_backup.len() < 32 {
+            key.zeroize();
             return Err(WalletError::Recovery("backup too short".into()));
         }
 
@@ -645,13 +662,15 @@ impl Wallet {
         let ciphertext = &encrypted_backup[32..];
         let expected_mac = blake3::keyed_hash(&key, ciphertext);
         if !crate::constant_time_eq(stored_mac, expected_mac.as_bytes()) {
+            key.zeroize();
             return Err(WalletError::Recovery(
                 "invalid mnemonic or corrupted backup".into(),
             ));
         }
 
         // Decrypt
-        let material = xor_keystream(&key, ciphertext);
+        let material = zeroize::Zeroizing::new(xor_keystream(&key, ciphertext));
+        key.zeroize();
 
         // Parse key material
         let mut pos = 0;
@@ -673,6 +692,8 @@ impl Wallet {
         let ssk = read_vec(&material, &mut pos)?;
         let kpk = read_vec(&material, &mut pos)?;
         let ksk = read_vec(&material, &mut pos)?;
+        // material is auto-zeroized on drop via Zeroizing wrapper
+        drop(material);
 
         let signing = SigningKeypair::from_bytes(spk, ssk)
             .ok_or_else(|| WalletError::Recovery("invalid signing key in backup".into()))?;
@@ -689,29 +710,28 @@ impl Wallet {
 }
 
 /// XOR data with a BLAKE3 keystream.
+///
+/// Each 32-byte block derives a unique key by incorporating both the master
+/// key and the block index into `blake3::derive_key`, ensuring every block
+/// produces a distinct keystream.
 fn xor_keystream(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
-    let mut output = vec![0u8; data.len()];
-    let mut block_idx = 0u64;
+    let mut result = Vec::with_capacity(data.len());
     let mut offset = 0;
-
+    let mut block_idx: u64 = 0;
     while offset < data.len() {
-        let block_key = blake3::derive_key("spectra.recovery.stream", key);
-        let stream_input = [block_key.as_slice(), &block_idx.to_le_bytes()].concat();
-        let block = blake3::hash(&stream_input);
-        let block_bytes = block.as_bytes();
-
-        for i in 0..32 {
-            if offset + i >= data.len() {
-                break;
-            }
-            output[offset + i] = data[offset + i] ^ block_bytes[i];
+        // Incorporate block_idx into the key derivation input
+        let mut block_input = Vec::with_capacity(40);
+        block_input.extend_from_slice(key);
+        block_input.extend_from_slice(&block_idx.to_le_bytes());
+        let block = blake3::derive_key("spectra.recovery.stream", &block_input);
+        let end = std::cmp::min(offset + 32, data.len());
+        for i in offset..end {
+            result.push(data[i] ^ block[i - offset]);
         }
-
-        offset += 32;
+        offset = end;
         block_idx += 1;
     }
-
-    output
+    result
 }
 
 // ── Persistence ──────────────────────────────────────────────────────────
@@ -832,17 +852,24 @@ impl Wallet {
         };
 
         let bytes = crate::serialize(&wallet_file)
-            .map_err(|e| WalletError::Persistence(format!("serialization failed: {}", e)))?;
+            .map_err(|e| WalletError::Persistence(format!("serialize failed: {}", e)))?;
 
-        std::fs::write(path, &bytes)
+        // Atomic write: write to temp file, then rename
+        let tmp_path = path.with_extension("dat.tmp");
+        std::fs::write(&tmp_path, &bytes)
             .map_err(|e| WalletError::Persistence(format!("write failed: {}", e)))?;
 
-        // Restrict file permissions to owner-only
+        // Set permissions on temp file before rename
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| WalletError::Persistence(format!("chmod failed: {}", e)))?;
         }
+
+        // Atomic rename
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| WalletError::Persistence(format!("rename failed: {}", e)))?;
 
         Ok(())
     }
