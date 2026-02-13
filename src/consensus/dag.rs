@@ -309,15 +309,18 @@ impl Dag {
     /// and correctly includes finalized vertices whose only paths from
     /// genesis pass through non-finalized ancestors.
     pub fn finalized_order(&self) -> Vec<VertexId> {
-        // Compute in-degree for each finalized vertex, counting only finalized parents
+        // Compute in-degree for each finalized vertex, counting only finalized parents.
+        // Skip any finalized vertex that is missing from the vertices map (e.g. after pruning).
         let mut in_degree: HashMap<VertexId, usize> = HashMap::new();
         for &vid in &self.finalized {
-            let degree = self.vertices[&vid]
-                .parents
-                .iter()
-                .filter(|p| self.finalized.contains(p))
-                .count();
-            in_degree.insert(vid, degree);
+            if let Some(v) = self.vertices.get(&vid) {
+                let degree = v
+                    .parents
+                    .iter()
+                    .filter(|p| self.finalized.contains(p))
+                    .count();
+                in_degree.insert(vid, degree);
+            }
         }
 
         // Collect seed vertices (no finalized parents), sorted for determinism
@@ -327,8 +330,8 @@ impl Dag {
             .map(|(&v, _)| v)
             .collect();
         seeds.sort_by(|a, b| {
-            let ra = self.vertices[a].round;
-            let rb = self.vertices[b].round;
+            let ra = self.vertices.get(a).map(|v| v.round).unwrap_or(0);
+            let rb = self.vertices.get(b).map(|v| v.round).unwrap_or(0);
             ra.cmp(&rb).then_with(|| a.0.cmp(&b.0))
         });
 

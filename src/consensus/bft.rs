@@ -323,7 +323,7 @@ impl BftState {
         // H1: Verify VRF proof on the vote to confirm the voter was genuinely selected.
         if let Some(seed) = &self.epoch_seed {
             if self.total_validators > self.committee.len() {
-                // VRF proof is mandatory when committee is a subset of all validators
+                // VRF mandatory — committee is a subset
                 let vrf = match &vote.vrf_proof {
                     Some(v) => v,
                     None => return None,
@@ -333,6 +333,12 @@ impl BftState {
                     return None;
                 }
                 if !vrf.is_selected(crate::constants::COMMITTEE_SIZE, self.total_validators) {
+                    return None;
+                }
+            } else if let Some(vrf) = &vote.vrf_proof {
+                // VRF optional but verify if present (all validators on committee)
+                let vrf_input = seed.vrf_input(&vote.voter_id);
+                if !vrf.verify_locally(&voter.public_key, &vrf_input) {
                     return None;
                 }
             }
@@ -391,6 +397,12 @@ impl BftState {
     }
 
     /// Try to certify a vertex if it has enough Accept votes.
+    ///
+    /// Design note (L6): Only `Accept` votes count toward quorum. `Reject` votes
+    /// are recorded but do not prevent or contribute to finalization. This is
+    /// intentional — rejections serve as advisory signals (observable via
+    /// `rejection_count()`), and the proposer should re-propose if rejections
+    /// are high. A vertex can only be finalized through positive quorum.
     fn try_certify(&mut self, vertex_id: &VertexId) -> Option<Certificate> {
         if self.certificates.contains_key(vertex_id) {
             return None; // Already certified
@@ -473,6 +485,23 @@ impl BftState {
     pub fn equivocations(&self) -> &[EquivocationEvidence] {
         &self.equivocations
     }
+
+    /// Check how many reject votes a vertex has received.
+    ///
+    /// Note: rejections don't finalize — they're advisory only.
+    /// Only `Accept` votes contribute to quorum and certification.
+    /// The proposer or other validators should re-propose if rejection is high.
+    pub fn rejection_count(&self, vertex_id: &VertexId) -> usize {
+        self.votes
+            .get(vertex_id)
+            .map(|votes| {
+                votes
+                    .iter()
+                    .filter(|v| v.vote_type == VoteType::Reject)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
 }
 
 /// Select the committee for an epoch using VRF.
@@ -502,7 +531,8 @@ pub fn select_committee(
     }
 
     // Ensure minimum committee size for BFT safety
-    if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
+    let used_fallback = candidates.len() < crate::constants::MIN_COMMITTEE_SIZE;
+    if used_fallback {
         // Fall back: include all eligible validators sorted by VRF
         candidates.clear();
         for (keypair, validator) in validators {
@@ -518,8 +548,12 @@ pub fn select_committee(
     // Sort by VRF output to get deterministic ordering
     candidates.sort_by_key(|(_, vrf)| vrf.sort_key());
 
-    // Take exactly committee_size members (or all if fewer)
-    candidates.truncate(committee_size);
+    // Only truncate if we had enough from VRF (not fallback).
+    // In fallback mode, all eligible validators must be included to
+    // guarantee MIN_COMMITTEE_SIZE for BFT safety.
+    if !used_fallback {
+        candidates.truncate(committee_size);
+    }
     candidates
 }
 
@@ -560,6 +594,12 @@ pub fn dynamic_quorum(committee_size: usize) -> usize {
 }
 
 /// Data signed for a vote (epoch-bound and chain-bound to prevent replay).
+///
+/// Uses manual concatenation rather than `hash_concat()` because:
+/// 1. All fields are fixed-size (domain tag, chain_id 32B, epoch 8B, vertex_id 32B,
+///    round 8B, vote_type 1B), so length-prefix framing is unnecessary.
+/// 2. The result is used as raw sign input for `keypair.sign()`, not as a hash
+///    input to `hash_domain()`. Signing already handles its own hashing internally.
 fn vote_sign_data(
     vertex_id: &VertexId,
     epoch: u64,

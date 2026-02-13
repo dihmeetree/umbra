@@ -21,6 +21,9 @@ use crate::Hash;
 /// Maximum number of transaction history entries retained by the wallet.
 const MAX_HISTORY_ENTRIES: usize = 10_000;
 
+/// Number of epochs after which pending outputs are considered expired.
+pub const PENDING_EXPIRY_EPOCHS: u64 = 10;
+
 /// Direction of a transaction relative to this wallet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TxDirection {
@@ -54,8 +57,12 @@ pub enum SpendStatus {
     Unspent,
     /// Output is used in a pending (unconfirmed) transaction.
     /// Contains the `tx_binding` of the pending transaction so
-    /// it can be confirmed or cancelled.
-    Pending { tx_binding: Hash },
+    /// it can be confirmed or cancelled, and the epoch when the
+    /// pending state was created so it can auto-expire.
+    Pending {
+        tx_binding: Hash,
+        created_epoch: u64,
+    },
     /// Output has been confirmed spent on-chain.
     Spent,
 }
@@ -228,14 +235,13 @@ impl Wallet {
 
     /// Get our spendable balance (only fully unspent outputs, not pending).
     ///
-    /// Uses checked arithmetic to prevent silent overflow when many outputs
-    /// are held simultaneously.
+    /// Uses saturating arithmetic so the result caps at `u64::MAX` gracefully
+    /// when many outputs are held simultaneously.
     pub fn balance(&self) -> u64 {
         self.outputs
             .iter()
             .filter(|o| o.status == SpendStatus::Unspent)
-            .try_fold(0u64, |acc, o| acc.checked_add(o.value))
-            .unwrap_or(u64::MAX)
+            .fold(0u64, |acc, o| acc.saturating_add(o.value))
     }
 
     /// Get unspent outputs (excludes pending and spent).
@@ -339,7 +345,10 @@ impl Wallet {
         // `cancel_transaction` if it fails to be included.
         let tx_binding = tx.tx_binding;
         for &idx in &selected {
-            self.outputs[idx].status = SpendStatus::Pending { tx_binding };
+            self.outputs[idx].status = SpendStatus::Pending {
+                tx_binding,
+                created_epoch: 0,
+            };
         }
 
         // Record send in history
@@ -358,12 +367,13 @@ impl Wallet {
     /// Moves all outputs with matching `tx_binding` from `Pending` to `Spent`.
     pub fn confirm_transaction(&mut self, tx_binding: &Hash) {
         for output in &mut self.outputs {
-            if output.status
-                == (SpendStatus::Pending {
-                    tx_binding: *tx_binding,
-                })
+            if let SpendStatus::Pending {
+                tx_binding: ref tb, ..
+            } = output.status
             {
-                output.status = SpendStatus::Spent;
+                if tb == tx_binding {
+                    output.status = SpendStatus::Spent;
+                }
             }
         }
     }
@@ -372,14 +382,30 @@ impl Wallet {
     /// Moves all outputs with matching `tx_binding` from `Pending` back to `Unspent`.
     pub fn cancel_transaction(&mut self, tx_binding: &Hash) {
         for output in &mut self.outputs {
-            if output.status
-                == (SpendStatus::Pending {
-                    tx_binding: *tx_binding,
-                })
+            if let SpendStatus::Pending {
+                tx_binding: ref tb, ..
+            } = output.status
             {
-                output.status = SpendStatus::Unspent;
+                if tb == tx_binding {
+                    output.status = SpendStatus::Unspent;
+                }
             }
         }
+    }
+
+    /// Cancel pending transactions older than `max_age_epochs` epochs.
+    /// Returns the number of outputs returned to Unspent.
+    pub fn expire_pending(&mut self, current_epoch: u64, max_age_epochs: u64) -> usize {
+        let mut count = 0;
+        for output in &mut self.outputs {
+            if let SpendStatus::Pending { created_epoch, .. } = output.status {
+                if current_epoch > created_epoch + max_age_epochs {
+                    output.status = SpendStatus::Unspent;
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// Scan a single coinbase output (not part of any transaction).
@@ -487,7 +513,10 @@ impl Wallet {
         // Mark all inputs as pending
         let tx_binding = tx.tx_binding;
         for &idx in &unspent {
-            self.outputs[idx].status = SpendStatus::Pending { tx_binding };
+            self.outputs[idx].status = SpendStatus::Pending {
+                tx_binding,
+                created_epoch: 0,
+            };
         }
 
         // Record in history
@@ -764,7 +793,10 @@ struct SerializedOutput {
 #[derive(Serialize, Deserialize)]
 enum SerializedSpendStatus {
     Unspent,
-    Pending { tx_binding: Hash },
+    Pending {
+        tx_binding: Hash,
+        created_epoch: u64,
+    },
     Spent,
 }
 
@@ -778,8 +810,12 @@ impl From<&SpendStatus> for SerializedSpendStatus {
     fn from(s: &SpendStatus) -> Self {
         match s {
             SpendStatus::Unspent => SerializedSpendStatus::Unspent,
-            SpendStatus::Pending { tx_binding } => SerializedSpendStatus::Pending {
+            SpendStatus::Pending {
+                tx_binding,
+                created_epoch,
+            } => SerializedSpendStatus::Pending {
                 tx_binding: *tx_binding,
+                created_epoch: *created_epoch,
             },
             SpendStatus::Spent => SerializedSpendStatus::Spent,
         }
@@ -790,7 +826,13 @@ impl From<SerializedSpendStatus> for SpendStatus {
     fn from(s: SerializedSpendStatus) -> Self {
         match s {
             SerializedSpendStatus::Unspent => SpendStatus::Unspent,
-            SerializedSpendStatus::Pending { tx_binding } => SpendStatus::Pending { tx_binding },
+            SerializedSpendStatus::Pending {
+                tx_binding,
+                created_epoch,
+            } => SpendStatus::Pending {
+                tx_binding,
+                created_epoch,
+            },
             SerializedSpendStatus::Spent => SpendStatus::Spent,
         }
     }

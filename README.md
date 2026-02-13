@@ -33,7 +33,7 @@ No trusted setup is required. All proofs are transparent. The P2P transport laye
 - **Genesis mint** — the genesis validator receives an initial distribution of 100,000,000 units at network bootstrap, seeding the economy before block rewards begin
 - **Block rewards** — each finalized vertex creates new coins for the proposer via a coinbase output (commitment + stealth address + encrypted note), the same format as any other output in the commitment tree
 - **Halving schedule** — initial reward of 50,000 units per vertex, halving every 500 epochs (~500,000 vertices per phase), reaching zero after 63 halvings
-- **Fee distribution** — transaction fees go directly to the vertex proposer (not pooled per-epoch), added on top of the block reward
+- **Fee distribution** — transaction fees go to the vertex proposer via coinbase output and also accumulate in epoch-level accounting, added on top of the block reward
 - **Deterministic blinding** — coinbase blinding factors are derived from `hash_domain("spectra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while maintaining consistent commitment tree format
 - **Total supply tracking** — `total_minted` is tracked in the chain state and included in the state root hash, enabling consensus-verifiable supply accounting
 
@@ -624,7 +624,7 @@ All transaction validity is verified via zk-STARKs:
 - **Range proofs** — all committed values are proven to be in [0, 2^59) via bit decomposition within the balance AIR; with MAX_IO = 16 per side, the maximum sum is 16 * 2^59 = 2^63 < p (Goldilocks), preventing inflation via field-arithmetic wraparound
 - **Network message limits** — serialized messages are rejected above `MAX_NETWORK_MESSAGE_BYTES`; bincode deserialization uses size-limited options to prevent allocation-based DoS from crafted internal length fields
 - **Cryptographic type size validation** — public keys, signatures, and KEM ciphertexts are validated on deserialization, rejecting malformed or oversized payloads
-- **Deserialization bounds** — public input deserialization rejects unreasonable counts (> 256 inputs/outputs) to prevent allocation DoS
+- **Deserialization bounds** — public input deserialization rejects counts exceeding `MAX_TX_IO` (16 inputs/outputs) to prevent allocation DoS
 - **Overflow protection** — all arithmetic uses `checked_add` to prevent overflow; fee accumulation overflow is an explicit error
 - **Transaction I/O limits** — inputs and outputs are capped at `MAX_TX_IO` (16), ensuring range proof sums stay within the Goldilocks field (16 * 2^59 < p) and preventing inflation via field-arithmetic wraparound
 - **Complete content hash binding** — `tx_content_hash` covers all encrypted payload fields including MACs and KEM ciphertexts, preventing undetected tampering of encrypted notes or messages
@@ -633,7 +633,7 @@ All transaction validity is verified via zk-STARKs:
 - **Minimum transaction fee** — `validate_structure()` enforces `MIN_TX_FEE`, preventing zero-fee spam; coinbase funding bypasses validation by adding outputs directly to state
 - **MAC boundary protection** — the encrypt-then-MAC construction length-prefixes each variable-length field (ciphertext, KEM ciphertext) before computing the MAC, preventing boundary-ambiguity attacks
 - **Equivocation detection** — BFT tracks `(voter_id, round) → vertex_id` and records `EquivocationEvidence` when a validator votes for conflicting vertices in the same round
-- **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` to prevent double-spend of outputs in unconfirmed transactions
+- **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` and automatic expiry after `PENDING_EXPIRY_EPOCHS` to prevent double-spend of outputs in unconfirmed transactions and recover stuck funds
 - **VRF commitment verification** — `VrfOutput::verify()` requires a pre-registered proof commitment, enforcing the commit-reveal anti-grinding scheme; `verify_locally()` is available for self-checks only
 - **VRF-proven vertices and votes** — every non-genesis vertex and BFT vote must include a VRF proof demonstrating the proposer/voter was selected for the epoch's committee; vertices and votes without valid VRF proofs are rejected
 - **Validator bond escrow** — registration requires `fee >= VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state and only the remainder goes to epoch fees. Prevents unbonded validators from participating
@@ -673,7 +673,7 @@ All transaction validity is verified via zk-STARKs:
 - **RPC body size limit** — all RPC requests are capped at 2 MB via `DefaultBodyLimit`, preventing memory exhaustion from oversized payloads
 - **Transaction hex validation** — `POST /tx` rejects hex payloads exceeding `2 * MAX_NETWORK_MESSAGE_BYTES` before attempting deserialization, preventing allocation-based DoS
 - **Sync vertex validation** — vertices received during state sync are validated through `apply_finalized_vertex()` (full signature verification + DAG insertion), not applied directly to state
-- **Gossip deduplication** — a bounded `seen_messages` set (10K capacity) prevents re-processing and re-broadcasting of duplicate vertices, votes, and certificates
+- **Gossip deduplication** — a two-generation `seen_messages` scheme (10K capacity per generation) prevents re-processing and re-broadcasting of duplicate vertices, votes, and certificates without bulk-clearing recently seen entries
 - **Sync bounds checking** — sync is cancelled after 1,000 rounds or if a peer claims an unreasonably high finalized count, preventing infinite sync attacks from malicious peers
 - **Self-connection prevention** — P2P connections to the node's own peer ID are rejected on establishment
 - **Handshake concurrency limit** — a semaphore limits concurrent P2P handshakes to 64, preventing resource exhaustion from handshake flooding
@@ -686,13 +686,20 @@ All transaction validity is verified via zk-STARKs:
 - **Mnemonic zeroization** — recovery phrase words are zeroized from memory immediately after display to minimize secret exposure window
 - **Multi-transaction mempool eviction** — when the mempool is full, lowest-fee transactions are evicted in a loop until space is available, rather than evicting only one
 - **Cached finalized vertex count** — `finalized_vertex_count()` uses an `AtomicU64` cache instead of scanning the sled tree, improving performance for health and metrics endpoints
+- **Validator key size validation** — `ValidatorRegister` transactions validate that signing keys are exactly 2592 bytes (Dilithium5) and KEM keys are exactly 1568 bytes (Kyber1024), rejecting malformed keys
+- **Nullifier persistence propagation** — sled write failures in `record_nullifier()` propagate as errors through `apply_vertex()`, preventing silent state desynchronization between memory and storage that could allow double-spends after restart
+- **Sync epoch validation** — finalized vertices received during sync are rejected if their epoch exceeds the sync peer's claimed epoch + 1, preventing malicious peers from advancing local state to fabricated future epochs
+- **Proof link cross-validation** — each spend proof's `proof_link` is cross-checked against the corresponding entry in the balance proof's `input_proof_links`, providing defense-in-depth against proof_link tampering
+- **Web message size validation** — the wallet web UI validates message size against `MAX_MESSAGE_SIZE` before building transactions, preventing unnecessary proof generation for oversized messages
+- **Concurrent wallet mutation lock** — the wallet web UI serializes send and scan operations via a tokio Mutex, preventing race conditions that could cause double-spending from concurrent requests
+- **DAG safe indexing** — `finalized_order()` uses fallible `.get()` lookups instead of panicking `[]` indexing, gracefully handling edge cases where finalized vertices may be missing from the in-memory map after pruning
 
 ## Production Roadmap
 
 Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (an internal security audit has been completed, addressing 30 findings across all severity levels)
+- **External security audit** — independent cryptographic protocol review and penetration testing (two internal security audits have been completed, addressing 30+ findings across all severity levels including bugs, security vulnerabilities, logic errors, and quality improvements)
 
 ## License
 

@@ -335,9 +335,10 @@ impl Storage for SledStorage {
         after_sequence: u64,
         limit: u32,
     ) -> Result<Vec<(u64, Vertex)>, StorageError> {
-        let start = match after_sequence.checked_add(1) {
-            Some(s) => s,
-            None => return Ok(Vec::new()), // u64::MAX + 1 overflows, nothing to return
+        // u64::MAX is a sentinel meaning "start from the very beginning (seq 0)"
+        let start = match after_sequence {
+            u64::MAX => 0,
+            s => s + 1,
         };
         let start_key = start.to_be_bytes();
         let mut results = Vec::new();
@@ -572,8 +573,10 @@ mod tests {
         let results = storage.get_finalized_vertices_after(0, 10).unwrap();
         assert!(results.is_empty()); // after=0, so starts at seq 1
 
+        // u64::MAX is a sentinel meaning "start from seq 0"
         let results = storage.get_finalized_vertices_after(u64::MAX, 10).unwrap();
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1); // returns the vertex at seq 0
+        assert_eq!(results[0].0, 0);
     }
 
     #[test]

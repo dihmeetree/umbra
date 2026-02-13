@@ -210,9 +210,8 @@ impl BalancePublicInputs {
         };
 
         let n_in = read_u32(data, &mut pos)? as usize;
-        // Reject unreasonable counts to prevent allocation DoS.
-        // MAX_IO = 16 per side is the AIR limit; allow generous headroom.
-        if n_in > 256 {
+        // Reject counts exceeding the protocol limit to prevent allocation DoS.
+        if n_in > crate::constants::MAX_TX_IO {
             return None;
         }
         let mut input_proof_links = Vec::with_capacity(n_in);
@@ -221,7 +220,7 @@ impl BalancePublicInputs {
         }
 
         let n_out = read_u32(data, &mut pos)? as usize;
-        if n_out > 256 {
+        if n_out > crate::constants::MAX_TX_IO {
             return None;
         }
         let mut output_commitments = Vec::with_capacity(n_out);
@@ -322,43 +321,49 @@ mod tests {
 
     #[test]
     fn balance_from_bytes_rejects_oversized_input_count() {
-        // Craft bytes with n_in = 257 (exceeds 256 limit)
+        // Craft bytes with n_in = MAX_TX_IO + 1 (exceeds limit)
+        let too_many = (crate::constants::MAX_TX_IO + 1) as u32;
         let mut data = Vec::new();
-        data.extend_from_slice(&257u32.to_le_bytes());
+        data.extend_from_slice(&too_many.to_le_bytes());
         // Pad with enough zeros for one digest (won't matter, should reject early)
         data.extend_from_slice(&[0u8; 1024]);
         assert!(
             BalancePublicInputs::from_bytes(&data).is_none(),
-            "should reject n_in > 256"
+            "should reject n_in > MAX_TX_IO"
         );
     }
 
     #[test]
     fn balance_from_bytes_rejects_oversized_output_count() {
-        // Craft bytes with n_in = 0, n_out = 257
+        // Craft bytes with n_in = 0, n_out = MAX_TX_IO + 1
+        let too_many = (crate::constants::MAX_TX_IO + 1) as u32;
         let mut data = Vec::new();
         data.extend_from_slice(&0u32.to_le_bytes()); // n_in = 0
-        data.extend_from_slice(&257u32.to_le_bytes()); // n_out = 257
+        data.extend_from_slice(&too_many.to_le_bytes()); // n_out > MAX_TX_IO
         data.extend_from_slice(&[0u8; 1024]);
         assert!(
             BalancePublicInputs::from_bytes(&data).is_none(),
-            "should reject n_out > 256"
+            "should reject n_out > MAX_TX_IO"
         );
     }
 
     #[test]
     fn balance_from_bytes_accepts_max_count() {
-        // n_in = 256 should be accepted (if enough data provided)
+        // n_in = MAX_TX_IO should be accepted (if enough data provided)
+        let max_io = crate::constants::MAX_TX_IO;
         let pub_inputs = BalancePublicInputs {
-            input_proof_links: vec![[Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]; 256],
+            input_proof_links: vec![
+                [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)];
+                max_io
+            ],
             output_commitments: vec![],
             fee: Felt::new(0),
             tx_content_hash: [Felt::ZERO; 4],
         };
         let bytes = pub_inputs.to_bytes();
         let decoded =
-            BalancePublicInputs::from_bytes(&bytes).expect("256 inputs should be accepted");
-        assert_eq!(decoded.input_proof_links.len(), 256);
+            BalancePublicInputs::from_bytes(&bytes).expect("MAX_TX_IO inputs should be accepted");
+        assert_eq!(decoded.input_proof_links.len(), max_io);
     }
 
     #[test]

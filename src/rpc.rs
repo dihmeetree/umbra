@@ -329,7 +329,7 @@ async fn get_finalized_vertices(
     let limit = params.limit.min(crate::constants::SYNC_BATCH_SIZE);
     let total = node.storage.finalized_vertex_count().unwrap_or(0);
 
-    let vertices = node
+    let raw_vertices = node
         .storage
         .get_finalized_vertices_after(params.after, limit)
         .map_err(|e| {
@@ -339,22 +339,29 @@ async fn get_finalized_vertices(
             )
         })?;
 
-    let has_more = vertices.len() == limit as usize;
-    let entries: Vec<FinalizedVertexEntry> = vertices
+    let has_more = raw_vertices.len() == limit as usize;
+
+    let entries: Vec<FinalizedVertexEntry> = raw_vertices
         .into_iter()
-        .filter_map(|(seq, v)| {
-            let coinbase_hex = node
-                .storage
-                .get_coinbase_output(seq)
-                .ok()
-                .flatten()
-                .and_then(|cb| crate::serialize(&cb).ok())
-                .map(hex::encode);
-            crate::serialize(&v).ok().map(|bytes| FinalizedVertexEntry {
-                sequence: seq,
-                vertex_hex: hex::encode(bytes),
-                coinbase_hex,
-            })
+        .filter_map(|(seq, v)| match crate::serialize(&v) {
+            Ok(bytes) => {
+                let coinbase_hex = node
+                    .storage
+                    .get_coinbase_output(seq)
+                    .ok()
+                    .flatten()
+                    .and_then(|cb| crate::serialize(&cb).ok())
+                    .map(hex::encode);
+                Some(FinalizedVertexEntry {
+                    sequence: seq,
+                    vertex_hex: hex::encode(bytes),
+                    coinbase_hex,
+                })
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize vertex at seq {}: {}", seq, e);
+                None
+            }
         })
         .collect();
 

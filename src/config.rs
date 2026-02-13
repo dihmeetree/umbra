@@ -74,7 +74,7 @@ impl SpectraConfig {
                 }
                 Err(e) => {
                     tracing::error!(
-                        "Failed to parse {}: {}, using defaults",
+                        "CRITICAL: Failed to parse {}: {} — running with DEFAULT configuration! Check your config file.",
                         config_path.display(),
                         e
                     );

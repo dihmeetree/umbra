@@ -589,7 +589,9 @@ fn run_demo() {
     }
     // Record spent nullifiers
     for input in &tx.inputs {
-        state.mark_nullifier(input.nullifier);
+        state
+            .mark_nullifier(input.nullifier)
+            .expect("nullifier persistence failed");
     }
     println!("    After payment tx:");
     println!("    Commitments in state: {}", state.commitment_count());

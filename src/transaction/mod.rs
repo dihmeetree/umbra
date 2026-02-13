@@ -209,12 +209,12 @@ impl Transaction {
                 if self.fee < min_fee {
                     return Err(TxValidationError::InsufficientBond);
                 }
-                // Signing key must not be empty
-                if signing_key.0.is_empty() {
+                // Signing key must have the correct Dilithium5 size (2592 bytes)
+                if !signing_key.is_valid_size() {
                     return Err(TxValidationError::InvalidValidatorKey);
                 }
-                // KEM key must not be empty
-                if kem_public_key.0.is_empty() {
+                // KEM key must have the correct Kyber1024 size (1568 bytes)
+                if !kem_public_key.is_valid_size() {
                     return Err(TxValidationError::InvalidValidatorKey);
                 }
             }
@@ -290,16 +290,26 @@ impl Transaction {
         }
 
         // Verify each spend proof (zk-STARK)
-        for input in &self.inputs {
+        for (i, input) in self.inputs.iter().enumerate() {
             let spend_pub = verify_spend_proof(&input.spend_proof)
                 .map_err(|e| TxValidationError::InvalidSpendProof(e.to_string()))?;
 
-            // Check spend proof public inputs match this input
+            // L5: Cross-check spend proof's proof_link against the transaction input
             if spend_pub.proof_link != hash_to_felts(&input.proof_link) {
                 return Err(TxValidationError::InvalidSpendProof(
                     "proof_link mismatch".into(),
                 ));
             }
+
+            // L5: Cross-check spend proof's proof_link against the balance proof's
+            // corresponding input_proof_link (defense-in-depth — ensures the spend
+            // proof is bound to the same balance proof, not just to the tx field).
+            if spend_pub.proof_link != balance_pub.input_proof_links[i] {
+                return Err(TxValidationError::InvalidSpendProof(
+                    "spend proof proof_link does not match balance proof input".into(),
+                ));
+            }
+
             let nullifier_felts = input.nullifier.to_felts();
             if spend_pub.nullifier != nullifier_felts {
                 return Err(TxValidationError::InvalidSpendProof(

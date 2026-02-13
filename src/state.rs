@@ -176,14 +176,17 @@ impl ChainState {
         // Record fees before applying transactions
         let fees_before = self.epoch_fees;
 
-        // Pass 2 — apply all transactions (cannot fail after validation)
+        // Pass 2 — apply all transactions sequentially.
+        // May fail if sled nullifier persistence fails (S5 fix).
         for tx in &vertex.transactions {
-            self.apply_transaction_unchecked(tx);
+            self.apply_transaction_unchecked(tx)?;
         }
 
-        // Compute vertex fees and redirect to proposer (not pooled per-epoch)
+        // Compute vertex fees for the proposer's coinbase reward.
+        // Don't reset epoch_fees — fees accumulate for epoch-level accounting
+        // (advance_epoch returns and resets the total). The proposer receives
+        // vertex_fees via coinbase output as an additional reward.
         let vertex_fees = self.epoch_fees.saturating_sub(fees_before);
-        self.epoch_fees = fees_before;
 
         // Compute total coinbase amount
         let block_reward = crate::constants::block_reward_for_epoch(vertex.epoch);
@@ -294,17 +297,18 @@ impl ChainState {
     /// For batch application (vertices), prefer `validate_transaction` + `apply_transaction_unchecked`.
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), StateError> {
         self.validate_transaction(tx)?;
-        self.apply_transaction_unchecked(tx);
+        self.apply_transaction_unchecked(tx)?;
         Ok(())
     }
 
     /// Apply a pre-validated transaction to the state (no validation).
     ///
     /// SAFETY: The caller MUST have called `validate_transaction` first.
-    fn apply_transaction_unchecked(&mut self, tx: &Transaction) {
+    /// Returns an error if nullifier persistence to sled storage fails.
+    fn apply_transaction_unchecked(&mut self, tx: &Transaction) -> Result<(), StateError> {
         // Record nullifiers (with incremental hash update)
         for input in &tx.inputs {
-            self.record_nullifier(input.nullifier);
+            self.record_nullifier(input.nullifier)?;
         }
 
         // Add new output commitments (incremental tree update, O(log n) each)
@@ -353,21 +357,31 @@ impl ChainState {
                 self.epoch_fees = self.epoch_fees.saturating_add(tx.fee);
             }
         }
+        Ok(())
     }
 
     /// Record a nullifier as spent, updating the incremental hash accumulator.
-    fn record_nullifier(&mut self, nullifier: Nullifier) {
+    ///
+    /// Returns an error if sled persistence fails, so the caller can abort the
+    /// vertex/transaction application instead of silently allowing a nullifier
+    /// that won't survive a restart.
+    fn record_nullifier(&mut self, nullifier: Nullifier) -> Result<(), StateError> {
         if self.nullifiers.insert(nullifier) {
-            // Persist to sled if available
+            // Persist to sled if available — propagate failure so the vertex
+            // application is aborted rather than accepting an unpersisted nullifier
             if let Some(ref tree) = self.nullifier_storage {
                 if let Err(e) = tree.insert(nullifier.0, &[1u8]) {
-                    tracing::error!("Failed to persist nullifier to sled: {}", e);
+                    return Err(StateError::StoragePersistenceFailed(format!(
+                        "failed to persist nullifier to sled: {}",
+                        e
+                    )));
                 }
             }
             // Update incremental hash: new = H(old || nullifier)
             self.nullifier_hash =
                 crate::hash_concat(&[b"spectra.nullifier_acc", &self.nullifier_hash, &nullifier.0]);
         }
+        Ok(())
     }
 
     /// Add a single commitment to the incremental Merkle tree.
@@ -379,8 +393,10 @@ impl ChainState {
     }
 
     /// Record a nullifier as spent (public API).
-    pub fn mark_nullifier(&mut self, nullifier: Nullifier) {
-        self.record_nullifier(nullifier);
+    ///
+    /// Returns an error if sled-backed nullifier persistence fails.
+    pub fn mark_nullifier(&mut self, nullifier: Nullifier) -> Result<(), StateError> {
+        self.record_nullifier(nullifier)
     }
 
     /// Get the current canonical (depth-20) commitment Merkle root.
@@ -935,6 +951,8 @@ pub enum StateError {
     FeeOverflow,
     #[error("storage error during state restoration: {0}")]
     StorageError(String),
+    #[error("storage persistence failed: {0}")]
+    StoragePersistenceFailed(String),
     #[error("vertex contains too many transactions")]
     TooManyTransactions,
 }
@@ -967,7 +985,7 @@ mod tests {
         let n = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
 
         assert!(!state.is_spent(&n));
-        state.mark_nullifier(n);
+        state.mark_nullifier(n).unwrap();
         assert!(state.is_spent(&n));
     }
 
@@ -989,11 +1007,11 @@ mod tests {
         let mut state2 = ChainState::new();
 
         let n = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
-        state1.mark_nullifier(n);
+        state1.mark_nullifier(n).unwrap();
 
         assert_ne!(state1.state_root(), state2.state_root());
 
-        state2.mark_nullifier(n);
+        state2.mark_nullifier(n).unwrap();
         assert_eq!(state1.state_root(), state2.state_root());
     }
 
@@ -1027,8 +1045,8 @@ mod tests {
         // Add nullifiers
         let n1 = Nullifier::derive(&[10u8; 32], &[20u8; 32]);
         let n2 = Nullifier::derive(&[30u8; 32], &[40u8; 32]);
-        state.mark_nullifier(n1);
-        state.mark_nullifier(n2);
+        state.mark_nullifier(n1).unwrap();
+        state.mark_nullifier(n2).unwrap();
 
         // Register a validator
         let kp = SigningKeypair::generate();
@@ -1096,7 +1114,9 @@ mod tests {
         let mut state = ChainState::new();
         let blind = BlindingFactor::random();
         state.add_commitment(Commitment::commit(42, &blind));
-        state.mark_nullifier(Nullifier::derive(&[1u8; 32], &[2u8; 32]));
+        state
+            .mark_nullifier(Nullifier::derive(&[1u8; 32], &[2u8; 32]))
+            .unwrap();
 
         let meta = state.to_chain_state_meta(7);
 
@@ -1236,7 +1256,7 @@ mod tests {
         let n = Nullifier::derive(&[10u8; 32], &[20u8; 32]);
         assert!(!state.is_spent(&n));
 
-        state.mark_nullifier(n);
+        state.mark_nullifier(n).unwrap();
         assert!(state.is_spent(&n));
 
         // Also verify sled has it
@@ -1251,8 +1271,8 @@ mod tests {
         // Add nullifiers to in-memory set
         let n1 = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
         let n2 = Nullifier::derive(&[3u8; 32], &[4u8; 32]);
-        state.mark_nullifier(n1);
-        state.mark_nullifier(n2);
+        state.mark_nullifier(n1).unwrap();
+        state.mark_nullifier(n2).unwrap();
         assert_eq!(state.nullifier_count(), 2);
 
         // Migrate to sled
@@ -1268,7 +1288,7 @@ mod tests {
 
         // New nullifiers go to both sled and memory
         let n3 = Nullifier::derive(&[5u8; 32], &[6u8; 32]);
-        state.mark_nullifier(n3);
+        state.mark_nullifier(n3).unwrap();
         assert!(state.is_spent(&n3));
         assert_eq!(state.nullifiers.len(), 1);
     }

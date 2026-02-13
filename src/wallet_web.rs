@@ -32,6 +32,9 @@ pub struct WalletWebState {
     pub rpc_addr: SocketAddr,
     /// Cached wallet + last scanned sequence. None if not yet loaded.
     wallet: Arc<RwLock<Option<(Wallet, u64)>>>,
+    /// Serializes mutating wallet operations (send, consolidate) to prevent
+    /// race conditions between concurrent requests.
+    wallet_op_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl WalletWebState {
@@ -40,6 +43,7 @@ impl WalletWebState {
             data_dir,
             rpc_addr,
             wallet: Arc::new(RwLock::new(None)),
+            wallet_op_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -416,6 +420,9 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         return Redirect::to("/init").into_response();
     }
 
+    // Acquire the operation lock to prevent concurrent mutations
+    let _guard = state.wallet_op_lock.lock().await;
+
     // Reload wallet from disk to get fresh state
     state.invalidate_cache().await;
     let (mut wallet, last_seq) = match state.load_wallet().await {
@@ -462,11 +469,27 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         }
     };
 
-    // Build transaction
+    // Validate message size before building transaction
     let msg_bytes = form
         .message
         .filter(|m| !m.is_empty())
         .map(|m| m.into_bytes());
+    if let Some(ref msg) = msg_bytes {
+        if msg.len() > crate::constants::MAX_MESSAGE_SIZE {
+            return SendTemplate {
+                active_tab: "send",
+                balance: wallet.balance(),
+                flash_error: Some(format!(
+                    "Message too large: {} bytes (max {})",
+                    msg.len(),
+                    crate::constants::MAX_MESSAGE_SIZE
+                )),
+            }
+            .into_response();
+        }
+    }
+
+    // Build transaction
     let tx = match wallet.build_transaction(&recipient.kem, form.amount, form.fee, msg_bytes) {
         Ok(tx) => tx,
         Err(e) => {
@@ -587,6 +610,9 @@ async fn scan_action(State(state): State<WalletWebState>) -> Response {
     if !state.wallet_exists() {
         return Redirect::to("/init").into_response();
     }
+
+    // Acquire the operation lock to prevent concurrent mutations
+    let _guard = state.wallet_op_lock.lock().await;
 
     // Reload from disk
     state.invalidate_cache().await;

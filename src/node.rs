@@ -61,6 +61,8 @@ enum SyncState {
         next_seq: u64,
         #[allow(dead_code)]
         target: u64,
+        /// Peer's claimed epoch at sync start (for epoch consistency validation).
+        target_epoch: u64,
         /// When we last received a sync response (for timeout detection).
         last_activity: Instant,
     },
@@ -85,8 +87,10 @@ pub struct Node {
     stem_txs: HashMap<Hash, (u8, Instant)>,
     /// Peers recently attempted for discovery (cleared each round).
     recently_attempted: HashSet<SocketAddr>,
-    /// Gossip deduplication: recently seen message IDs to avoid rebroadcasting.
-    seen_messages: HashSet<Hash>,
+    /// Gossip deduplication: generational seen message sets.
+    /// When `seen_messages_current` exceeds capacity, it is swapped to `prev` and cleared.
+    seen_messages_current: HashSet<Hash>,
+    seen_messages_prev: HashSet<Hash>,
     /// Counter for sync batch rounds (reset on new sync peer).
     sync_rounds: u64,
 }
@@ -383,7 +387,8 @@ impl Node {
             sync_failed_peers: HashMap::new(),
             stem_txs: HashMap::new(),
             recently_attempted: HashSet::new(),
-            seen_messages: HashSet::new(),
+            seen_messages_current: HashSet::new(),
+            seen_messages_prev: HashSet::new(),
             sync_rounds: 0,
         })
     }
@@ -396,6 +401,25 @@ impl Node {
     /// Get a handle to the P2P layer (for RPC).
     pub fn p2p_handle(&self) -> P2pHandle {
         self.p2p.clone()
+    }
+
+    /// Check if a message hash has been seen recently (in either generation).
+    fn is_seen(&self, hash: &Hash) -> bool {
+        self.seen_messages_current.contains(hash) || self.seen_messages_prev.contains(hash)
+    }
+
+    /// Mark a message hash as seen. When the current set exceeds capacity,
+    /// the previous set is dropped, current becomes previous, and a new
+    /// empty set becomes current.
+    fn mark_seen(&mut self, hash: Hash) {
+        self.seen_messages_current.insert(hash);
+        if self.seen_messages_current.len() > SEEN_MESSAGES_CAPACITY {
+            std::mem::swap(
+                &mut self.seen_messages_current,
+                &mut self.seen_messages_prev,
+            );
+            self.seen_messages_current.clear();
+        }
     }
 
     /// Run the main event loop.
@@ -524,12 +548,10 @@ impl Node {
             }
             Message::NewVertex(vertex) => {
                 // Fix 6: Gossip deduplication -- skip already-seen vertices
-                if self.seen_messages.len() > SEEN_MESSAGES_CAPACITY {
-                    self.seen_messages.clear();
-                }
-                if !self.seen_messages.insert(vertex.id.0) {
+                if self.is_seen(&vertex.id.0) {
                     return; // Already processed this vertex
                 }
+                self.mark_seen(vertex.id.0);
 
                 let mut state = self.state.write().await;
 
@@ -599,12 +621,10 @@ impl Node {
             Message::BftVote(vote) => {
                 // Fix 6: Gossip deduplication for votes
                 let vote_dedup_key = crate::hash_concat(&[&vote.voter_id, &vote.vertex_id.0]);
-                if self.seen_messages.len() > SEEN_MESSAGES_CAPACITY {
-                    self.seen_messages.clear();
-                }
-                if !self.seen_messages.insert(vote_dedup_key) {
+                if self.is_seen(&vote_dedup_key) {
                     return; // Already processed this vote
                 }
+                self.mark_seen(vote_dedup_key);
 
                 let mut state = self.state.write().await;
                 // Track peer's highest round for view change detection
@@ -629,12 +649,10 @@ impl Node {
             }
             Message::BftCertificate(cert) => {
                 // Fix 6: Gossip deduplication for certificates
-                if self.seen_messages.len() > SEEN_MESSAGES_CAPACITY {
-                    self.seen_messages.clear();
-                }
-                if !self.seen_messages.insert(cert.vertex_id.0) {
+                if self.is_seen(&cert.vertex_id.0) {
                     return; // Already processed certificate for this vertex
                 }
+                self.mark_seen(cert.vertex_id.0);
 
                 let mut state = self.state.write().await;
                 // C1: Verify certificate before finalizing
@@ -756,7 +774,9 @@ impl Node {
             }
 
             Message::EpochStateResponse {
-                nullifier_count, ..
+                epoch: peer_epoch,
+                nullifier_count,
+                ..
             } => {
                 // Check if we need to sync from this peer
                 if let SyncState::NeedSync { our_finalized } = self.sync_state {
@@ -785,7 +805,7 @@ impl Node {
                         let start_after = if our_finalized > 0 {
                             our_finalized - 1
                         } else {
-                            u64::MAX // will be wrapped to 0 by the range query
+                            u64::MAX // sentinel: storage treats u64::MAX as "start from seq 0"
                         };
                         // Fix 7: Reset sync round counter for new peer
                         self.sync_rounds = 0;
@@ -793,6 +813,7 @@ impl Node {
                             peer: from,
                             next_seq: start_after,
                             target: 0, // unknown until first response
+                            target_epoch: peer_epoch,
                             last_activity: Instant::now(),
                         };
                         let _ = self
@@ -816,10 +837,14 @@ impl Node {
                 has_more,
                 total_finalized,
             } => {
-                if let SyncState::Syncing { peer, .. } = &self.sync_state {
+                if let SyncState::Syncing {
+                    peer, target_epoch, ..
+                } = &self.sync_state
+                {
                     if from != *peer {
                         return; // Ignore responses from unexpected peers
                     }
+                    let target_epoch = *target_epoch;
 
                     // Fix 7: Verify total_finalized is within reasonable bounds
                     let our_finalized_count = {
@@ -863,6 +888,16 @@ impl Node {
                     let mut applied = 0usize;
 
                     for (seq, vertex) in vertices {
+                        // L4: Validate vertex epoch doesn't jump unreasonably
+                        if vertex.epoch > target_epoch + 1 {
+                            tracing::warn!(
+                                "Sync peer sent vertex with future epoch {} (target: {})",
+                                vertex.epoch,
+                                target_epoch
+                            );
+                            break;
+                        }
+
                         last_seq = seq;
                         let mut state = self.state.write().await;
 
@@ -951,6 +986,7 @@ impl Node {
                             peer: from,
                             next_seq: last_seq,
                             target: total_finalized,
+                            target_epoch,
                             last_activity: Instant::now(),
                         };
                         let _ = self

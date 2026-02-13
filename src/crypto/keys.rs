@@ -20,10 +20,8 @@ use crate::Hash;
 
 // Expected key sizes for validation
 const DILITHIUM5_PK_BYTES: usize = 2592;
-const _DILITHIUM5_SK_BYTES: usize = 4896;
 const DILITHIUM5_SIG_BYTES: usize = 4627;
 const KYBER1024_PK_BYTES: usize = 1568;
-const _KYBER1024_SK_BYTES: usize = 3168;
 const KYBER1024_CT_BYTES: usize = 1568;
 
 // ── Signing (Dilithium5) ──
@@ -334,6 +332,9 @@ impl PublicAddress {
 mod tests {
     use super::*;
 
+    const DILITHIUM5_SK_BYTES: usize = 4896;
+    const KYBER1024_SK_BYTES: usize = 3168;
+
     #[test]
     fn sign_and_verify() {
         let kp = SigningKeypair::generate();
@@ -364,7 +365,7 @@ mod tests {
         let kp = SigningKeypair::generate();
         assert!(kp.public.is_valid_size());
         assert_eq!(kp.public.0.len(), DILITHIUM5_PK_BYTES);
-        assert_eq!(kp.secret.0.len(), _DILITHIUM5_SK_BYTES);
+        assert_eq!(kp.secret.0.len(), DILITHIUM5_SK_BYTES);
     }
 
     #[test]
@@ -372,7 +373,7 @@ mod tests {
         let kp = KemKeypair::generate();
         assert!(kp.public.is_valid_size());
         assert_eq!(kp.public.0.len(), KYBER1024_PK_BYTES);
-        assert_eq!(kp.secret.0.len(), _KYBER1024_SK_BYTES);
+        assert_eq!(kp.secret.0.len(), KYBER1024_SK_BYTES);
     }
 
     #[test]
