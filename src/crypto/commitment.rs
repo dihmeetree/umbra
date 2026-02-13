@@ -22,8 +22,16 @@ use crate::Hash;
 pub struct Commitment(pub Hash);
 
 /// A blinding factor used to hide the committed value.
-#[derive(Clone, Debug, Zeroize, ZeroizeOnDrop)]
+///
+/// Debug output is redacted to prevent accidental logging of secret values.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct BlindingFactor(pub [u8; 32]);
+
+impl std::fmt::Debug for BlindingFactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BlindingFactor([REDACTED])")
+    }
+}
 
 impl BlindingFactor {
     /// Generate a random blinding factor.

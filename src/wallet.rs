@@ -365,6 +365,7 @@ impl Wallet {
 
     /// Confirm that a pending transaction was included on-chain.
     /// Moves all outputs with matching `tx_binding` from `Pending` to `Spent`.
+    /// Zeroizes the spend authorization key since it's no longer needed.
     pub fn confirm_transaction(&mut self, tx_binding: &Hash) {
         for output in &mut self.outputs {
             if let SpendStatus::Pending {
@@ -373,6 +374,8 @@ impl Wallet {
             {
                 if tb == tx_binding {
                     output.status = SpendStatus::Spent;
+                    // Zeroize spend_auth — spent outputs should not retain secrets
+                    output.spend_auth.zeroize();
                 }
             }
         }
@@ -621,9 +624,13 @@ pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
         checksum = (checksum << 1) | bits[256 + j];
     }
 
+    // Zeroize intermediate secret bits
+    bits.zeroize();
+
     // Validate checksum
     let expected_checksum = blake3::hash(&entropy).as_bytes()[0];
     if checksum != expected_checksum {
+        entropy.zeroize();
         return Err(WalletError::Recovery("invalid mnemonic checksum".into()));
     }
 
@@ -900,10 +907,18 @@ impl Wallet {
         let bytes = crate::serialize(&wallet_file)
             .map_err(|e| WalletError::Persistence(format!("serialize failed: {}", e)))?;
 
-        // Atomic write: write to temp file, then rename
+        // Atomic write: write to temp file, fsync, rename, fsync directory.
+        // Without fsync, a crash after rename can leave an empty/corrupt file.
         let tmp_path = path.with_extension("dat.tmp");
-        std::fs::write(&tmp_path, &bytes)
-            .map_err(|e| WalletError::Persistence(format!("write failed: {}", e)))?;
+
+        {
+            let mut file = std::fs::File::create(&tmp_path)
+                .map_err(|e| WalletError::Persistence(format!("create failed: {}", e)))?;
+            std::io::Write::write_all(&mut file, &bytes)
+                .map_err(|e| WalletError::Persistence(format!("write failed: {}", e)))?;
+            file.sync_all()
+                .map_err(|e| WalletError::Persistence(format!("fsync failed: {}", e)))?;
+        }
 
         // Set permissions on temp file before rename
         #[cfg(unix)]
@@ -916,6 +931,13 @@ impl Wallet {
         // Atomic rename
         std::fs::rename(&tmp_path, path)
             .map_err(|e| WalletError::Persistence(format!("rename failed: {}", e)))?;
+
+        // fsync the parent directory to ensure the rename is durable
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all(); // Best-effort; rename already succeeded
+            }
+        }
 
         Ok(())
     }

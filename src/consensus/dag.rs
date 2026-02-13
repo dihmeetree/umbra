@@ -135,18 +135,34 @@ impl Vertex {
     /// Verifies the proposer was selected for the current epoch's committee.
     /// Separate from `validate_structure()` because it requires the epoch seed
     /// and total validator count.
+    ///
+    /// If `expected_commitment` is provided (from the BFT commitment registry),
+    /// uses full `verify()` with anti-grinding commitment check. Otherwise
+    /// falls back to `verify_locally()` for the first observation from this
+    /// proposer in the epoch.
     pub fn validate_vrf(
         &self,
         epoch_seed: &EpochSeed,
         total_validators: usize,
+        expected_commitment: Option<&Hash>,
     ) -> Result<(), VertexError> {
         let vrf = self.vrf_proof.as_ref().ok_or(VertexError::MissingVrf)?;
         let proposer_id = self.proposer.fingerprint();
         let vrf_input = epoch_seed.vrf_input(&proposer_id);
 
-        // Verify VRF proof against the proposer's public key
-        if !vrf.verify_locally(&self.proposer, &vrf_input) {
-            return Err(VertexError::InvalidVrf);
+        // Verify VRF proof against the proposer's public key.
+        // Use full verify() with commitment when available (anti-grinding).
+        match expected_commitment {
+            Some(commitment) => {
+                if !vrf.verify(&self.proposer, &vrf_input, commitment) {
+                    return Err(VertexError::InvalidVrf);
+                }
+            }
+            None => {
+                if !vrf.verify_locally(&self.proposer, &vrf_input) {
+                    return Err(VertexError::InvalidVrf);
+                }
+            }
         }
 
         // Check that the proposer was actually selected

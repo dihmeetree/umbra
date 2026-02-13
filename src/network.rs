@@ -168,7 +168,7 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
     if len > crate::constants::MAX_NETWORK_MESSAGE_BYTES {
         return None;
     }
-    if data.len() < 4 + len {
+    if data.len() < 4usize.saturating_add(len) {
         return None;
     }
     let (msg, _) = bincode::serde::decode_from_slice(&data[4..4 + len], bincode_config()).ok()?;

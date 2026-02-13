@@ -158,7 +158,7 @@ impl Mempool {
                 if fee <= lowest_fee {
                     return Err(MempoolError::FeeTooLow {
                         fee,
-                        min_fee: lowest_fee + 1,
+                        min_fee: lowest_fee.saturating_add(1),
                     });
                 }
                 // Evict the lowest-fee tx
@@ -228,7 +228,7 @@ impl Mempool {
                     for input in &entry.tx.inputs {
                         self.nullifier_index.remove(&input.nullifier);
                     }
-                    self.total_bytes -= entry.size;
+                    self.total_bytes = self.total_bytes.saturating_sub(entry.size);
                     result.push(entry.tx);
                 }
             }
@@ -330,7 +330,7 @@ impl Mempool {
         for input in &entry.tx.inputs {
             self.nullifier_index.remove(&input.nullifier);
         }
-        self.total_bytes -= entry.size;
+        self.total_bytes = self.total_bytes.saturating_sub(entry.size);
         Some(entry)
     }
 }

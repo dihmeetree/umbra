@@ -321,11 +321,11 @@ fn run_demo() {
     );
     println!(
         "    Signing key size: {} bytes (Dilithium5)",
-        alice_addr.signing.0.len()
+        alice_addr.signing.as_bytes().len()
     );
     println!(
         "    KEM key size:     {} bytes (Kyber1024)",
-        alice_addr.kem.0.len()
+        alice_addr.kem.as_bytes().len()
     );
 
     // ────────────────────────────────────────────────────────
@@ -510,7 +510,7 @@ fn run_demo() {
         transactions: vec![tx.clone()],
         timestamp: 1000,
         state_root: [0u8; 32],
-        signature: Signature(vec![]),
+        signature: Signature::empty(),
         vrf_proof: None,
         protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
     };
@@ -531,7 +531,7 @@ fn run_demo() {
         transactions: vec![],
         timestamp: 1000,
         state_root: [0u8; 32],
-        signature: Signature(vec![]),
+        signature: Signature::empty(),
         vrf_proof: None,
         protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
     };
@@ -552,7 +552,7 @@ fn run_demo() {
         transactions: vec![],
         timestamp: 2000,
         state_root: [0u8; 32],
-        signature: Signature(vec![]),
+        signature: Signature::empty(),
         vrf_proof: None,
         protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
     };

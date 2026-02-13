@@ -27,8 +27,11 @@ const KYBER1024_CT_BYTES: usize = 1568;
 // ── Signing (Dilithium5) ──
 
 /// A CRYSTALS-Dilithium5 signing public key (2592 bytes).
+///
+/// Inner bytes are `pub(crate)` to prevent external construction of
+/// unvalidated keys. Use [`SigningKeypair::generate`] or deserialization.
 #[derive(Clone, Debug)]
-pub struct SigningPublicKey(pub Vec<u8>);
+pub struct SigningPublicKey(pub(crate) Vec<u8>);
 
 /// A CRYSTALS-Dilithium5 signing secret key.
 ///
@@ -40,9 +43,22 @@ pub struct SigningSecretKey(pub(crate) Vec<u8>);
 
 /// A Dilithium5 detached signature (4627 bytes, ML-DSA-87).
 ///
-/// L6: Size is validated during deserialization to prevent oversized payloads.
+/// Inner bytes are `pub(crate)` to enforce size validation through
+/// deserialization. L6: Size is validated during deserialization.
 #[derive(Clone, Debug)]
-pub struct Signature(pub Vec<u8>);
+pub struct Signature(pub(crate) Vec<u8>);
+
+impl Signature {
+    /// Create an empty signature (used for genesis/unsigned vertices).
+    pub fn empty() -> Self {
+        Signature(vec![])
+    }
+
+    /// Access the raw signature bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 impl Serialize for Signature {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -108,6 +124,11 @@ impl SigningKeypair {
 }
 
 impl SigningPublicKey {
+    /// Access the raw public key bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
     /// Verify a detached signature against this public key.
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
         let pk = match dilithium5::PublicKey::from_bytes(&self.0) {
@@ -156,8 +177,11 @@ impl<'de> Deserialize<'de> for SigningPublicKey {
 // ── Key Encapsulation (Kyber1024) ──
 
 /// A CRYSTALS-Kyber1024 encapsulation public key (1568 bytes).
+///
+/// Inner bytes are `pub(crate)` to prevent external construction of
+/// unvalidated keys. Use [`KemKeypair::generate`] or deserialization.
 #[derive(Clone, Debug)]
-pub struct KemPublicKey(pub Vec<u8>);
+pub struct KemPublicKey(pub(crate) Vec<u8>);
 
 /// A CRYSTALS-Kyber1024 encapsulation secret key.
 ///
@@ -169,9 +193,17 @@ pub struct KemSecretKey(pub(crate) Vec<u8>);
 
 /// A Kyber1024 ciphertext (encapsulated shared secret).
 ///
-/// L5: Size is validated during deserialization to prevent oversized payloads.
+/// Inner bytes are `pub(crate)` to enforce size validation through
+/// deserialization. L5: Size is validated during deserialization.
 #[derive(Clone, Debug)]
-pub struct KemCiphertext(pub Vec<u8>);
+pub struct KemCiphertext(pub(crate) Vec<u8>);
+
+impl KemCiphertext {
+    /// Access the raw ciphertext bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 impl Serialize for KemCiphertext {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -195,7 +227,7 @@ impl<'de> Deserialize<'de> for KemCiphertext {
 
 /// The shared secret produced by Kyber KEM (32 bytes).
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SharedSecret(pub [u8; 32]);
+pub struct SharedSecret(pub(crate) [u8; 32]);
 
 /// A Kyber1024 KEM keypair.
 ///
@@ -240,6 +272,11 @@ impl KemKeypair {
 }
 
 impl KemPublicKey {
+    /// Access the raw public key bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
     /// Encapsulate: generate a shared secret and its ciphertext.
     /// Only the holder of the corresponding secret key can decapsulate.
     pub fn encapsulate(&self) -> Option<(SharedSecret, KemCiphertext)> {

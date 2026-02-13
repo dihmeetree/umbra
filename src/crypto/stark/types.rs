@@ -52,7 +52,10 @@ impl BalancePublicInputs {
 }
 
 /// Witness data for the balance proof (known only to prover).
-#[derive(Clone, Debug)]
+///
+/// Debug is intentionally not derived to prevent accidental logging of secret values.
+/// Zeroize ensures witness data is cleared from memory when dropped.
+#[derive(Clone)]
 pub struct BalanceWitness {
     /// Input amounts
     pub input_values: Vec<u64>,
@@ -98,7 +101,10 @@ pub struct SpendPublicInputs {
 }
 
 /// Witness data for the spend proof (known only to prover).
-#[derive(Clone, Debug)]
+///
+/// Debug is intentionally not derived to prevent accidental logging of secret values.
+/// Zeroize ensures witness data is cleared from memory when dropped.
+#[derive(Clone)]
 pub struct SpendWitness {
     /// The spend authorization key (secret)
     pub spend_auth: [Felt; 4],
@@ -231,6 +237,11 @@ impl BalancePublicInputs {
         let fee = read_felt(data, &mut pos)?;
         let tx_content_hash = read_digest(data, &mut pos)?;
 
+        // Reject trailing data to prevent ambiguous deserialization
+        if pos != data.len() {
+            return None;
+        }
+
         Some(BalancePublicInputs {
             input_proof_links,
             output_commitments,
@@ -257,9 +268,9 @@ impl SpendPublicInputs {
         buf
     }
 
-    /// Deserialize from bytes.
+    /// Deserialize from bytes. Rejects trailing data.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 104 {
+        if data.len() != 104 {
             return None;
         }
         let mut pos = 0;
@@ -375,6 +386,67 @@ mod tests {
         assert!(
             BalancePublicInputs::from_bytes(&data).is_none(),
             "should reject truncated data"
+        );
+    }
+
+    #[test]
+    fn balance_from_bytes_rejects_trailing_data() {
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]],
+            output_commitments: vec![[Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)]],
+            fee: Felt::new(100),
+            tx_content_hash: [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
+        };
+        let mut bytes = pub_inputs.to_bytes();
+        bytes.push(0xFF); // trailing byte
+        assert!(
+            BalancePublicInputs::from_bytes(&bytes).is_none(),
+            "should reject trailing data"
+        );
+    }
+
+    #[test]
+    fn spend_public_inputs_roundtrip() {
+        let pub_inputs = SpendPublicInputs {
+            merkle_root: [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
+            nullifier: [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
+            proof_link: [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
+            first_path_bit: Felt::new(1),
+        };
+        let bytes = pub_inputs.to_bytes();
+        assert_eq!(bytes.len(), 104);
+        let decoded = SpendPublicInputs::from_bytes(&bytes).expect("roundtrip should succeed");
+        assert_eq!(decoded.merkle_root[0].as_int(), 1);
+        assert_eq!(decoded.nullifier[0].as_int(), 5);
+        assert_eq!(decoded.proof_link[0].as_int(), 9);
+        assert_eq!(decoded.first_path_bit.as_int(), 1);
+    }
+
+    #[test]
+    fn spend_from_bytes_rejects_trailing_data() {
+        let pub_inputs = SpendPublicInputs {
+            merkle_root: [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
+            nullifier: [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
+            proof_link: [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
+            first_path_bit: Felt::new(1),
+        };
+        let mut bytes = pub_inputs.to_bytes();
+        bytes.push(0xFF); // trailing byte → 105 bytes
+        assert!(
+            SpendPublicInputs::from_bytes(&bytes).is_none(),
+            "should reject trailing data (105 bytes != 104)"
+        );
+    }
+
+    #[test]
+    fn spend_from_bytes_rejects_truncated_data() {
+        assert!(
+            SpendPublicInputs::from_bytes(&[0u8; 103]).is_none(),
+            "should reject truncated data (103 bytes < 104)"
+        );
+        assert!(
+            SpendPublicInputs::from_bytes(&[]).is_none(),
+            "should reject empty data"
         );
     }
 }

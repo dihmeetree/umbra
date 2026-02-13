@@ -225,9 +225,15 @@ pub fn serialize<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, bincode::error
 }
 
 /// Deserialize a value using bincode with legacy (v1-compatible) encoding.
+///
+/// Rejects inputs larger than `MAX_NETWORK_MESSAGE_BYTES` to prevent OOM
+/// from malicious oversized payloads.
 pub fn deserialize<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<T, bincode::error::DecodeError> {
+    if bytes.len() > constants::MAX_NETWORK_MESSAGE_BYTES {
+        return Err(bincode::error::DecodeError::LimitExceeded);
+    }
     let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
     Ok(val)
 }
@@ -270,5 +276,36 @@ mod tests {
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"short", b"longer"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn deserialize_rejects_oversized_input() {
+        // Create a payload larger than MAX_NETWORK_MESSAGE_BYTES
+        let oversized = vec![0u8; constants::MAX_NETWORK_MESSAGE_BYTES + 1];
+        let result = deserialize::<Vec<u8>>(&oversized);
+        assert!(result.is_err(), "oversized input should be rejected");
+    }
+
+    #[test]
+    fn serialize_deserialize_roundtrip() {
+        let original: Vec<u8> = vec![1, 2, 3, 4, 5];
+        let bytes = serialize(&original).unwrap();
+        let restored: Vec<u8> = deserialize(&bytes).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn blinding_factor_debug_redacted() {
+        let bf = crate::crypto::commitment::BlindingFactor::from_bytes([42u8; 32]);
+        let debug_str = format!("{:?}", bf);
+        assert!(
+            debug_str.contains("REDACTED"),
+            "BlindingFactor debug output should be redacted, got: {}",
+            debug_str
+        );
+        assert!(
+            !debug_str.contains("42"),
+            "BlindingFactor debug output should not contain secret bytes"
+        );
     }
 }

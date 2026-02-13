@@ -315,6 +315,13 @@ impl PeerReputation {
         }
     }
 
+    /// Reward good behavior (e.g., valid message, successful handshake).
+    /// Score is capped at the initial reputation level and cannot recover
+    /// from a ban — the ban must expire naturally.
+    fn reward(&mut self, amount: i32) {
+        self.score = (self.score + amount).min(crate::constants::PEER_INITIAL_REPUTATION);
+    }
+
     fn is_banned(&self) -> bool {
         self.banned_until
             .map(|t| Instant::now() < t)
@@ -559,6 +566,10 @@ async fn p2p_loop(
                         }
                     }
                     InternalEvent::Message { from, message } => {
+                        // Reward good behavior: peer sent a valid (decryptable) message
+                        if let Some(rep) = reputations.get_mut(&from) {
+                            rep.reward(1);
+                        }
                         let _ = event_tx.send(P2pEvent::MessageReceived { from, message }).await;
                     }
                     InternalEvent::Disconnected(peer_id) => {
@@ -569,6 +580,17 @@ async fn p2p_loop(
                             } else {
                                 inbound_count = inbound_count.saturating_sub(1);
                             }
+                        }
+                        // Remove reputation entry unless the peer is still banned
+                        // (keep banned entries so we reject reconnection during ban period).
+                        if let Some(rep) = reputations.get(&peer_id) {
+                            if !rep.is_banned() {
+                                reputations.remove(&peer_id);
+                            }
+                        }
+                        // Periodically prune expired bans to prevent unbounded growth
+                        if reputations.len() > crate::constants::MAX_PEERS * 4 {
+                            reputations.retain(|_, rep| rep.is_banned());
                         }
                         let _ = event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await;
                     }
@@ -1177,14 +1199,34 @@ mod tests {
         assert_eq!(rep.score, 60);
         assert!(!rep.is_banned());
 
-        // "Reward" by directly increasing score (no reward method exists,
-        // so we simulate what a reward mechanism would do).
-        rep.score += 30;
+        // Use the reward method to recover reputation
+        rep.reward(30);
         assert_eq!(rep.score, 90);
         assert!(!rep.is_banned());
 
         // Verify score recovered and is above the ban threshold
         assert!(rep.score > crate::constants::PEER_BAN_THRESHOLD);
+    }
+
+    #[test]
+    fn peer_reputation_reward_capped_at_initial() {
+        let mut rep = PeerReputation::new();
+        let initial = crate::constants::PEER_INITIAL_REPUTATION;
+
+        // Penalize then reward more than the penalty
+        rep.penalize(10);
+        assert_eq!(rep.score, initial - 10);
+
+        rep.reward(50);
+        // Score should be capped at initial reputation, not exceed it
+        assert_eq!(
+            rep.score, initial,
+            "reward should cap score at initial reputation"
+        );
+
+        // Rewarding when already at max should not increase
+        rep.reward(100);
+        assert_eq!(rep.score, initial);
     }
 
     #[test]

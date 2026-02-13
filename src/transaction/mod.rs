@@ -127,12 +127,20 @@ pub struct Transaction {
 
 impl Transaction {
     /// Compute the transaction ID (hash of all transaction data).
+    ///
+    /// Includes proof bytes to prevent malleability: replacing proofs with
+    /// different valid proofs changes the tx_id, so nodes and mempools can
+    /// distinguish the original from the modified version.
     pub fn tx_id(&self) -> TxId {
         let mut hasher = blake3::Hasher::new_derive_key("spectra.txid");
-        // Hash all inputs (only public data: nullifiers and proof_links)
+        // Hash all inputs (nullifiers, proof_links, and spend proof bytes)
         for input in &self.inputs {
             hasher.update(&input.nullifier.0);
             hasher.update(&input.proof_link);
+            hasher.update(&(input.spend_proof.proof_bytes.len() as u64).to_le_bytes());
+            hasher.update(&input.spend_proof.proof_bytes);
+            hasher.update(&(input.spend_proof.public_inputs_bytes.len() as u64).to_le_bytes());
+            hasher.update(&input.spend_proof.public_inputs_bytes);
         }
         // Hash all outputs
         for output in &self.outputs {
@@ -143,8 +151,13 @@ impl Transaction {
         hasher.update(&self.fee.to_le_bytes());
         hasher.update(&self.chain_id);
         hasher.update(&self.expiry_epoch.to_le_bytes());
-        // Hash binding
+        // Hash binding (covers all non-proof content)
         hasher.update(&self.tx_binding);
+        // Hash balance proof bytes
+        hasher.update(&(self.balance_proof.proof_bytes.len() as u64).to_le_bytes());
+        hasher.update(&self.balance_proof.proof_bytes);
+        hasher.update(&(self.balance_proof.public_inputs_bytes.len() as u64).to_le_bytes());
+        hasher.update(&self.balance_proof.public_inputs_bytes);
         // Hash tx_type discriminant
         hash_tx_type_into(&self.tx_type, &mut hasher);
         TxId(*hasher.finalize().as_bytes())
@@ -242,6 +255,16 @@ impl Transaction {
         for input in &self.inputs {
             if !seen_nullifiers.insert(input.nullifier) {
                 return Err(TxValidationError::DuplicateNullifier);
+            }
+        }
+
+        // Check for duplicate output commitments within the transaction.
+        // A malicious tx could include the same output commitment twice,
+        // which would allow double-claiming in the commitment tree.
+        let mut seen_commitments = std::collections::HashSet::new();
+        for output in &self.outputs {
+            if !seen_commitments.insert(output.commitment) {
+                return Err(TxValidationError::DuplicateOutputCommitment);
             }
         }
 
@@ -487,6 +510,8 @@ pub enum TxValidationError {
     InvalidValidatorKey,
     #[error("invalid bond return output")]
     InvalidBondReturn,
+    #[error("duplicate output commitment in transaction")]
+    DuplicateOutputCommitment,
 }
 
 #[cfg(test)]
@@ -529,6 +554,29 @@ mod tests {
     fn tx_id_deterministic() {
         let tx = make_test_tx();
         assert_eq!(tx.tx_id(), tx.tx_id());
+    }
+
+    #[test]
+    fn tx_id_includes_proof_bytes() {
+        // tx_id must include proof bytes to prevent malleability.
+        // Two transactions with identical content but different proof bytes
+        // must produce different tx_ids.
+        let mut tx = make_test_tx();
+        let id1 = tx.tx_id();
+        // Tamper with balance proof bytes (simulates proof replacement)
+        tx.balance_proof.proof_bytes.push(0xFF);
+        let id2 = tx.tx_id();
+        assert_ne!(id1, id2, "tx_id should change when proof bytes change");
+
+        // Also check spend proof bytes
+        let mut tx2 = make_test_tx();
+        let id3 = tx2.tx_id();
+        tx2.inputs[0].spend_proof.proof_bytes.push(0xFF);
+        let id4 = tx2.tx_id();
+        assert_ne!(
+            id3, id4,
+            "tx_id should change when spend proof bytes change"
+        );
     }
 
     #[test]
@@ -910,5 +958,37 @@ mod tests {
             tx.validate_structure(6),
             Err(TxValidationError::Expired)
         ));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_output_commitments() {
+        // Build a transaction and manually duplicate an output commitment
+        let recipient = FullKeypair::generate();
+        let mut tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 450)
+            .add_output(recipient.kem.public.clone(), 450)
+            .set_fee(100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        // Duplicate the first output's commitment into the second output
+        tx.outputs[1].commitment = tx.outputs[0].commitment;
+
+        // Recompute tx_binding to bypass the binding check
+        tx.tx_binding = tx.tx_content_hash();
+
+        let result = tx.validate_structure(0);
+        assert!(
+            matches!(result, Err(TxValidationError::DuplicateOutputCommitment)),
+            "expected DuplicateOutputCommitment, got {:?}",
+            result
+        );
     }
 }

@@ -30,6 +30,8 @@ use crate::Hash;
 /// Evidence of equivocation: a validator voted for different vertices in the same round.
 ///
 /// This is slashable misbehaviour. Honest validators produce at most one vote per round.
+/// Both conflicting signatures are included so the evidence is independently verifiable
+/// by any node without trusting the reporter.
 #[derive(Clone, Debug)]
 pub struct EquivocationEvidence {
     /// The misbehaving validator
@@ -42,6 +44,10 @@ pub struct EquivocationEvidence {
     pub first_vertex: VertexId,
     /// The conflicting second vertex
     pub second_vertex: VertexId,
+    /// Signature on the first vote (proves the validator signed for first_vertex)
+    pub first_signature: Signature,
+    /// Signature on the second vote (proves the validator signed for second_vertex)
+    pub second_signature: Signature,
 }
 
 /// A validator registered in the system.
@@ -211,6 +217,11 @@ pub struct BftState {
     epoch_seed: Option<EpochSeed>,
     /// Total validators for VRF is_selected check.
     total_validators: usize,
+    /// VRF proof commitments for this epoch: validator_id -> proof_commitment.
+    /// Once a validator's VRF commitment is first observed, subsequent VRF
+    /// proofs from the same validator must match. This provides first-seen
+    /// binding to prevent grinding after the initial commitment is locked in.
+    vrf_commitments: HashMap<Hash, Hash>,
 }
 
 impl BftState {
@@ -230,6 +241,7 @@ impl BftState {
             equivocations: Vec::new(),
             epoch_seed: None,
             total_validators: 0,
+            vrf_commitments: HashMap::new(),
         }
     }
 
@@ -248,6 +260,26 @@ impl BftState {
     pub fn set_epoch_context(&mut self, epoch_seed: EpochSeed, total_validators: usize) {
         self.epoch_seed = Some(epoch_seed);
         self.total_validators = total_validators;
+    }
+
+    /// Register a VRF proof commitment for a validator (first-seen binding).
+    ///
+    /// Once registered, all subsequent VRF proofs from this validator in the
+    /// current epoch must match this commitment. Returns false if a different
+    /// commitment was already registered for this validator.
+    pub fn register_vrf_commitment(&mut self, validator_id: Hash, commitment: Hash) -> bool {
+        match self.vrf_commitments.get(&validator_id) {
+            Some(existing) => crate::constant_time_eq(existing, &commitment),
+            None => {
+                self.vrf_commitments.insert(validator_id, commitment);
+                true
+            }
+        }
+    }
+
+    /// Get the stored VRF commitment for a validator, if any.
+    pub fn vrf_commitment(&self, validator_id: &Hash) -> Option<&Hash> {
+        self.vrf_commitments.get(validator_id)
     }
 
     /// Get our VRF proof for this epoch.
@@ -321,6 +353,7 @@ impl BftState {
         let voter = self.committee.iter().find(|v| v.id == vote.voter_id)?;
 
         // H1: Verify VRF proof on the vote to confirm the voter was genuinely selected.
+        // Uses full verify() with commitment tracking to prevent VRF grinding.
         if let Some(seed) = &self.epoch_seed {
             if self.total_validators > self.committee.len() {
                 // VRF mandatory — committee is a subset
@@ -329,17 +362,44 @@ impl BftState {
                     None => return None,
                 };
                 let vrf_input = seed.vrf_input(&vote.voter_id);
-                if !vrf.verify_locally(&voter.public_key, &vrf_input) {
-                    return None;
+
+                // Check against stored commitment (first-seen binding)
+                match self.vrf_commitments.get(&vote.voter_id) {
+                    Some(commitment) => {
+                        // Subsequent VRF: must match pre-registered commitment
+                        if !vrf.verify(&voter.public_key, &vrf_input, commitment) {
+                            return None;
+                        }
+                    }
+                    None => {
+                        // First-seen: verify cryptographically, then lock commitment
+                        if !vrf.verify_locally(&voter.public_key, &vrf_input) {
+                            return None;
+                        }
+                        self.vrf_commitments
+                            .insert(vote.voter_id, vrf.proof_commitment);
+                    }
                 }
+
                 if !vrf.is_selected(crate::constants::COMMITTEE_SIZE, self.total_validators) {
                     return None;
                 }
             } else if let Some(vrf) = &vote.vrf_proof {
                 // VRF optional but verify if present (all validators on committee)
                 let vrf_input = seed.vrf_input(&vote.voter_id);
-                if !vrf.verify_locally(&voter.public_key, &vrf_input) {
-                    return None;
+                match self.vrf_commitments.get(&vote.voter_id) {
+                    Some(commitment) => {
+                        if !vrf.verify(&voter.public_key, &vrf_input, commitment) {
+                            return None;
+                        }
+                    }
+                    None => {
+                        if !vrf.verify_locally(&voter.public_key, &vrf_input) {
+                            return None;
+                        }
+                        self.vrf_commitments
+                            .insert(vote.voter_id, vrf.proof_commitment);
+                    }
                 }
             }
         }
@@ -369,12 +429,21 @@ impl BftState {
                     .iter()
                     .any(|e| e.voter_id == vote.voter_id);
                 if !already_recorded {
+                    // Retrieve the first signature from stored votes for independent verifiability
+                    let first_signature = self
+                        .votes
+                        .get(&prev_vertex)
+                        .and_then(|vs| vs.iter().find(|v| v.voter_id == vote.voter_id))
+                        .map(|v| v.signature.clone())
+                        .unwrap_or_else(|| Signature(vec![]));
                     self.equivocations.push(EquivocationEvidence {
                         voter_id: vote.voter_id,
                         epoch: vote.epoch,
                         round: vote.round,
                         first_vertex: prev_vertex,
                         second_vertex: vote.vertex_id,
+                        first_signature,
+                        second_signature: vote.signature.clone(),
                     });
                 }
                 return None; // Reject equivocating vote
@@ -469,6 +538,7 @@ impl BftState {
         self.our_vrf_proof = None;
         self.epoch_seed = None;
         self.total_validators = 0;
+        self.vrf_commitments.clear();
     }
 
     /// Get a certificate for a vertex.
@@ -778,11 +848,30 @@ mod tests {
         };
         assert!(bft.receive_vote(vote_b).is_none()); // Rejected
 
-        // Equivocation evidence should be recorded
+        // Equivocation evidence should be recorded with both signatures
         assert_eq!(bft.equivocations().len(), 1);
-        assert_eq!(bft.equivocations()[0].voter_id, validators[0].id);
-        assert_eq!(bft.equivocations()[0].first_vertex, vertex_a);
-        assert_eq!(bft.equivocations()[0].second_vertex, vertex_b);
+        let ev = &bft.equivocations()[0];
+        assert_eq!(ev.voter_id, validators[0].id);
+        assert_eq!(ev.first_vertex, vertex_a);
+        assert_eq!(ev.second_vertex, vertex_b);
+        // Both signatures must be non-empty (independently verifiable evidence)
+        assert!(
+            !ev.first_signature.as_bytes().is_empty(),
+            "first_signature should be present in equivocation evidence"
+        );
+        assert!(
+            !ev.second_signature.as_bytes().is_empty(),
+            "second_signature should be present in equivocation evidence"
+        );
+        // Verify the signatures actually validate (evidence is independently verifiable)
+        let msg_a_check = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
+        let msg_b_check = vote_sign_data(&vertex_b, 0, 0, &VoteType::Accept, &chain_id);
+        assert!(validators[0]
+            .public_key
+            .verify(&msg_a_check, &ev.first_signature));
+        assert!(validators[0]
+            .public_key
+            .verify(&msg_b_check, &ev.second_signature));
     }
 
     #[test]
@@ -1191,5 +1280,56 @@ mod tests {
         assert!(bft.votes.is_empty());
         assert!(bft.certificates.is_empty());
         assert_eq!(bft.committee.len(), new_validators.len());
+    }
+
+    #[test]
+    fn vrf_commitment_first_seen_binding() {
+        // Test that once a VRF commitment is registered, subsequent
+        // VRFs from the same validator must match.
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        bft.set_epoch_context(epoch_seed.clone(), 100); // force VRF mandatory
+
+        // Evaluate VRF for validator 0
+        let vrf_input = epoch_seed.vrf_input(&validators[0].id);
+        let vrf = crate::crypto::vrf::VrfOutput::evaluate(&keypairs[0], &vrf_input);
+
+        // Register the commitment
+        assert!(bft.register_vrf_commitment(validators[0].id, vrf.proof_commitment));
+
+        // Same commitment should be accepted
+        assert!(bft.register_vrf_commitment(validators[0].id, vrf.proof_commitment));
+
+        // Different commitment should be rejected
+        let fake_commitment = [0xFF; 32];
+        assert!(!bft.register_vrf_commitment(validators[0].id, fake_commitment));
+
+        // Lookup should return the original commitment
+        assert_eq!(
+            bft.vrf_commitment(&validators[0].id),
+            Some(&vrf.proof_commitment)
+        );
+    }
+
+    #[test]
+    fn advance_epoch_clears_vrf_commitments() {
+        let (keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Register a VRF commitment
+        let commitment = [42u8; 32];
+        bft.register_vrf_commitment(validators[0].id, commitment);
+        assert!(bft.vrf_commitment(&validators[0].id).is_some());
+
+        // Advance epoch
+        let (_, new_validators) = make_committee(3);
+        bft.advance_epoch(1, new_validators);
+
+        // VRF commitments should be cleared
+        assert!(bft.vrf_commitment(&validators[0].id).is_none());
     }
 }

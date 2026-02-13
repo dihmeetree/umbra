@@ -103,14 +103,32 @@ async fn submit_tx(
         .insert(tx.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("rejected: {}", e)))?;
 
-    // Broadcast to network
+    // Dandelion++ stem phase: send to a single random peer instead of broadcasting
+    // to all peers. This prevents the RPC-connected node from being identified as
+    // the transaction originator. The receiving peer will either continue the stem
+    // relay or fluff (broadcast) according to the Dandelion++ protocol.
     drop(node); // Release write lock before async send
-    if let Err(e) = state
-        .p2p
-        .broadcast(crate::network::Message::NewTransaction(tx), None)
-        .await
-    {
-        tracing::warn!("Failed to broadcast transaction to peers: {}", e);
+    let stem_target = state.p2p.get_peers().await.ok().and_then(|peers| {
+        use rand::prelude::IndexedRandom;
+        peers.choose(&mut rand::rng()).map(|p| p.peer_id)
+    });
+    match stem_target {
+        Some(peer_id) => {
+            if let Err(e) = state
+                .p2p
+                .send_to(peer_id, crate::network::Message::NewTransaction(tx))
+                .await
+            {
+                tracing::warn!("Failed to stem-send transaction: {}", e);
+            }
+        }
+        None => {
+            // No peers available: fall back to broadcast
+            let _ = state
+                .p2p
+                .broadcast(crate::network::Message::NewTransaction(tx), None)
+                .await;
+        }
     }
 
     Ok(Json(SubmitTxResponse {

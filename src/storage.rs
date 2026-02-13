@@ -46,6 +46,10 @@ pub struct ChainStateMeta {
 pub struct ValidatorRecord {
     pub validator: Validator,
     pub bond: u64,
+    /// Whether this validator has been permanently slashed.
+    /// Added to distinguish slashed from deregistered validators on restore.
+    #[serde(default)]
+    pub slashed: bool,
 }
 
 /// Trait for persistent storage backends.
@@ -88,7 +92,12 @@ pub trait Storage {
     ) -> Result<Vec<(u64, Vertex)>, StorageError>;
     fn finalized_vertex_count(&self) -> Result<u64, StorageError>;
 
-    fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError>;
+    fn put_validator(
+        &self,
+        validator: &Validator,
+        bond: u64,
+        slashed: bool,
+    ) -> Result<(), StorageError>;
     fn get_validator(&self, id: &Hash) -> Result<Option<ValidatorRecord>, StorageError>;
     fn get_all_validators(&self) -> Result<Vec<ValidatorRecord>, StorageError>;
     fn remove_validator(&self, id: &Hash) -> Result<(), StorageError>;
@@ -326,7 +335,7 @@ impl Storage for SledStorage {
             .insert(sequence.to_be_bytes(), &vertex_id.0)
             .map_err(|e| StorageError::Io(e.to_string()))?;
         self.finalized_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -367,13 +376,19 @@ impl Storage for SledStorage {
     fn finalized_vertex_count(&self) -> Result<u64, StorageError> {
         Ok(self
             .finalized_count
-            .load(std::sync::atomic::Ordering::Relaxed))
+            .load(std::sync::atomic::Ordering::Acquire))
     }
 
-    fn put_validator(&self, validator: &Validator, bond: u64) -> Result<(), StorageError> {
+    fn put_validator(
+        &self,
+        validator: &Validator,
+        bond: u64,
+        slashed: bool,
+    ) -> Result<(), StorageError> {
         let record = ValidatorRecord {
             validator: validator.clone(),
             bond,
+            slashed,
         };
         let value =
             crate::serialize(&record).map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -644,7 +659,7 @@ mod tests {
         let id = validator.id;
 
         assert!(storage.get_validator(&id).unwrap().is_none());
-        storage.put_validator(&validator, 1_000_000).unwrap();
+        storage.put_validator(&validator, 1_000_000, false).unwrap();
 
         let record = storage.get_validator(&id).unwrap().unwrap();
         assert_eq!(record.validator.id, id);
@@ -660,8 +675,8 @@ mod tests {
         let v1 = crate::consensus::bft::Validator::new(kp1.public.clone());
         let v2 = crate::consensus::bft::Validator::new(kp2.public.clone());
 
-        storage.put_validator(&v1, 1_000_000).unwrap();
-        storage.put_validator(&v2, 2_000_000).unwrap();
+        storage.put_validator(&v1, 1_000_000, false).unwrap();
+        storage.put_validator(&v2, 2_000_000, false).unwrap();
 
         let all = storage.get_all_validators().unwrap();
         assert_eq!(all.len(), 2);
@@ -674,7 +689,7 @@ mod tests {
         let validator = crate::consensus::bft::Validator::new(kp.public.clone());
         let id = validator.id;
 
-        storage.put_validator(&validator, 1_000_000).unwrap();
+        storage.put_validator(&validator, 1_000_000, false).unwrap();
         assert!(storage.get_validator(&id).unwrap().is_some());
 
         storage.remove_validator(&id).unwrap();

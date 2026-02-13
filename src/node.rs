@@ -317,6 +317,7 @@ impl Node {
                         config.kem_keypair.public.clone(),
                     ),
                     crate::constants::VALIDATOR_BOND,
+                    false,
                 )
                 .unwrap_or_else(|e| tracing::warn!("Failed to persist validator: {}", e));
 
@@ -564,8 +565,11 @@ impl Node {
 
                 let mut state = self.state.write().await;
 
-                // Track peer's highest round for view change detection
-                if vertex.round > state.peer_highest_round {
+                // Track peer's highest round for view change detection.
+                // Bound the accepted round delta to prevent a malicious peer from
+                // setting an absurdly high round that would permanently trigger re-sync.
+                let max_acceptable_round = state.bft.round + crate::constants::MAX_ROUND_LAG * 10;
+                if vertex.round > state.peer_highest_round && vertex.round <= max_acceptable_round {
                     state.peer_highest_round = vertex.round;
                 }
 
@@ -574,9 +578,21 @@ impl Node {
                 if vertex.round > 0 {
                     let epoch_seed = state.ledger.state.epoch_seed().clone();
                     let total_validators = state.ledger.state.total_validators();
-                    if let Err(e) = vertex.validate_vrf(&epoch_seed, total_validators) {
+                    let proposer_id = vertex.proposer.fingerprint();
+                    let expected_commitment = state.bft.vrf_commitment(&proposer_id).copied();
+                    if let Err(e) = vertex.validate_vrf(
+                        &epoch_seed,
+                        total_validators,
+                        expected_commitment.as_ref(),
+                    ) {
                         tracing::debug!("Rejected vertex (invalid VRF): {}", e);
                         return;
+                    }
+                    // Register VRF commitment (first-seen binding)
+                    if let Some(vrf) = &vertex.vrf_proof {
+                        state
+                            .bft
+                            .register_vrf_commitment(proposer_id, vrf.proof_commitment);
                     }
                 }
 
@@ -636,8 +652,10 @@ impl Node {
                 self.mark_seen(vote_dedup_key);
 
                 let mut state = self.state.write().await;
-                // Track peer's highest round for view change detection
-                if vote.round > state.peer_highest_round {
+                // Track peer's highest round for view change detection.
+                // Bound accepted round to prevent manipulation.
+                let max_acceptable_round = state.bft.round + crate::constants::MAX_ROUND_LAG * 10;
+                if vote.round > state.peer_highest_round && vote.round <= max_acceptable_round {
                     state.peer_highest_round = vote.round;
                 }
                 // H5: Only re-broadcast if the vote was accepted
@@ -957,7 +975,8 @@ impl Node {
                                         .state
                                         .validator_bond(&validator.id)
                                         .unwrap_or(0);
-                                    let _ = state.storage.put_validator(validator, bond);
+                                    let slashed = state.ledger.state.is_slashed(&validator.id);
+                                    let _ = state.storage.put_validator(validator, bond, slashed);
                                 }
                             }
                             Err(e) => {
@@ -1037,9 +1056,22 @@ impl Node {
                         if vertex.round > 0 {
                             let epoch_seed = state.ledger.state.epoch_seed().clone();
                             let total_validators = state.ledger.state.total_validators();
-                            if let Err(e) = vertex.validate_vrf(&epoch_seed, total_validators) {
+                            let proposer_id = vertex.proposer.fingerprint();
+                            let expected_commitment =
+                                state.bft.vrf_commitment(&proposer_id).copied();
+                            if let Err(e) = vertex.validate_vrf(
+                                &epoch_seed,
+                                total_validators,
+                                expected_commitment.as_ref(),
+                            ) {
                                 tracing::warn!("VertexResponse failed VRF validation: {}", e);
                                 return;
+                            }
+                            // Register VRF commitment (first-seen binding)
+                            if let Some(vrf) = &vertex.vrf_proof {
+                                state
+                                    .bft
+                                    .register_vrf_commitment(proposer_id, vrf.proof_commitment);
                             }
                         }
                         let _ = state.ledger.insert_vertex(*vertex);
@@ -1076,7 +1108,7 @@ impl Node {
         // Record commitment count before finalization for incremental tree persistence
         let old_commitment_count = state.ledger.state.commitment_count();
 
-        match state.ledger.finalize_vertex(vertex_id) {
+        match state.ledger.finalize_vertex_unchecked(vertex_id) {
             Ok(coinbase) => {
                 state.last_finalized_time = Some(Instant::now());
                 // Remove conflicting mempool txs
@@ -1126,7 +1158,8 @@ impl Node {
                         .state
                         .validator_bond(&validator.id)
                         .unwrap_or(0);
-                    let _ = state.storage.put_validator(validator, bond);
+                    let slashed = state.ledger.state.is_slashed(&validator.id);
+                    let _ = state.storage.put_validator(validator, bond, slashed);
                 }
 
                 // Persist chain state meta snapshot

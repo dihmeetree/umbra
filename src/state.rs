@@ -121,6 +121,16 @@ impl ChainState {
             return Err(StateError::TooManyTransactions);
         }
 
+        // Validate vertex epoch matches the current chain epoch.
+        // A malicious proposer could set a fake epoch to manipulate block rewards
+        // or bypass expiry checks. Genesis (epoch=0, round=0) is exempt.
+        if vertex.round > 0 && vertex.epoch != self.epoch {
+            return Err(StateError::EpochMismatch {
+                expected: self.epoch,
+                got: vertex.epoch,
+            });
+        }
+
         // Check for intra-vertex nullifier duplicates (cross-tx double-spend within a single vertex)
         {
             let mut seen_nullifiers = HashSet::new();
@@ -184,7 +194,7 @@ impl ChainState {
         let commitment_count_before = self.commitments.len();
         let tree_leaves_before = self.commitment_tree.num_leaves();
         let mut applied_nullifiers: Vec<Nullifier> = Vec::new();
-        let mut registered_validators: Vec<Hash> = Vec::new();
+        let mut registered_validators: Vec<(Hash, bool)> = Vec::new(); // (id, was_reregistration)
         let mut deregistered_validators: Vec<(Hash, u64)> = Vec::new(); // (id, bond)
 
         // Pass 2 — apply all transactions sequentially.
@@ -194,20 +204,22 @@ impl ChainState {
             // Snapshot validator state before applying (for rollback)
             let pre_apply_info = match &tx.tx_type {
                 TxType::ValidatorRegister { signing_key, .. } => {
-                    Some((true, signing_key.fingerprint(), 0u64))
+                    let vid = signing_key.fingerprint();
+                    let is_reregistration = self.validators.contains_key(&vid);
+                    Some((true, vid, 0u64, is_reregistration))
                 }
                 TxType::ValidatorDeregister { validator_id, .. } => {
                     let bond = self.validator_bonds.get(validator_id).copied().unwrap_or(0);
-                    Some((false, *validator_id, bond))
+                    Some((false, *validator_id, bond, false))
                 }
                 _ => None,
             };
             match self.apply_transaction_unchecked(tx) {
                 Ok(()) => {
                     applied_nullifiers.extend(tx_nullifiers);
-                    if let Some((is_register, vid, bond)) = pre_apply_info {
+                    if let Some((is_register, vid, bond, is_rereg)) = pre_apply_info {
                         if is_register {
-                            registered_validators.push(vid);
+                            registered_validators.push((vid, is_rereg));
                         } else {
                             deregistered_validators.push((vid, bond));
                         }
@@ -228,8 +240,16 @@ impl ChainState {
                     }
                     self.commitment_tree.truncate(tree_leaves_before);
                     // Undo validator registrations
-                    for vid in &registered_validators {
-                        self.validators.remove(vid);
+                    for (vid, is_rereg) in &registered_validators {
+                        if *is_rereg {
+                            // Undo re-registration: set back to inactive
+                            if let Some(v) = self.validators.get_mut(vid) {
+                                v.active = false;
+                            }
+                        } else {
+                            // Undo new registration: remove entirely
+                            self.validators.remove(vid);
+                        }
                         self.validator_bonds.remove(vid);
                     }
                     // Undo validator deregistrations (re-activate and restore bond)
@@ -250,8 +270,10 @@ impl ChainState {
         // vertex_fees via coinbase output as an additional reward.
         let vertex_fees = self.epoch_fees.saturating_sub(fees_before);
 
-        // Compute total coinbase amount
-        let block_reward = crate::constants::block_reward_for_epoch(vertex.epoch);
+        // Compute total coinbase amount.
+        // Use self.epoch (canonical chain epoch) instead of vertex.epoch to prevent
+        // a malicious proposer from claiming a higher reward by setting a fake epoch.
+        let block_reward = crate::constants::block_reward_for_epoch(self.epoch);
         let total_coinbase = block_reward.saturating_add(vertex_fees);
 
         // Create coinbase output for the proposer
@@ -302,8 +324,12 @@ impl ChainState {
             TxType::Transfer => {}
             TxType::ValidatorRegister { signing_key, .. } => {
                 let vid = signing_key.fingerprint();
-                if self.validators.contains_key(&vid) {
-                    return Err(StateError::ValidatorAlreadyRegistered);
+                // Allow re-registration if the validator was previously deregistered
+                // (inactive). Only reject if already active or slashed.
+                if let Some(existing) = self.validators.get(&vid) {
+                    if existing.active {
+                        return Err(StateError::ValidatorAlreadyRegistered);
+                    }
                 }
                 if self.slashed_validators.contains(&vid) {
                     return Err(StateError::ValidatorSlashed);
@@ -383,18 +409,27 @@ impl ChainState {
                 signing_key,
                 kem_public_key,
             } => {
-                let mut validator =
-                    Validator::with_kem(signing_key.clone(), kem_public_key.clone());
-                validator.activation_epoch = self.epoch + 1; // eligible next epoch
-                let vid = validator.id;
+                let vid = signing_key.fingerprint();
 
                 // Escrow bond, remainder goes to epoch fees
                 let bond = crate::constants::VALIDATOR_BOND;
                 let actual_fee = tx.fee.saturating_sub(bond);
                 self.epoch_fees = self.epoch_fees.saturating_add(actual_fee);
 
+                if let Some(existing) = self.validators.get_mut(&vid) {
+                    // Re-registration of a previously deregistered validator
+                    existing.active = true;
+                    existing.activation_epoch = self.epoch + 1;
+                    existing.kem_public_key = Some(kem_public_key.clone());
+                } else {
+                    // New registration
+                    let mut validator =
+                        Validator::with_kem(signing_key.clone(), kem_public_key.clone());
+                    validator.activation_epoch = self.epoch + 1;
+                    self.register_validator(validator);
+                }
+
                 self.validator_bonds.insert(vid, bond);
-                self.register_validator(validator);
             }
             TxType::ValidatorDeregister {
                 validator_id,
@@ -595,21 +630,46 @@ impl ChainState {
     }
 
     /// Compute the state root (hash of all state components).
+    ///
+    /// Includes a deterministic hash over the full validator set (sorted by ID)
+    /// so that two nodes with different validator registries will compute
+    /// different state roots, preventing silent state divergence.
     pub fn state_root(&self) -> Hash {
         let root = self.commitment_tree.root();
-        // M14: Include validator registry in state root
-        let validator_count = self.total_validators() as u64;
-        let total_bonds: u64 = self.validator_bonds.values().sum();
+        let validator_hash = self.validator_set_hash();
         crate::hash_concat(&[
             b"spectra.state_root",
             &root,
             &self.nullifier_hash,
             &self.epoch.to_le_bytes(),
             &self.epoch_fees.to_le_bytes(),
-            &validator_count.to_le_bytes(),
-            &total_bonds.to_le_bytes(),
+            &validator_hash,
             &self.total_minted.to_le_bytes(),
         ])
+    }
+
+    /// Compute a deterministic hash over the full validator set.
+    ///
+    /// Validators are sorted by ID to ensure deterministic ordering regardless
+    /// of HashMap iteration order. Each validator's ID, active status, bond,
+    /// and slashed status are included in the hash.
+    fn validator_set_hash(&self) -> Hash {
+        let mut sorted_ids: Vec<&Hash> = self.validators.keys().collect();
+        sorted_ids.sort();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"spectra.validator_set");
+        hasher.update(&(sorted_ids.len() as u64).to_le_bytes());
+        for vid in sorted_ids {
+            hasher.update(vid);
+            let active = self.validators.get(vid).map(|v| v.active).unwrap_or(false);
+            hasher.update(&[active as u8]);
+            let bond = self.validator_bonds.get(vid).copied().unwrap_or(0);
+            hasher.update(&bond.to_le_bytes());
+            let slashed = self.slashed_validators.contains(vid) as u8;
+            hasher.update(&[slashed]);
+        }
+        *hasher.finalize().as_bytes()
     }
 
     /// Get the last finalized vertex ID.
@@ -867,8 +927,7 @@ impl ChainState {
         let mut slashed_validators = HashSet::new();
         for record in validator_records {
             let vid = record.validator.id;
-            if !record.validator.active && record.bond == 0 {
-                // Inactive with no bond = slashed
+            if record.slashed {
                 slashed_validators.insert(vid);
             }
             if record.bond > 0 {
@@ -932,9 +991,38 @@ impl Ledger {
 
     /// Finalize a vertex: mark as final in DAG and apply transactions to state.
     ///
-    /// Call after BFT certification. The vertex must already be in the DAG
-    /// (via `insert_vertex()`). Returns the coinbase output if one was created.
+    /// Requires a BFT certificate and the current committee for verification.
+    /// The vertex must already be in the DAG (via `insert_vertex()`).
+    /// Returns the coinbase output if one was created.
     pub fn finalize_vertex(
+        &mut self,
+        vertex_id: &VertexId,
+        certificate: &crate::consensus::bft::Certificate,
+        committee: &[crate::consensus::bft::Validator],
+        chain_id: &Hash,
+    ) -> Result<Option<TxOutput>, StateError> {
+        // Verify BFT certificate before finalizing
+        if !certificate.verify(committee, chain_id) {
+            return Err(StateError::InvalidCertificate);
+        }
+        if certificate.vertex_id != *vertex_id {
+            return Err(StateError::InvalidCertificate);
+        }
+        self.dag.finalize(vertex_id);
+        if let Some(v) = self.dag.get(vertex_id) {
+            let v = v.clone();
+            return self.state.apply_vertex(&v);
+        }
+        Ok(None)
+    }
+
+    /// Finalize a vertex without certificate verification (internal use only).
+    ///
+    /// Used by `apply_finalized_vertex` (sync path) where the certificate has
+    /// already been verified or the vertex is accepted on trust from a sync peer.
+    /// Also used by `finalize_vertex_inner` in node.rs where the certificate
+    /// was verified before calling this method.
+    pub(crate) fn finalize_vertex_unchecked(
         &mut self,
         vertex_id: &VertexId,
     ) -> Result<Option<TxOutput>, StateError> {
@@ -948,7 +1036,7 @@ impl Ledger {
 
     /// Apply a finalized vertex: insert into DAG, finalize, and update state.
     ///
-    /// Convenience method that calls `insert_vertex()` then `finalize_vertex()`.
+    /// Used during sync where the vertex is accepted from a trusted sync peer.
     /// Validates vertex structure including proposer signature. Returns the
     /// coinbase output if one was created.
     pub fn apply_finalized_vertex(
@@ -957,7 +1045,7 @@ impl Ledger {
     ) -> Result<Option<TxOutput>, StateError> {
         let id = vertex.id;
         self.insert_vertex(vertex)?;
-        self.finalize_vertex(&id)
+        self.finalize_vertex_unchecked(&id)
     }
 
     /// Restore a ledger from persistent storage.
@@ -1019,6 +1107,10 @@ pub enum StateError {
     TooManyTransactions,
     #[error("commitment tree full: {0}")]
     CommitmentTreeFull(String),
+    #[error("vertex epoch mismatch: expected {expected}, got {got}")]
+    EpochMismatch { expected: u64, got: u64 },
+    #[error("invalid or missing BFT certificate")]
+    InvalidCertificate,
 }
 
 #[cfg(test)]
@@ -1274,7 +1366,7 @@ mod tests {
 
         // Store validators
         let bond = state.validator_bond(&vid).unwrap();
-        storage.put_validator(&validator, bond).unwrap();
+        storage.put_validator(&validator, bond, false).unwrap();
 
         // Store meta
         storage.put_chain_state_meta(&meta).unwrap();
@@ -1814,6 +1906,328 @@ mod tests {
         assert!(
             eligible_5.iter().any(|v| v.id == vid),
             "validator with activation_epoch=1 SHOULD be eligible at epoch 5"
+        );
+    }
+
+    #[test]
+    fn apply_vertex_epoch_mismatch_rejected() {
+        let mut state = ChainState::new();
+
+        // Register a validator with KEM key
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        state.register_genesis_validator(validator);
+
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Create a vertex with epoch=5 while state is at epoch=0 (mismatch)
+        let vertex = make_test_vertex(vec![genesis_id], 1, 5, &val_signing.public, vec![]);
+        let result = state.apply_vertex(&vertex);
+        assert!(
+            matches!(
+                result,
+                Err(StateError::EpochMismatch {
+                    expected: 0,
+                    got: 5
+                })
+            ),
+            "expected EpochMismatch, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn block_reward_uses_chain_epoch() {
+        let mut state = ChainState::new();
+
+        // Register a validator with KEM key
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        state.register_genesis_validator(validator);
+
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Apply a vertex at epoch=0, round=1 (matching chain epoch)
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![]);
+
+        let minted_before = state.total_minted();
+        let result = state.apply_vertex(&vertex);
+        assert!(result.is_ok());
+
+        // The block reward should use self.epoch (0), not a fake epoch
+        let expected_reward = crate::constants::block_reward_for_epoch(0);
+        assert_eq!(
+            state.total_minted(),
+            minted_before + expected_reward,
+            "block reward should be based on chain epoch 0"
+        );
+    }
+
+    #[test]
+    fn finalize_vertex_requires_valid_certificate() {
+        let mut ledger = Ledger::new();
+
+        // Register a validator
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        let vid = validator.id;
+        ledger.state.register_genesis_validator(validator.clone());
+
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Insert a vertex into the DAG
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![]);
+        let vertex_id = vertex.id;
+        ledger.dag.insert_unchecked(vertex).unwrap();
+
+        let chain_id = *ledger.state.chain_id();
+
+        // Try to finalize with an empty (invalid) certificate
+        let fake_cert = crate::consensus::bft::Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures: vec![],
+        };
+        let result =
+            ledger.finalize_vertex(&vertex_id, &fake_cert, &[validator.clone()], &chain_id);
+        assert!(
+            matches!(result, Err(StateError::InvalidCertificate)),
+            "expected InvalidCertificate, got {:?}",
+            result
+        );
+
+        // Certificate for wrong vertex should also fail
+        let wrong_cert = crate::consensus::bft::Certificate {
+            vertex_id: VertexId([0xFF; 32]),
+            round: 0,
+            epoch: 0,
+            signatures: vec![(vid, val_signing.sign(&[0u8; 32]))],
+        };
+        let result = ledger.finalize_vertex(&vertex_id, &wrong_cert, &[validator], &chain_id);
+        assert!(
+            matches!(result, Err(StateError::InvalidCertificate)),
+            "expected InvalidCertificate for mismatched vertex, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn state_root_deterministic_validator_hash() {
+        // Two states with different validator sets but same count/total bonds
+        // must produce different state roots.
+        let mut state1 = ChainState::new();
+        let mut state2 = ChainState::new();
+
+        let kp_a = SigningKeypair::generate();
+        let kp_b = SigningKeypair::generate();
+
+        let v_a = Validator::new(kp_a.public.clone());
+        let v_b = Validator::new(kp_b.public.clone());
+
+        // Both states have 1 validator with the same bond amount
+        state1.register_genesis_validator(v_a);
+        state2.register_genesis_validator(v_b);
+
+        assert_eq!(state1.total_validators(), 1);
+        assert_eq!(state2.total_validators(), 1);
+        assert_eq!(
+            state1.validator_bonds.values().sum::<u64>(),
+            state2.validator_bonds.values().sum::<u64>()
+        );
+
+        // State roots must differ because the validators have different IDs
+        assert_ne!(
+            state1.state_root(),
+            state2.state_root(),
+            "different validator sets should produce different state roots"
+        );
+    }
+
+    #[test]
+    fn state_root_includes_slashed_status() {
+        let mut state1 = ChainState::new();
+        let mut state2 = ChainState::new();
+
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+
+        state1.register_genesis_validator(v.clone());
+        state2.register_genesis_validator(v);
+
+        // Same validator in both states — roots should match
+        assert_eq!(state1.state_root(), state2.state_root());
+
+        // Slash in state1 only
+        state1.slash_validator(&vid).unwrap();
+
+        // Roots must now differ due to slashed status
+        assert_ne!(
+            state1.state_root(),
+            state2.state_root(),
+            "slashing a validator should change the state root"
+        );
+    }
+
+    #[test]
+    fn validator_reregistration_allowed_after_deregistration() {
+        let mut state = ChainState::new();
+
+        // Register a validator
+        let val_kp = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
+        let vid = validator.id;
+        state.register_genesis_validator(validator);
+
+        // Deregister: mark inactive and remove bond
+        if let Some(v) = state.validators.get_mut(&vid) {
+            v.active = false;
+        }
+        state.validator_bonds.remove(&vid);
+
+        assert!(!state.is_active_validator(&vid));
+
+        // Build a ValidatorRegister transaction for the same key
+        let bond = crate::constants::VALIDATOR_BOND;
+        let min_fee = bond + crate::constants::MIN_TX_FEE;
+        let total_input = min_fee + 100;
+
+        let blinding = BlindingFactor::from_bytes([88u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[88u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(min_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: val_kp.public.clone(),
+                kem_public_key: val_kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        // Should succeed — re-registration of inactive (non-slashed) validator
+        let result = state.validate_transaction(&tx);
+        assert!(
+            result.is_ok(),
+            "re-registration should be allowed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn validator_reregistration_blocked_when_active() {
+        let mut state = ChainState::new();
+
+        let val_kp = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
+        state.register_genesis_validator(validator);
+
+        // Validator is still active — re-registration should be rejected
+        assert!(state.is_active_validator(&val_kp.public.fingerprint()));
+
+        let bond = crate::constants::VALIDATOR_BOND;
+        let min_fee = bond + crate::constants::MIN_TX_FEE;
+        let total_input = min_fee + 100;
+
+        let blinding = BlindingFactor::from_bytes([99u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[99u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(min_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: val_kp.public.clone(),
+                kem_public_key: val_kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::ValidatorAlreadyRegistered)),
+            "active validator re-registration should fail, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validator_reregistration_blocked_when_slashed() {
+        let mut state = ChainState::new();
+
+        let val_kp = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
+        let vid = validator.id;
+        state.register_genesis_validator(validator);
+
+        // Slash the validator
+        state.slash_validator(&vid).unwrap();
+        assert!(state.is_slashed(&vid));
+
+        let bond = crate::constants::VALIDATOR_BOND;
+        let min_fee = bond + crate::constants::MIN_TX_FEE;
+        let total_input = min_fee + 100;
+
+        let blinding = BlindingFactor::from_bytes([77u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[77u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(min_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: val_kp.public.clone(),
+                kem_public_key: val_kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::ValidatorSlashed)),
+            "slashed validator re-registration should fail, got: {:?}",
+            result
         );
     }
 }
