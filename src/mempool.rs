@@ -284,6 +284,29 @@ impl Mempool {
         count
     }
 
+    /// Compute fee percentiles [p10, p25, p50, p75, p90] from the fee index.
+    /// Returns `None` if the mempool is empty.
+    pub fn fee_percentiles(&self) -> Option<[u64; 5]> {
+        if self.txs.is_empty() {
+            return None;
+        }
+        // Collect all fees in ascending order (BTreeMap uses neg_fee key, so reverse)
+        let mut fees: Vec<u64> = self.fee_index.keys().map(|k| k.fee()).collect();
+        fees.reverse();
+        let n = fees.len();
+        let percentile = |p: usize| -> u64 {
+            let idx = (p * n / 100).min(n - 1);
+            fees[idx]
+        };
+        Some([
+            percentile(10),
+            percentile(25),
+            percentile(50),
+            percentile(75),
+            percentile(90),
+        ])
+    }
+
     /// Stats for RPC reporting.
     pub fn stats(&self) -> MempoolStats {
         MempoolStats {
@@ -556,5 +579,28 @@ mod tests {
         assert_eq!(pool.len(), 0);
         assert_eq!(pool.min_fee(), None);
         assert_eq!(pool.total_bytes(), 0);
+    }
+
+    #[test]
+    fn fee_percentiles_empty_pool() {
+        let pool = Mempool::with_defaults();
+        assert!(pool.fee_percentiles().is_none());
+    }
+
+    #[test]
+    fn fee_percentiles_with_transactions() {
+        let mut pool = Mempool::with_defaults();
+        // Insert transactions with different fees
+        for (i, fee) in [5, 10, 15, 20, 25].iter().enumerate() {
+            pool.insert(make_test_tx(*fee, 70 + i as u8)).unwrap();
+        }
+
+        let percentiles = pool.fee_percentiles().unwrap();
+        // p10, p25, p50, p75, p90
+        assert_eq!(percentiles.len(), 5);
+        // Values should be in ascending order
+        for i in 0..4 {
+            assert!(percentiles[i] <= percentiles[i + 1]);
+        }
     }
 }

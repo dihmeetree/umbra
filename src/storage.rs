@@ -462,6 +462,7 @@ mod tests {
             state_root: [0u8; 32],
             signature: Signature(vec![]),
             vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
     }
 
@@ -587,6 +588,7 @@ mod tests {
                 state_root: [0u8; 32],
                 signature: Signature(vec![]),
                 vrf_proof: None,
+                protocol_version: crate::constants::PROTOCOL_VERSION_ID,
             };
             storage.put_vertex(&vertex).unwrap();
             storage.put_finalized_vertex_index(i as u64, &id).unwrap();

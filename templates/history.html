@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}History - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Transaction History</h1>
+
+{% if entries.is_empty() %}
+<div class="card">
+  <p class="empty">No transaction history.</p>
+</div>
+{% else %}
+<div class="card">
+  <table style="width: 100%; border-collapse: collapse;">
+    <thead>
+      <tr style="border-bottom: 1px solid var(--text-dim);">
+        <th style="text-align: left; padding: 0.5rem;">Type</th>
+        <th style="text-align: right; padding: 0.5rem;">Amount</th>
+        <th style="text-align: right; padding: 0.5rem;">Fee</th>
+        <th style="text-align: left; padding: 0.5rem;">TX ID</th>
+        <th style="text-align: right; padding: 0.5rem;">Epoch</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in entries %}
+      <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+        <td style="padding: 0.5rem;">{{ entry.direction }}</td>
+        <td style="text-align: right; padding: 0.5rem;">{{ entry.amount }}</td>
+        <td style="text-align: right; padding: 0.5rem;">{{ entry.fee }}</td>
+        <td style="padding: 0.5rem; font-family: monospace; font-size: 0.8rem;">{{ entry.tx_id_hex }}</td>
+        <td style="text-align: right; padding: 0.5rem;">{{ entry.epoch }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<p style="color: var(--text-dim); font-size: 0.8rem; margin-top: 0.5rem;">{{ entries.len() }} transaction(s) total</p>
+{% endblock %}

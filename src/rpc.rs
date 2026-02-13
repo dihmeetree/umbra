@@ -44,6 +44,12 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/validators", get(get_validators))
         .route("/validator/{id}", get(get_validator))
         .route("/vertices/finalized", get(get_finalized_vertices))
+        .route("/health", get(get_health))
+        .route("/metrics", get(get_metrics))
+        .route("/fee-estimate", get(get_fee_estimate))
+        .route("/vertex/{id}", get(get_vertex_by_id))
+        .route("/commitment-proof/{index}", get(get_commitment_proof))
+        .route("/state-summary", get(get_state_summary))
         .with_state(rpc_state)
 }
 
@@ -353,6 +359,219 @@ async fn get_finalized_vertices(
     }))
 }
 
+// ── GET /health (F3) ──
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    version: String,
+    uptime_seconds: u64,
+    peer_count: usize,
+    epoch: u64,
+    finalized_count: u64,
+    mempool_txs: usize,
+}
+
+async fn get_health(State(state): State<RpcState>) -> Json<HealthResponse> {
+    let node = state.node.read().await;
+    let uptime = node.node_start_time.elapsed().as_secs();
+    let peer_count = state.p2p.get_peers().await.map(|p| p.len()).unwrap_or(0);
+    let finalized_count = node.storage.finalized_vertex_count().unwrap_or(0);
+    Json(HealthResponse {
+        status: "ok".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        uptime_seconds: uptime,
+        peer_count,
+        epoch: node.ledger.state.epoch(),
+        finalized_count,
+        mempool_txs: node.mempool.len(),
+    })
+}
+
+// ── GET /metrics (F3) ──
+
+async fn get_metrics(
+    State(state): State<RpcState>,
+) -> (
+    StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let node = state.node.read().await;
+    let uptime = node.node_start_time.elapsed().as_secs();
+    let peer_count = state.p2p.get_peers().await.map(|p| p.len()).unwrap_or(0);
+    let finalized_count = node.storage.finalized_vertex_count().unwrap_or(0);
+    let mempool_txs = node.mempool.len();
+    let mempool_bytes = node.mempool.total_bytes();
+    let epoch = node.ledger.state.epoch();
+
+    let body = format!(
+        "# HELP spectra_uptime_seconds Node uptime in seconds\n\
+         # TYPE spectra_uptime_seconds gauge\n\
+         spectra_uptime_seconds {uptime}\n\
+         # HELP spectra_peer_count Number of connected peers\n\
+         # TYPE spectra_peer_count gauge\n\
+         spectra_peer_count {peer_count}\n\
+         # HELP spectra_epoch Current epoch number\n\
+         # TYPE spectra_epoch gauge\n\
+         spectra_epoch {epoch}\n\
+         # HELP spectra_finalized_vertices Total finalized vertices\n\
+         # TYPE spectra_finalized_vertices counter\n\
+         spectra_finalized_vertices {finalized_count}\n\
+         # HELP spectra_mempool_txs Current mempool transaction count\n\
+         # TYPE spectra_mempool_txs gauge\n\
+         spectra_mempool_txs {mempool_txs}\n\
+         # HELP spectra_mempool_bytes Current mempool size in bytes\n\
+         # TYPE spectra_mempool_bytes gauge\n\
+         spectra_mempool_bytes {mempool_bytes}\n"
+    );
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        body,
+    )
+}
+
+// ── GET /fee-estimate (F4) ──
+
+#[derive(Serialize)]
+struct FeeEstimateResponse {
+    min_fee: u64,
+    median_fee: Option<u64>,
+    suggested_fee: u64,
+    mempool_size: usize,
+    percentiles: Option<[u64; 5]>,
+}
+
+async fn get_fee_estimate(State(state): State<RpcState>) -> Json<FeeEstimateResponse> {
+    let node = state.node.read().await;
+    let percentiles = node.mempool.fee_percentiles();
+    let median_fee = percentiles.map(|p| p[2]);
+    let suggested_fee = median_fee
+        .map(|m| m.max(crate::constants::MIN_TX_FEE))
+        .unwrap_or(crate::constants::MIN_TX_FEE);
+    Json(FeeEstimateResponse {
+        min_fee: crate::constants::MIN_TX_FEE,
+        median_fee,
+        suggested_fee,
+        mempool_size: node.mempool.len(),
+        percentiles,
+    })
+}
+
+// ── GET /vertex/:id (F15) ──
+
+async fn get_vertex_by_id(
+    State(state): State<RpcState>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let id_bytes: [u8; 32] = hex::decode(&id_hex)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid id: {}", e)))?
+        .try_into()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "id must be 32 bytes hex".to_string(),
+            )
+        })?;
+
+    let vertex_id = crate::consensus::dag::VertexId(id_bytes);
+    let node = state.node.read().await;
+
+    // Check DAG first, then storage
+    let vertex = node
+        .ledger
+        .dag
+        .get(&vertex_id)
+        .cloned()
+        .or_else(|| node.storage.get_vertex(&vertex_id).ok().flatten());
+
+    match vertex {
+        Some(v) => {
+            let hex = crate::serialize(&v).map(hex::encode).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("serialize: {}", e),
+                )
+            })?;
+            Ok(Json(serde_json::json!({
+                "found": true,
+                "vertex_hex": hex,
+                "epoch": v.epoch,
+                "round": v.round,
+                "tx_count": v.transactions.len(),
+            })))
+        }
+        None => Ok(Json(serde_json::json!({"found": false}))),
+    }
+}
+
+// ── GET /commitment-proof/:index (F15) ──
+
+#[derive(Serialize)]
+struct CommitmentProofResponse {
+    index: usize,
+    commitment: String,
+    merkle_path: Vec<String>,
+    root: String,
+}
+
+async fn get_commitment_proof(
+    State(state): State<RpcState>,
+    Path(index): Path<usize>,
+) -> Result<Json<CommitmentProofResponse>, (StatusCode, String)> {
+    let node = state.node.read().await;
+    let path = node.ledger.state.commitment_path(index).ok_or((
+        StatusCode::NOT_FOUND,
+        "commitment index out of range".into(),
+    ))?;
+
+    let commitment_hash = node.ledger.state.commitment_tree_node(0, index);
+    let root = node.ledger.state.commitment_root();
+
+    Ok(Json(CommitmentProofResponse {
+        index,
+        commitment: hex::encode(commitment_hash),
+        merkle_path: path.iter().map(|n| hex::encode(n.hash)).collect(),
+        root: hex::encode(root),
+    }))
+}
+
+// ── GET /state-summary (F15) ──
+
+#[derive(Serialize)]
+struct StateSummaryResponse {
+    state_root: String,
+    commitment_root: String,
+    epoch: u64,
+    commitment_count: usize,
+    nullifier_count: usize,
+    total_minted: u64,
+    active_validators: Vec<String>,
+}
+
+async fn get_state_summary(State(state): State<RpcState>) -> Json<StateSummaryResponse> {
+    let node = state.node.read().await;
+    let s = &node.ledger.state;
+    let active_vals: Vec<String> = s
+        .active_validators()
+        .iter()
+        .map(|v| hex::encode(v.id))
+        .collect();
+    Json(StateSummaryResponse {
+        state_root: hex::encode(s.state_root()),
+        commitment_root: hex::encode(s.commitment_root()),
+        epoch: s.epoch(),
+        commitment_count: s.commitment_count(),
+        nullifier_count: s.nullifier_count(),
+        total_minted: s.total_minted(),
+        active_validators: active_vals,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +598,8 @@ mod tests {
             bft,
             last_finalized_time: None,
             peer_highest_round: 0,
+            node_start_time: std::time::Instant::now(),
+            version_signals: std::collections::HashMap::new(),
         }));
         // Create a P2pHandle from a channel (we won't use it in most tests)
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -514,6 +735,93 @@ mod tests {
         assert_eq!(status, HttpStatus::OK);
         assert!(json["vertices"].as_array().unwrap().is_empty());
         assert_eq!(json["has_more"], false);
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/health").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["status"], "ok");
+        assert!(json["uptime_seconds"].as_u64().is_some());
+        assert_eq!(json["epoch"], 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_returns_text_plain() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::OK);
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/plain"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("spectra_uptime_seconds"));
+        assert!(text.contains("spectra_epoch"));
+    }
+
+    #[tokio::test]
+    async fn fee_estimate_empty_mempool() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/fee-estimate").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["min_fee"], 1);
+        assert_eq!(json["suggested_fee"], 1);
+        assert!(json["percentiles"].is_null());
+    }
+
+    #[tokio::test]
+    async fn state_summary_returns_json() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/state-summary").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["epoch"], 0);
+        assert!(json["state_root"].as_str().is_some());
+        assert!(json["active_validators"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn vertex_by_id_not_found() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let fake_id = hex::encode([0u8; 32]);
+        let (status, json) = get_json(&app, &format!("/vertex/{}", fake_id)).await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["found"], false);
+    }
+
+    #[tokio::test]
+    async fn commitment_proof_out_of_range() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/commitment-proof/0")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::NOT_FOUND);
     }
 
     #[tokio::test]

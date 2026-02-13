@@ -44,6 +44,13 @@ pub struct Vertex {
     /// `None` only for the genesis vertex.
     #[serde(default)]
     pub vrf_proof: Option<VrfOutput>,
+    /// Protocol version signaled by this vertex (F16).
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: u32,
+}
+
+fn default_protocol_version() -> u32 {
+    crate::constants::PROTOCOL_VERSION_ID
 }
 
 impl Vertex {
@@ -209,6 +216,7 @@ impl Dag {
             state_root: [0u8; 32],
             signature: Signature(vec![]),
             vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
     }
 
@@ -362,6 +370,44 @@ impl Dag {
         }
     }
 
+    /// Remove finalized vertices older than the given epoch from in-memory maps.
+    ///
+    /// Vertices remain in sled storage for historical sync. Returns the number
+    /// of vertices pruned.
+    pub fn prune_finalized(&mut self, before_epoch: u64) -> usize {
+        let to_prune: Vec<VertexId> = self
+            .finalized
+            .iter()
+            .filter(|vid| {
+                self.vertices
+                    .get(vid)
+                    .map(|v| v.epoch < before_epoch)
+                    .unwrap_or(false)
+            })
+            .copied()
+            .collect();
+
+        let count = to_prune.len();
+        for vid in &to_prune {
+            self.vertices.remove(vid);
+            self.children.remove(vid);
+            self.finalized.remove(vid);
+            self.tips.remove(vid);
+        }
+
+        // Clean up stale child references
+        for children_list in self.children.values_mut() {
+            children_list.retain(|c| self.vertices.contains_key(c));
+        }
+
+        count
+    }
+
+    /// Get the number of finalized vertices.
+    pub fn finalized_count(&self) -> usize {
+        self.finalized.len()
+    }
+
     /// Get all ancestors of a vertex (transitive parents), bounded by max depth.
     ///
     /// L8: The traversal is bounded to prevent DoS from extremely deep DAGs.
@@ -436,6 +482,7 @@ mod tests {
             state_root: [0u8; 32],
             signature: Signature(vec![]),
             vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
     }
 
@@ -633,5 +680,74 @@ mod tests {
         assert!(pos(&v2.id) < pos(&v4.id));
         assert!(pos(&v3.id) < pos(&v5.id));
         assert!(pos(&v4.id) < pos(&v5.id));
+    }
+
+    #[test]
+    fn finalized_count_tracks_correctly() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+        assert_eq!(dag.finalized_count(), 1); // genesis is finalized
+
+        let v1 = make_vertex(vec![gid], 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+        assert_eq!(dag.finalized_count(), 1);
+
+        dag.finalize(&v1.id);
+        assert_eq!(dag.finalized_count(), 2);
+    }
+
+    #[test]
+    fn prune_finalized_removes_old_vertices() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Create vertex at epoch 5
+        let id5 = Vertex::compute_id(&[gid], 5, 1, &[1; 32], &[1; 32], None);
+        let v1 = Vertex {
+            id: id5,
+            parents: vec![gid],
+            epoch: 5,
+            round: 1,
+            proposer: SigningPublicKey(vec![1; 32]),
+            transactions: vec![],
+            timestamp: 5000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        dag.insert_unchecked(v1.clone()).unwrap();
+        dag.finalize(&v1.id);
+
+        // Create vertex at epoch 200
+        let id200 = Vertex::compute_id(&[v1.id], 200, 2, &[2; 32], &[2; 32], None);
+        let v2 = Vertex {
+            id: id200,
+            parents: vec![v1.id],
+            epoch: 200,
+            round: 2,
+            proposer: SigningPublicKey(vec![2; 32]),
+            transactions: vec![],
+            timestamp: 200000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        dag.insert_unchecked(v2.clone()).unwrap();
+        dag.finalize(&v2.id);
+
+        assert_eq!(dag.len(), 3); // genesis + v1 + v2
+        assert_eq!(dag.finalized_count(), 3);
+
+        // Prune vertices older than epoch 100
+        let pruned = dag.prune_finalized(100);
+        // Genesis (epoch 0) and v1 (epoch 5) should be pruned
+        assert_eq!(pruned, 2);
+        // v2 (epoch 200) remains
+        assert_eq!(dag.len(), 1);
+        assert!(dag.get(&v2.id).is_some());
     }
 }

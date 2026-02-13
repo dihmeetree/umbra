@@ -67,6 +67,8 @@ Epoch N:
 spectra/
   src/
     lib.rs                  Protocol constants, hashing utilities
+    config.rs               TOML config file support (spectra.toml)
+    bip39_words.rs          BIP39 English wordlist (2048 words) for wallet recovery
     crypto/
       keys.rs               Dilithium5 signing + Kyber1024 KEM keypairs
       stealth.rs            Stealth address generation and detection
@@ -90,19 +92,19 @@ spectra/
       builder.rs            TransactionBuilder API for constructing transactions
     consensus/
       mod.rs                PoVP design documentation
-      dag.rs                DAG data structure (vertices with VRF proofs, tips, ancestors)
+      dag.rs                DAG data structure (vertices with VRF proofs, protocol version, pruning)
       bft.rs                BFT voting with VRF proofs, certification, committee selection
-    mempool.rs              Fee-priority transaction pool with nullifier conflict detection
+    mempool.rs              Fee-priority transaction pool with nullifier conflict detection + fee estimation
     storage.rs              Persistent storage trait + sled backend (vertices, txs, validators)
-    p2p.rs                  Encrypted P2P networking (Kyber KEM + Dilithium5 auth + BLAKE3 transport)
-    node.rs                 Node orchestrator: active consensus, persistent keypair, BFT voting
-    rpc.rs                  JSON HTTP API (axum): tx, state, peers, mempool, validators
-    state.rs                Chain state (bonds, slashing, epoch seed), Ledger (two-phase vertex flow)
+    p2p.rs                  Encrypted P2P networking with peer reputation and connection diversity
+    node.rs                 Node orchestrator: consensus, Dandelion++, peer discovery, protocol signaling
+    rpc.rs                  JSON HTTP API: tx, state, health, metrics, fee-estimate, light client endpoints
+    state.rs                Chain state (bonds, slashing, sled-backed nullifiers), Ledger, parallel verification
     network.rs              P2P wire protocol (message types, KEM handshake, auth messages)
-    wallet.rs               Key management, output scanning, tx building, persistence
-    wallet_cli.rs           Wallet CLI commands (init, send, balance, scan, messages)
+    wallet.rs               Key management, scanning, tx building, history, recovery, consolidation
+    wallet_cli.rs           Wallet CLI commands (init, send, balance, history, consolidate, recover)
     wallet_web.rs           Wallet web UI (askama templates, axum server)
-    main.rs                 Node + wallet binary with clap subcommands
+    main.rs                 Node + wallet binary with clap subcommands and config file loading
   templates/
     base.html               Base layout with navigation and CSS
     dashboard.html          Balance, outputs, chain state, scan button
@@ -111,10 +113,11 @@ spectra/
     send.html               Transaction send form
     send_result.html        Transaction submission result
     messages.html           Encrypted message list
+    history.html            Transaction history table
     error.html              Error display
 ```
 
-**~16,000 lines of Rust** across 34 source files with **197 tests**.
+**~18,000 lines of Rust** across 36 source files with **226 tests**.
 
 ## Building
 
@@ -128,6 +131,26 @@ cargo build --release
 
 ```bash
 cargo run --release -- node [OPTIONS]
+```
+
+### Configuration
+
+The node loads `spectra.toml` from the data directory if present. CLI flags override config file values. If no config file exists, defaults are used.
+
+```toml
+# spectra.toml (optional)
+[node]
+p2p_host = "0.0.0.0"
+p2p_port = 9732
+rpc_host = "127.0.0.1"
+rpc_port = 9733
+bootstrap_peers = ["192.168.1.10:9732", "192.168.1.11:9732"]
+genesis_validator = false
+max_peers = 64
+
+[wallet]
+web_host = "127.0.0.1"
+web_port = 9734
 ```
 
 ### CLI Options
@@ -180,18 +203,21 @@ cargo run --release -- wallet <command>
 
 | Command | Description |
 |---------|-------------|
-| `init` | Create a new wallet and export address file |
+| `init` | Create a new wallet, display 24-word recovery phrase, and save encrypted backup |
 | `address` | Show wallet address ID and re-export address file |
 | `balance` | Scan the chain and show current balance |
 | `scan` | Scan the chain for new outputs (without showing balance) |
 | `send` | Build and submit a transaction |
 | `messages` | Show received encrypted messages |
+| `history` | Show transaction history (sends, receives, coinbase rewards) |
+| `consolidate` | Merge all unspent outputs into a single output |
+| `recover` | Recover a wallet from a 24-word mnemonic phrase and backup file |
 | `export` | Export wallet address to a file for sharing |
 
 ### Wallet Examples
 
 ```bash
-# Create a new wallet
+# Create a new wallet (displays 24-word recovery phrase — write it down!)
 cargo run --release -- wallet init
 
 # Check balance (scans chain first)
@@ -205,6 +231,15 @@ cargo run --release -- wallet send --to ./bob.spectra-address --amount 500 --fee
 
 # View received messages
 cargo run --release -- wallet messages
+
+# View transaction history
+cargo run --release -- wallet history
+
+# Consolidate all UTXOs into one output
+cargo run --release -- wallet consolidate --fee 10
+
+# Recover a wallet from backup (requires wallet.recovery file in data dir)
+cargo run --release -- wallet recover --phrase "abandon ability able about ..."
 
 # Export address for sharing
 cargo run --release -- wallet export --file ./my-address.spectra-address
@@ -235,6 +270,7 @@ Open `http://127.0.0.1:9734` in your browser. If no wallet exists, you'll be pro
 - **Dashboard** (`/`) — balance, output counts, chain state, scan button
 - **Send** (`/send`) — build and submit transactions with optional encrypted messages
 - **Messages** (`/messages`) — view received encrypted messages
+- **History** (`/history`) — transaction history (sends, receives, coinbase rewards)
 - **Address** (`/address`) — view and export wallet address for sharing
 
 ## RPC API
@@ -251,12 +287,27 @@ The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for s
 | `GET` | `/validators` | List all validators with bond and status |
 | `GET` | `/validator/{id}` | Get a single validator's info |
 | `GET` | `/vertices/finalized` | Paginated finalized vertices with coinbase outputs (`?after=N&limit=N`) |
+| `GET` | `/health` | Health check: status, version, uptime, peer count, epoch, sync state |
+| `GET` | `/metrics` | Prometheus-format metrics: uptime, peers, epoch, mempool stats |
+| `GET` | `/fee-estimate` | Fee estimation: percentiles (p10–p90), median, suggested fee |
+| `GET` | `/vertex/{id}` | Look up a vertex by ID (checks DAG then storage) |
+| `GET` | `/commitment-proof/{index}` | Merkle inclusion proof for a commitment at the given index |
+| `GET` | `/state-summary` | Light client state summary: roots, epoch, counts, active validators |
 
 ### Example
 
 ```bash
 # Query chain state
 curl http://localhost:9733/state
+
+# Health check
+curl http://localhost:9733/health
+
+# Prometheus metrics
+curl http://localhost:9733/metrics
+
+# Fee estimation
+curl http://localhost:9733/fee-estimate
 
 # Check mempool stats
 curl http://localhost:9733/mempool
@@ -266,6 +317,15 @@ curl http://localhost:9733/validators
 
 # Look up a transaction
 curl http://localhost:9733/tx/abc123...
+
+# Look up a vertex
+curl http://localhost:9733/vertex/abc123...
+
+# Light client state summary
+curl http://localhost:9733/state-summary
+
+# Merkle proof for commitment at index 42
+curl http://localhost:9733/commitment-proof/42
 
 # Get finalized vertices (paginated)
 curl "http://localhost:9733/vertices/finalized?after=0&limit=100"
@@ -321,11 +381,15 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 - **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, creates a coinbase output for the proposer, purges conflicting mempool entries, persists to storage, and slashes equivocators
 - **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root. Newly registered validators activate in the next epoch (activation delay prevents mid-epoch committee manipulation)
 - **State persistence** — every finalized vertex persists its transactions, nullifiers, Merkle tree nodes, finalized index, coinbase output, validators, and a `ChainStateMeta` snapshot to storage, then flushes. On restart the full chain state (Merkle tree, nullifier set, validators, epoch state, total minted) is restored from the snapshot
+- **Graceful shutdown** — accepts a `CancellationToken`; Ctrl-C triggers clean shutdown (flush storage, shutdown P2P, log exit)
+- **Dandelion++ transaction relay** — new transactions enter a stem phase (forwarded to one random peer for `DANDELION_STEM_HOPS` hops), then fluff (broadcast to all) after hops exhaust or `DANDELION_TIMEOUT_MS` expires, providing sender anonymity
+- **Peer discovery gossip** — periodic `GetPeers` / `PeersResponse` exchange (every `PEER_EXCHANGE_INTERVAL_MS`) discovers up to `PEER_DISCOVERY_MAX` new peers per round
+- **Protocol version signaling** — vertices carry a `protocol_version` field; the node tracks version signals per epoch and logs activation when a version exceeds 75% threshold (effective epoch+2)
+- **DAG memory pruning** — on epoch transition, finalized vertices older than `PRUNING_RETAIN_EPOCHS` are pruned from in-memory maps (retained in sled for sync)
 - **State sync with timeout/retry** — new nodes joining the network request finalized vertices in batches from peers via `GetFinalizedVertices` / `FinalizedVerticesResponse` messages. A three-state machine (`NeedSync → Syncing → Synced`) tracks sync progress. Unresponsive peers are timed out after `SYNC_REQUEST_TIMEOUT_MS` and placed on cooldown before retrying with another peer
 - **Fork resolution** — if no vertex is finalized for `VIEW_CHANGE_TIMEOUT_INTERVALS` proposal ticks or peers report rounds more than `MAX_ROUND_LAG` ahead, the node broadcasts `GetTips` and `GetEpochState` to discover and fetch missing vertices
 - **Mempool expiry eviction** — expired transactions are periodically evicted from the mempool (every ~50 seconds and on epoch transitions)
 - Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
-- Peer discovery via `GetPeers` / `PeersResponse` messages
 - Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed and KEM key for coinbase, no funding tx required)
 
 ## Testing
@@ -334,7 +398,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 197 tests cover:
+All 226 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -344,18 +408,18 @@ All 197 tests cover:
 - **Merkle tree** — construction, path verification, depth-20 canonical padding, restore from stored level data, last-appended path coverage
 - **Encryption** — message roundtrips, authentication, tamper detection
 - **VRF** — evaluation, verification, committee selection statistics
-- **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs
+- **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices
 - **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement
 - **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses
 - **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages)
 - **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
 - **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found and not-found), /vertices/finalized; POST /tx (valid submission, invalid hex rejection); full submit-and-retrieve roundtrip
-- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status)
-- **Wallet CLI** — init (creates files, rejects duplicate), address display, export creates valid address file, messages on empty wallet
+- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt; UTXO consolidation
+- **Wallet CLI** — init with recovery phrase (creates wallet + backup files), recover from mnemonic + backup, history display, address display, export creates valid address file, messages on empty wallet
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
-- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction
+- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty and populated pools)
 - **Storage** — vertex/transaction/nullifier/validator/coinbase persistence, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval
-- **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking
+- **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled
 - **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst + refill)
 - **Node** — persistent signing + KEM keypair load/save roundtrip
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
@@ -481,6 +545,19 @@ Proves in zero knowledge:
 | `PEER_RATE_LIMIT_STRIKES` | 5 | Rate violations before disconnecting peer |
 | `VIEW_CHANGE_TIMEOUT_INTERVALS` | 10 | Proposal ticks without finalization before fork resolution |
 | `MAX_ROUND_LAG` | 5 | Max rounds behind peers before triggering view change |
+| `PEER_EXCHANGE_INTERVAL_MS` | 60,000 | Interval between peer discovery gossip rounds |
+| `PEER_DISCOVERY_MAX` | 5 | Max new peers to connect per discovery round |
+| `DANDELION_STEM_HOPS` | 2 | Stem-phase hops before fluff broadcast |
+| `DANDELION_TIMEOUT_MS` | 5,000 | Max stem phase duration before forced fluff |
+| `PEER_INITIAL_REPUTATION` | 100 | Starting reputation score for new peers |
+| `PEER_BAN_THRESHOLD` | 20 | Reputation below which peers are temp-banned |
+| `PEER_BAN_DURATION_SECS` | 3,600 | Duration of temporary peer ban (1 hour) |
+| `PEER_PENALTY_RATE_LIMIT` | 10 | Reputation penalty for rate limit violation |
+| `PEER_PENALTY_INVALID_MSG` | 20 | Reputation penalty for invalid message |
+| `PEER_PENALTY_HANDSHAKE_FAIL` | 30 | Reputation penalty for handshake failure |
+| `PRUNING_RETAIN_EPOCHS` | 100 | Epochs of finalized vertices retained in memory |
+| `PROTOCOL_VERSION_ID` | 1 | Current protocol version for vertex signaling |
+| `UPGRADE_THRESHOLD` | 75% | Signal threshold for protocol upgrade activation |
 
 ## Dependencies
 
@@ -505,6 +582,9 @@ Proves in zero knowledge:
 | `subtle` | Constant-time comparison for cryptographic checks |
 | `reqwest` | HTTP client (rustls) for wallet RPC communication |
 | `askama` + `askama_web` | Type-safe compiled HTML templates for wallet web UI |
+| `tokio-util` | Graceful shutdown via `CancellationToken` |
+| `toml` | TOML config file parsing |
+| `rayon` | Parallel proof verification for vertex validation |
 
 ## Security Model
 
@@ -578,12 +658,19 @@ All transaction validity is verified via zk-STARKs:
 - **Bounded DAG traversal** — ancestor queries are depth-bounded (default `2 * EPOCH_LENGTH`), preventing unbounded memory usage from deep graph exploration
 - **Secret key encapsulation** — `SigningSecretKey` and `KemSecretKey` inner bytes are `pub(crate)`, preventing external crates from directly reading secret key material
 - **RPC localhost binding** — the RPC server binds to `127.0.0.1` by default, requiring explicit opt-in (`--rpc-host 0.0.0.0`) for network exposure
+- **Wallet recovery phrases** — 24-word BIP39 mnemonic with BLAKE3 checksum; key material encrypted with a BLAKE3-derived keystream. Both the phrase and the encrypted backup file are required for recovery, preventing single-point-of-failure key loss
+- **Sled-backed nullifier storage** — nullifier lookups check in-memory set first, then fall back to sled, allowing the nullifier set to scale beyond available RAM
+- **Parallel proof verification** — vertex validation uses `rayon::par_iter()` for independent transaction proof verification, with sequential state mutation, maintaining correctness while improving throughput
+- **Dandelion++ sender privacy** — new transactions propagate through a stem phase (private forwarding to single peers) before fluff (broadcast), obscuring the originating node
+- **Connection diversity** — inbound and outbound peer slots are tracked separately, reserving half of max peers for each direction, preventing eclipse attacks via inbound slot exhaustion
+- **Peer reputation and banning** — peers accumulate reputation penalties for rate limit violations, invalid messages, and handshake failures; peers below threshold are temporarily banned (1 hour) with bans persisted to storage
+- **DAG memory pruning** — finalized vertices older than `PRUNING_RETAIN_EPOCHS` are pruned from in-memory maps on epoch transition, preventing unbounded memory growth while retaining data in sled for sync
+- **Protocol version signaling** — vertices carry a protocol version; upgrade activation requires 75% of signals in an epoch, with a two-epoch grace period before enforcement
 
 ## Production Roadmap
 
-Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with expiry eviction, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI). A production deployment would additionally require:
+Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
-- **Peer reputation and discovery** — DHT-based peer discovery, reputation scoring, and ban management
 - **Wallet GUI** — graphical interface for non-technical users
 - **Formal security audit** — cryptographic protocol review and implementation audit
 

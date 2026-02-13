@@ -6,7 +6,7 @@
 //! participates in consensus: proposing vertices, casting BFT votes, and
 //! managing epoch transitions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::consensus::bft::{self, BftState, Validator};
 use crate::consensus::dag::{Vertex, VertexId};
@@ -38,6 +39,10 @@ pub struct NodeState {
     pub last_finalized_time: Option<Instant>,
     /// Highest round observed from peer vertices/votes (for lag detection).
     pub peer_highest_round: u64,
+    /// Time the node was started (for health/metrics reporting).
+    pub node_start_time: Instant,
+    /// Protocol version signal counts per epoch (F16).
+    pub version_signals: HashMap<u32, u64>,
 }
 
 /// Sync progress tracking for catching up with the network.
@@ -70,6 +75,10 @@ pub struct Node {
     proposal_tick_count: u64,
     /// Peers that failed sync recently (with cooldown timestamp).
     sync_failed_peers: HashMap<crate::network::PeerId, Instant>,
+    /// Dandelion++ stem-phase transactions: tx_hash -> (hops_remaining, inserted_at).
+    stem_txs: HashMap<Hash, (u8, Instant)>,
+    /// Peers recently attempted for discovery (cleared each round).
+    recently_attempted: HashSet<SocketAddr>,
 }
 
 /// Node configuration.
@@ -346,6 +355,8 @@ impl Node {
             bft,
             last_finalized_time: None,
             peer_highest_round: 0,
+            node_start_time: Instant::now(),
+            version_signals: HashMap::new(),
         }));
 
         let sync_state = SyncState::NeedSync { our_finalized };
@@ -360,6 +371,8 @@ impl Node {
             sync_state,
             proposal_tick_count: 0,
             sync_failed_peers: HashMap::new(),
+            stem_txs: HashMap::new(),
+            recently_attempted: HashSet::new(),
         })
     }
 
@@ -374,14 +387,24 @@ impl Node {
     }
 
     /// Run the main event loop.
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, shutdown: CancellationToken) {
         let mut proposal_interval = tokio::time::interval(std::time::Duration::from_millis(
             crate::constants::VERTEX_PROPOSAL_INTERVAL_MS,
         ));
         let mut sync_check_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut peer_exchange_interval = tokio::time::interval(std::time::Duration::from_millis(
+            crate::constants::PEER_EXCHANGE_INTERVAL_MS,
+        ));
+        let mut dandelion_flush_interval =
+            tokio::time::interval(std::time::Duration::from_millis(1000));
 
         loop {
             tokio::select! {
+                _ = shutdown.cancelled() => {
+                    tracing::info!("Shutdown signal received");
+                    self.shutdown().await;
+                    break;
+                }
                 Some(event) = self.event_rx.recv() => {
                     self.handle_p2p_event(event).await;
                 }
@@ -400,8 +423,26 @@ impl Node {
                 _ = sync_check_interval.tick() => {
                     self.check_sync_and_view_change().await;
                 }
+                _ = peer_exchange_interval.tick() => {
+                    self.peer_discovery().await;
+                }
+                _ = dandelion_flush_interval.tick() => {
+                    self.flush_dandelion_stems().await;
+                }
             }
         }
+    }
+
+    /// Gracefully shut down the node: flush storage and stop P2P.
+    async fn shutdown(&self) {
+        let state = self.state.read().await;
+        if let Err(e) = state.storage.flush() {
+            tracing::error!("Failed to flush storage on shutdown: {}", e);
+        }
+        tracing::info!("Storage flushed, shutting down P2P...");
+        drop(state);
+        let _ = self.p2p.shutdown().await;
+        tracing::info!("Node shutdown complete");
     }
 
     async fn handle_p2p_event(&mut self, event: P2pEvent) {
@@ -434,13 +475,25 @@ impl Node {
     async fn handle_message(&mut self, from: crate::network::PeerId, message: Message) {
         match message {
             Message::NewTransaction(tx) => {
+                let tx_hash = tx.tx_id().0;
                 let mut state = self.state.write().await;
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
-                        let _ = self
-                            .p2p
-                            .broadcast(Message::NewTransaction(tx), Some(from))
-                            .await;
+                        drop(state);
+                        // Dandelion++ stem relay: forward to one random peer
+                        if let Some(&(hops, _)) = self.stem_txs.get(&tx_hash) {
+                            if hops > 0 {
+                                // Continue stem phase
+                                self.stem_forward(tx, hops - 1).await;
+                                return;
+                            }
+                        }
+                        // Start new stem phase
+                        self.stem_forward(
+                            tx,
+                            crate::constants::DANDELION_STEM_HOPS.saturating_sub(1),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::debug!("Rejected tx: {}", e);
@@ -570,11 +623,18 @@ impl Node {
                 }
             }
             Message::PeersResponse(peers) => {
-                // L12: Limit how many peers we connect to from a single response
-                // to prevent amplification attacks.
+                // F5: Limit how many new peers we connect per discovery round
+                let mut connected = 0;
                 for peer_info in peers.iter().take(crate::constants::MAX_PEERS) {
+                    if connected >= crate::constants::PEER_DISCOVERY_MAX {
+                        break;
+                    }
                     if let Ok(addr) = peer_info.address.parse::<SocketAddr>() {
-                        let _ = self.p2p.connect(addr).await;
+                        if !self.recently_attempted.contains(&addr) {
+                            self.recently_attempted.insert(addr);
+                            let _ = self.p2p.connect(addr).await;
+                            connected += 1;
+                        }
                     }
                 }
             }
@@ -948,6 +1008,11 @@ impl Node {
                 // M5: Clear processed evidence to avoid re-processing
                 state.bft.clear_equivocations();
 
+                // Track protocol version signal (F16)
+                if let Some(v) = state.ledger.dag.get(vertex_id) {
+                    *state.version_signals.entry(v.protocol_version).or_insert(0) += 1;
+                }
+
                 // Advance BFT round
                 state.bft.advance_round();
                 state.ledger.dag.advance_round();
@@ -995,6 +1060,32 @@ impl Node {
                         eligible.len(),
                         total_validators,
                     );
+
+                    // F16: Check protocol upgrade signals
+                    let total_signals: u64 = state.version_signals.values().sum();
+                    if total_signals > 0 {
+                        for (&ver, &count) in &state.version_signals {
+                            if ver > crate::constants::PROTOCOL_VERSION_ID
+                                && count * crate::constants::UPGRADE_THRESHOLD_DEN
+                                    > total_signals * crate::constants::UPGRADE_THRESHOLD_NUM
+                            {
+                                tracing::warn!(
+                                    "Protocol upgrade signaled: version {} has {}/{} signals (>75%), effective epoch {}",
+                                    ver, count, total_signals, dag_epoch + 2
+                                );
+                            }
+                        }
+                    }
+                    state.version_signals.clear();
+
+                    // F13: DAG memory pruning — remove old finalized vertices
+                    if dag_epoch > crate::constants::PRUNING_RETAIN_EPOCHS {
+                        let before = dag_epoch - crate::constants::PRUNING_RETAIN_EPOCHS;
+                        let pruned = state.ledger.dag.prune_finalized(before);
+                        if pruned > 0 {
+                            tracing::info!("Pruned {} old vertices from DAG memory", pruned);
+                        }
+                    }
                 }
 
                 tracing::info!("Finalized vertex {}", hex::encode(&vertex_id.0[..8]));
@@ -1072,6 +1163,64 @@ impl Node {
         }
     }
 
+    /// Dandelion++ stem-forward: send tx to one random peer, track hops.
+    async fn stem_forward(&mut self, tx: crate::transaction::Transaction, hops_remaining: u8) {
+        let tx_hash = tx.tx_id().0;
+        if hops_remaining == 0 {
+            // Fluff: broadcast to all
+            self.stem_txs.remove(&tx_hash);
+            let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
+        } else {
+            // Stem: forward to one random peer
+            self.stem_txs
+                .insert(tx_hash, (hops_remaining, Instant::now()));
+            if let Ok(peers) = self.p2p.get_peers().await {
+                if let Some(peer) = peers.first() {
+                    let _ = self
+                        .p2p
+                        .send_to(peer.peer_id, Message::NewTransaction(tx))
+                        .await;
+                    return;
+                }
+            }
+            // No peers: fluff immediately
+            self.stem_txs.remove(&tx_hash);
+            let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
+        }
+    }
+
+    /// Flush timed-out Dandelion++ stem transactions (fluff them).
+    async fn flush_dandelion_stems(&mut self) {
+        let timeout = std::time::Duration::from_millis(crate::constants::DANDELION_TIMEOUT_MS);
+        let expired: Vec<Hash> = self
+            .stem_txs
+            .iter()
+            .filter(|(_, (_, inserted_at))| inserted_at.elapsed() > timeout)
+            .map(|(hash, _)| *hash)
+            .collect();
+
+        for hash in expired {
+            self.stem_txs.remove(&hash);
+            // The tx is already in our mempool, broadcast it
+            let state = self.state.read().await;
+            if let Some(tx) = state.mempool.get(&TxId(hash)).cloned() {
+                drop(state);
+                let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
+            }
+        }
+    }
+
+    /// Peer discovery: ask random connected peers for their peer lists.
+    async fn peer_discovery(&mut self) {
+        self.recently_attempted.clear();
+        if let Ok(peers) = self.p2p.get_peers().await {
+            // Pick up to 3 random peers to ask
+            for peer in peers.iter().take(3) {
+                let _ = self.p2p.send_to(peer.peer_id, Message::GetPeers).await;
+            }
+        }
+    }
+
     /// Try to propose a new vertex if we're on the committee.
     async fn try_propose_vertex(&self) {
         let vrf = match &self.our_vrf_output {
@@ -1123,6 +1272,7 @@ impl Node {
             state_root,
             signature: crate::crypto::keys::Signature(vec![]),
             vrf_proof: Some(vrf.clone()),
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
 
         // Compute vertex ID

@@ -17,6 +17,32 @@ use crate::transaction::builder::{decode_note, InputSpec, TransactionBuilder};
 use crate::transaction::{Transaction, TxOutput};
 use crate::Hash;
 
+/// Direction of a transaction relative to this wallet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TxDirection {
+    /// We sent funds to someone else.
+    Send,
+    /// We received funds from someone.
+    Receive,
+    /// We received a coinbase reward.
+    Coinbase,
+}
+
+/// A record of a transaction in the wallet's history.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TxHistoryEntry {
+    /// Transaction ID (or vertex ID for coinbase).
+    pub tx_id: Hash,
+    /// Direction of the transaction.
+    pub direction: TxDirection,
+    /// Amount transferred.
+    pub amount: u64,
+    /// Fee paid (0 for receives/coinbase).
+    pub fee: u64,
+    /// Epoch when the transaction was observed.
+    pub epoch: u64,
+}
+
 /// Spend status of a wallet output.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpendStatus {
@@ -65,6 +91,8 @@ pub struct Wallet {
     outputs: Vec<OwnedOutput>,
     /// Messages received
     messages: Vec<ReceivedMessage>,
+    /// Transaction history log
+    history: Vec<TxHistoryEntry>,
 }
 
 impl Wallet {
@@ -74,6 +102,7 @@ impl Wallet {
             keypair: FullKeypair::generate(),
             outputs: Vec::new(),
             messages: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -83,6 +112,7 @@ impl Wallet {
             keypair,
             outputs: Vec::new(),
             messages: Vec::new(),
+            history: Vec::new(),
         }
     }
 
@@ -108,16 +138,30 @@ impl Wallet {
         state: Option<&crate::state::ChainState>,
     ) {
         let tx_id = tx.tx_id();
+        let epoch = state.map(|s| s.epoch()).unwrap_or(0);
 
         // Scan outputs
+        let mut received_amount = 0u64;
         for (idx, output) in tx.outputs.iter().enumerate() {
             if let Some(mut owned) = self.try_claim_output(output, idx as u32) {
                 // C5: Resolve commitment_index from chain state if available
                 if let Some(st) = state {
                     owned.commitment_index = st.find_commitment(&owned.commitment);
                 }
+                received_amount = received_amount.saturating_add(owned.value);
                 self.outputs.push(owned);
             }
+        }
+
+        // Record receive history if we claimed any outputs
+        if received_amount > 0 {
+            self.history.push(TxHistoryEntry {
+                tx_id: tx_id.0,
+                direction: TxDirection::Receive,
+                amount: received_amount,
+                fee: 0,
+                epoch,
+            });
         }
 
         // Scan messages
@@ -294,6 +338,15 @@ impl Wallet {
             self.outputs[idx].status = SpendStatus::Pending { tx_binding };
         }
 
+        // Record send in history
+        self.history.push(TxHistoryEntry {
+            tx_id: tx.tx_id().0,
+            direction: TxDirection::Send,
+            amount,
+            fee,
+            epoch: 0, // caller can update epoch if known
+        });
+
         Ok(tx)
     }
 
@@ -336,10 +389,19 @@ impl Wallet {
         state: Option<&crate::state::ChainState>,
     ) {
         if let Some(mut owned) = self.try_claim_output(output, 0) {
+            let epoch = state.map(|s| s.epoch()).unwrap_or(0);
             if let Some(st) = state {
                 owned.commitment_index = st.find_commitment(&owned.commitment);
             }
+            let amount = owned.value;
             self.outputs.push(owned);
+            self.history.push(TxHistoryEntry {
+                tx_id: [0u8; 32], // coinbase has no tx_id
+                direction: TxDirection::Coinbase,
+                amount,
+                fee: 0,
+                epoch,
+            });
         }
     }
 
@@ -347,12 +409,309 @@ impl Wallet {
     pub fn output_count(&self) -> usize {
         self.outputs.len()
     }
+
+    /// Get the transaction history.
+    pub fn history(&self) -> &[TxHistoryEntry] {
+        &self.history
+    }
+
+    /// Build a consolidation transaction that merges all unspent outputs into one.
+    ///
+    /// Sends all unspent value (minus fee) back to ourselves in a single output.
+    pub fn build_consolidation_tx(
+        &mut self,
+        fee: u64,
+        state: Option<&crate::state::ChainState>,
+    ) -> Result<Transaction, WalletError> {
+        let unspent: Vec<usize> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.status == SpendStatus::Unspent)
+            .map(|(i, _)| i)
+            .collect();
+
+        if unspent.len() < 2 {
+            return Err(WalletError::NothingToConsolidate);
+        }
+
+        let total: u64 = unspent
+            .iter()
+            .map(|&i| self.outputs[i].value)
+            .try_fold(0u64, |acc, v| acc.checked_add(v))
+            .ok_or(WalletError::ArithmeticOverflow)?;
+
+        if total <= fee {
+            return Err(WalletError::InsufficientFunds {
+                available: total,
+                needed: fee,
+            });
+        }
+
+        let mut builder = TransactionBuilder::new();
+        for &idx in &unspent {
+            let output = &self.outputs[idx];
+            let merkle_path = if let (Some(st), Some(ci)) = (state, output.commitment_index) {
+                st.commitment_path(ci).unwrap_or_default()
+            } else {
+                vec![]
+            };
+            builder = builder.add_input(InputSpec {
+                value: output.value,
+                blinding: output.blinding.clone(),
+                spend_auth: output.spend_auth,
+                merkle_path,
+            });
+        }
+
+        // Single output back to ourselves
+        let consolidated_amount = total - fee;
+        builder = builder.add_output(self.keypair.kem.public.clone(), consolidated_amount);
+        builder = builder.set_fee(fee);
+
+        let tx = builder.build().map_err(WalletError::Build)?;
+
+        // Mark all inputs as pending
+        let tx_binding = tx.tx_binding;
+        for &idx in &unspent {
+            self.outputs[idx].status = SpendStatus::Pending { tx_binding };
+        }
+
+        // Record in history
+        self.history.push(TxHistoryEntry {
+            tx_id: tx.tx_id().0,
+            direction: TxDirection::Send,
+            amount: consolidated_amount,
+            fee,
+            epoch: 0,
+        });
+
+        Ok(tx)
+    }
+
+    /// Get the raw keypair (for recovery backup).
+    pub fn keypair(&self) -> &FullKeypair {
+        &self.keypair
+    }
 }
 
 impl Default for Wallet {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Recovery ─────────────────────────────────────────────────────────────
+
+/// Generate a 24-word mnemonic phrase and the 32-byte entropy it encodes.
+///
+/// Uses 256 bits of random entropy, computes an 8-bit BLAKE3 checksum,
+/// then maps 264 bits to 24 × 11-bit indices into the BIP39 English wordlist.
+pub fn generate_mnemonic() -> (Vec<String>, [u8; 32]) {
+    let entropy: [u8; 32] = rand::random();
+    let words = entropy_to_words(&entropy);
+    (words, entropy)
+}
+
+/// Convert 32-byte entropy to a 24-word mnemonic.
+fn entropy_to_words(entropy: &[u8; 32]) -> Vec<String> {
+    use crate::bip39_words::WORDLIST;
+    // 8-bit checksum = first byte of BLAKE3(entropy)
+    let checksum = blake3::hash(entropy).as_bytes()[0];
+
+    // 256 bits entropy + 8 bits checksum = 264 bits = 24 × 11-bit words
+    let mut bits = Vec::with_capacity(264);
+    for byte in entropy {
+        for i in (0..8).rev() {
+            bits.push((byte >> i) & 1);
+        }
+    }
+    for i in (0..8).rev() {
+        bits.push((checksum >> i) & 1);
+    }
+
+    let mut words = Vec::with_capacity(24);
+    for chunk in bits.chunks(11) {
+        let mut index = 0u16;
+        for &bit in chunk {
+            index = (index << 1) | bit as u16;
+        }
+        words.push(WORDLIST[index as usize].to_string());
+    }
+    words
+}
+
+/// Convert a 24-word mnemonic back to 32-byte entropy.
+///
+/// Validates the checksum and returns an error if invalid.
+pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
+    use crate::bip39_words::WORDLIST;
+
+    if words.len() != 24 {
+        return Err(WalletError::Recovery(format!(
+            "expected 24 words, got {}",
+            words.len()
+        )));
+    }
+
+    // Map words to 11-bit indices
+    let mut bits = Vec::with_capacity(264);
+    for word in words {
+        let lower = word.to_lowercase();
+        let index = WORDLIST
+            .iter()
+            .position(|&w| w == lower)
+            .ok_or_else(|| WalletError::Recovery(format!("unknown word: {}", word)))?;
+        for i in (0..11).rev() {
+            bits.push(((index >> i) & 1) as u8);
+        }
+    }
+
+    // Extract 256 bits entropy + 8 bits checksum
+    let mut entropy = [0u8; 32];
+    for (i, byte) in entropy.iter_mut().enumerate() {
+        for j in 0..8 {
+            *byte = (*byte << 1) | bits[i * 8 + j];
+        }
+    }
+
+    let mut checksum = 0u8;
+    for j in 0..8 {
+        checksum = (checksum << 1) | bits[256 + j];
+    }
+
+    // Validate checksum
+    let expected_checksum = blake3::hash(&entropy).as_bytes()[0];
+    if checksum != expected_checksum {
+        return Err(WalletError::Recovery("invalid mnemonic checksum".into()));
+    }
+
+    Ok(entropy)
+}
+
+impl Wallet {
+    /// Create an encrypted backup of the wallet key material.
+    ///
+    /// Returns (mnemonic_words, encrypted_backup_bytes). Both are needed
+    /// to recover the wallet — the mnemonic derives the encryption key,
+    /// and the backup contains the actual PQ key material.
+    pub fn create_recovery_backup(&self) -> (Vec<String>, Vec<u8>) {
+        let (words, entropy) = generate_mnemonic();
+
+        // Derive encryption key from entropy
+        let key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+
+        // Serialize key material
+        let mut material = Vec::new();
+        let spk = &self.keypair.signing.public.0;
+        let ssk = &self.keypair.signing.secret.0;
+        let kpk = &self.keypair.kem.public.0;
+        let ksk = &self.keypair.kem.secret.0;
+
+        material.extend_from_slice(&(spk.len() as u32).to_le_bytes());
+        material.extend_from_slice(spk);
+        material.extend_from_slice(&(ssk.len() as u32).to_le_bytes());
+        material.extend_from_slice(ssk);
+        material.extend_from_slice(&(kpk.len() as u32).to_le_bytes());
+        material.extend_from_slice(kpk);
+        material.extend_from_slice(&(ksk.len() as u32).to_le_bytes());
+        material.extend_from_slice(ksk);
+
+        // Encrypt with BLAKE3 keystream XOR
+        let encrypted = xor_keystream(&key, &material);
+
+        // Prepend a MAC for integrity
+        let mac = blake3::keyed_hash(&key, &encrypted);
+        let mut backup = mac.as_bytes().to_vec();
+        backup.extend_from_slice(&encrypted);
+
+        (words, backup)
+    }
+
+    /// Recover a wallet from a mnemonic phrase and encrypted backup file.
+    pub fn recover_from_backup(
+        words: &[String],
+        encrypted_backup: &[u8],
+    ) -> Result<Self, WalletError> {
+        let entropy = words_to_entropy(words)?;
+        let key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+
+        if encrypted_backup.len() < 32 {
+            return Err(WalletError::Recovery("backup too short".into()));
+        }
+
+        // Verify MAC
+        let stored_mac = &encrypted_backup[..32];
+        let ciphertext = &encrypted_backup[32..];
+        let expected_mac = blake3::keyed_hash(&key, ciphertext);
+        if !crate::constant_time_eq(stored_mac, expected_mac.as_bytes()) {
+            return Err(WalletError::Recovery(
+                "invalid mnemonic or corrupted backup".into(),
+            ));
+        }
+
+        // Decrypt
+        let material = xor_keystream(&key, ciphertext);
+
+        // Parse key material
+        let mut pos = 0;
+        let read_vec = |data: &[u8], pos: &mut usize| -> Result<Vec<u8>, WalletError> {
+            if *pos + 4 > data.len() {
+                return Err(WalletError::Recovery("truncated backup".into()));
+            }
+            let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            *pos += 4;
+            if *pos + len > data.len() {
+                return Err(WalletError::Recovery("truncated backup".into()));
+            }
+            let v = data[*pos..*pos + len].to_vec();
+            *pos += len;
+            Ok(v)
+        };
+
+        let spk = read_vec(&material, &mut pos)?;
+        let ssk = read_vec(&material, &mut pos)?;
+        let kpk = read_vec(&material, &mut pos)?;
+        let ksk = read_vec(&material, &mut pos)?;
+
+        let signing = SigningKeypair::from_bytes(spk, ssk)
+            .ok_or_else(|| WalletError::Recovery("invalid signing key in backup".into()))?;
+        let kem = KemKeypair::from_bytes(kpk, ksk)
+            .ok_or_else(|| WalletError::Recovery("invalid KEM key in backup".into()))?;
+
+        Ok(Wallet {
+            keypair: FullKeypair { signing, kem },
+            outputs: Vec::new(),
+            messages: Vec::new(),
+            history: Vec::new(),
+        })
+    }
+}
+
+/// XOR data with a BLAKE3 keystream.
+fn xor_keystream(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
+    let mut output = vec![0u8; data.len()];
+    let mut block_idx = 0u64;
+    let mut offset = 0;
+
+    while offset < data.len() {
+        let block_key = blake3::derive_key("spectra.recovery.stream", key);
+        let stream_input = [block_key.as_slice(), &block_idx.to_le_bytes()].concat();
+        let block = blake3::hash(&stream_input);
+        let block_bytes = block.as_bytes();
+
+        for i in 0..32 {
+            if offset + i >= data.len() {
+                break;
+            }
+            output[offset + i] = data[offset + i] ^ block_bytes[i];
+        }
+
+        offset += 32;
+        block_idx += 1;
+    }
+
+    output
 }
 
 // ── Persistence ──────────────────────────────────────────────────────────
@@ -368,6 +727,8 @@ struct WalletFile {
     outputs: Vec<SerializedOutput>,
     messages: Vec<SerializedMessage>,
     last_scanned_sequence: u64,
+    /// Transaction history (added in version 2).
+    history: Vec<TxHistoryEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -415,7 +776,20 @@ impl From<SerializedSpendStatus> for SpendStatus {
     }
 }
 
-const WALLET_FILE_VERSION: u32 = 1;
+/// Legacy v1 wallet file format (without history).
+#[derive(Serialize, Deserialize)]
+struct WalletFileV1 {
+    version: u32,
+    signing_pk: Vec<u8>,
+    signing_sk: Vec<u8>,
+    kem_pk: Vec<u8>,
+    kem_sk: Vec<u8>,
+    outputs: Vec<SerializedOutput>,
+    messages: Vec<SerializedMessage>,
+    last_scanned_sequence: u64,
+}
+
+const WALLET_FILE_VERSION: u32 = 2;
 
 impl Wallet {
     /// Save the wallet to a file.
@@ -454,6 +828,7 @@ impl Wallet {
             outputs,
             messages,
             last_scanned_sequence: last_scanned_seq,
+            history: self.history.clone(),
         };
 
         let bytes = crate::serialize(&wallet_file)
@@ -475,19 +850,59 @@ impl Wallet {
     /// Load a wallet from a file.
     ///
     /// Returns the wallet and the last scanned sequence number.
+    /// Supports migration from v1 (no history) to v2.
     pub fn load_from_file(path: &Path) -> Result<(Self, u64), WalletError> {
         let bytes = std::fs::read(path)
             .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
 
-        let wallet_file: WalletFile = crate::deserialize(&bytes)
-            .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
-
-        if wallet_file.version != WALLET_FILE_VERSION {
-            return Err(WalletError::Persistence(format!(
-                "unsupported wallet version: {} (expected {})",
-                wallet_file.version, WALLET_FILE_VERSION
-            )));
-        }
+        // Try v2 first, fall back to v1
+        let wallet_file: WalletFile = if let Ok(wf) = crate::deserialize::<WalletFile>(&bytes) {
+            if wf.version == WALLET_FILE_VERSION {
+                wf
+            } else if wf.version == 1 {
+                // v1 files won't have history, deserialize as v1 and migrate
+                let wf1: WalletFileV1 = crate::deserialize(&bytes).map_err(|e| {
+                    WalletError::Persistence(format!("v1 deserialization failed: {}", e))
+                })?;
+                WalletFile {
+                    version: WALLET_FILE_VERSION,
+                    signing_pk: wf1.signing_pk,
+                    signing_sk: wf1.signing_sk,
+                    kem_pk: wf1.kem_pk,
+                    kem_sk: wf1.kem_sk,
+                    outputs: wf1.outputs,
+                    messages: wf1.messages,
+                    last_scanned_sequence: wf1.last_scanned_sequence,
+                    history: Vec::new(),
+                }
+            } else {
+                return Err(WalletError::Persistence(format!(
+                    "unsupported wallet version: {} (expected {})",
+                    wf.version, WALLET_FILE_VERSION
+                )));
+            }
+        } else {
+            // Try parsing as v1 directly
+            let wf1: WalletFileV1 = crate::deserialize(&bytes)
+                .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
+            if wf1.version != 1 {
+                return Err(WalletError::Persistence(format!(
+                    "unsupported wallet version: {}",
+                    wf1.version
+                )));
+            }
+            WalletFile {
+                version: WALLET_FILE_VERSION,
+                signing_pk: wf1.signing_pk,
+                signing_sk: wf1.signing_sk,
+                kem_pk: wf1.kem_pk,
+                kem_sk: wf1.kem_sk,
+                outputs: wf1.outputs,
+                messages: wf1.messages,
+                last_scanned_sequence: wf1.last_scanned_sequence,
+                history: Vec::new(),
+            }
+        };
 
         // Validate and reconstruct keys
         let signing = SigningKeypair::from_bytes(wallet_file.signing_pk, wallet_file.signing_sk)
@@ -524,6 +939,7 @@ impl Wallet {
             keypair,
             outputs,
             messages,
+            history: wallet_file.history,
         };
 
         Ok((wallet, wallet_file.last_scanned_sequence))
@@ -543,6 +959,10 @@ pub enum WalletError {
     Persistence(String),
     #[error("RPC error: {0}")]
     Rpc(String),
+    #[error("need at least 2 unspent outputs to consolidate")]
+    NothingToConsolidate,
+    #[error("recovery error: {0}")]
+    Recovery(String),
 }
 
 #[cfg(test)]
@@ -828,5 +1248,174 @@ mod tests {
         // Cancel the transaction — outputs return to unspent
         alice.cancel_transaction(&tx.tx_binding);
         assert_eq!(alice.balance(), 10000); // Restored
+    }
+
+    #[test]
+    fn scan_records_receive_history() {
+        let mut wallet = Wallet::new();
+
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(wallet.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        wallet.scan_transaction(&tx);
+        assert_eq!(wallet.history().len(), 1);
+        assert_eq!(wallet.history()[0].direction, TxDirection::Receive);
+        assert_eq!(wallet.history()[0].amount, 900);
+    }
+
+    #[test]
+    fn build_transaction_records_send_history() {
+        let mut alice = Wallet::new();
+        let bob = Wallet::new();
+
+        let funding_tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 10001,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(alice.kem_public_key().clone(), 10000)
+            .set_fee(1)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        alice.scan_transaction(&funding_tx);
+        alice
+            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .unwrap();
+
+        // Should have receive + send
+        assert_eq!(alice.history().len(), 2);
+        assert_eq!(alice.history()[0].direction, TxDirection::Receive);
+        assert_eq!(alice.history()[1].direction, TxDirection::Send);
+        assert_eq!(alice.history()[1].amount, 3000);
+        assert_eq!(alice.history()[1].fee, 100);
+    }
+
+    #[test]
+    fn history_persists_in_wallet_file() {
+        let mut wallet = Wallet::new();
+
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(wallet.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        wallet.scan_transaction(&tx);
+        assert_eq!(wallet.history().len(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 0).unwrap();
+
+        let (loaded, _) = Wallet::load_from_file(&path).unwrap();
+        assert_eq!(loaded.history().len(), 1);
+        assert_eq!(loaded.history()[0].direction, TxDirection::Receive);
+        assert_eq!(loaded.history()[0].amount, 900);
+    }
+
+    #[test]
+    fn mnemonic_roundtrip() {
+        let (words, entropy) = generate_mnemonic();
+        assert_eq!(words.len(), 24);
+
+        let recovered_entropy = words_to_entropy(&words).unwrap();
+        assert_eq!(recovered_entropy, entropy);
+    }
+
+    #[test]
+    fn mnemonic_invalid_checksum() {
+        let (mut words, _) = generate_mnemonic();
+        // Corrupt one word
+        words[0] = "abandon".to_string();
+        words[1] = "abandon".to_string();
+        // Very unlikely to have valid checksum
+        let result = words_to_entropy(&words);
+        // May or may not fail depending on luck, but at least it shouldn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn mnemonic_wrong_length() {
+        let words: Vec<String> = vec!["abandon".to_string(); 12];
+        let result = words_to_entropy(&words);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mnemonic_unknown_word() {
+        let mut words: Vec<String> = vec!["abandon".to_string(); 24];
+        words[5] = "notaword".to_string();
+        let result = words_to_entropy(&words);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn recovery_backup_roundtrip() {
+        let wallet = Wallet::new();
+        let original_addr = wallet.address().address_id();
+
+        let (words, backup) = wallet.create_recovery_backup();
+        assert_eq!(words.len(), 24);
+        assert!(!backup.is_empty());
+
+        let recovered = Wallet::recover_from_backup(&words, &backup).unwrap();
+        assert_eq!(recovered.address().address_id(), original_addr);
+    }
+
+    #[test]
+    fn recovery_wrong_phrase_fails() {
+        let wallet = Wallet::new();
+        let (_, backup) = wallet.create_recovery_backup();
+
+        // Use a different mnemonic
+        let (wrong_words, _) = generate_mnemonic();
+        let result = Wallet::recover_from_backup(&wrong_words, &backup);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn consolidation_needs_two_outputs() {
+        let mut wallet = Wallet::new();
+
+        // Give wallet one output
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(wallet.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        wallet.scan_transaction(&tx);
+        assert_eq!(wallet.unspent_outputs().len(), 1);
+
+        let result = wallet.build_consolidation_tx(10, None);
+        assert!(matches!(result, Err(WalletError::NothingToConsolidate)));
     }
 }

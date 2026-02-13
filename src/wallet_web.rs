@@ -152,6 +152,21 @@ struct ErrorTemplate {
     message: String,
 }
 
+struct HistoryEntryDisplay {
+    direction: String,
+    amount: u64,
+    fee: u64,
+    tx_id_hex: String,
+    epoch: u64,
+}
+
+#[derive(Template, WebTemplate)]
+#[template(path = "history.html")]
+struct HistoryTemplate {
+    active_tab: &'static str,
+    entries: Vec<HistoryEntryDisplay>,
+}
+
 fn error_page(msg: impl Into<String>) -> ErrorTemplate {
     ErrorTemplate {
         active_tab: "",
@@ -180,6 +195,7 @@ pub fn router(state: WalletWebState) -> Router {
         .route("/address/export", get(address_export))
         .route("/send", get(send_page).post(send_action))
         .route("/messages", get(messages_page))
+        .route("/history", get(history_page))
         .route("/scan", post(scan_action))
         .with_state(state)
 }
@@ -501,6 +517,42 @@ async fn messages_page(State(state): State<WalletWebState>) -> Response {
     MessagesTemplate {
         active_tab: "messages",
         messages,
+    }
+    .into_response()
+}
+
+async fn history_page(State(state): State<WalletWebState>) -> Response {
+    if !state.wallet_exists() {
+        return Redirect::to("/init").into_response();
+    }
+
+    let (wallet, _) = match state.load_wallet().await {
+        Ok(Some(w)) => w,
+        Ok(None) => return Redirect::to("/init").into_response(),
+        Err(e) => return error_page(e.to_string()).into_response(),
+    };
+
+    use crate::wallet::TxDirection;
+    let entries: Vec<HistoryEntryDisplay> = wallet
+        .history()
+        .iter()
+        .rev()
+        .map(|e| HistoryEntryDisplay {
+            direction: match e.direction {
+                TxDirection::Send => "Send".to_string(),
+                TxDirection::Receive => "Receive".to_string(),
+                TxDirection::Coinbase => "Coinbase".to_string(),
+            },
+            amount: e.amount,
+            fee: e.fee,
+            tx_id_hex: hex::encode(&e.tx_id[..8]),
+            epoch: e.epoch,
+        })
+        .collect();
+
+    HistoryTemplate {
+        active_tab: "history",
+        entries,
     }
     .into_response()
 }

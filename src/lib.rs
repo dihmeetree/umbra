@@ -8,6 +8,8 @@
 //! - **Encrypted messaging** — send arbitrary encrypted messages within transactions
 //! - **Scalability** — DAG structure enables parallel transaction processing
 
+pub mod bip39_words;
+pub mod config;
 pub mod consensus;
 pub mod crypto;
 pub mod mempool;
@@ -96,6 +98,40 @@ pub mod constants {
     pub const VIEW_CHANGE_TIMEOUT_INTERVALS: u64 = 10;
     /// Maximum round lag from peers before triggering re-sync.
     pub const MAX_ROUND_LAG: u64 = 5;
+
+    /// Peer exchange interval in milliseconds (F5: peer discovery gossip).
+    pub const PEER_EXCHANGE_INTERVAL_MS: u64 = 60_000;
+    /// Maximum new peers to connect per discovery round (F5).
+    pub const PEER_DISCOVERY_MAX: usize = 5;
+
+    /// Number of Dandelion++ stem hops before fluffing (F6).
+    pub const DANDELION_STEM_HOPS: u8 = 2;
+    /// Dandelion++ stem timeout in milliseconds (F6).
+    pub const DANDELION_TIMEOUT_MS: u64 = 5_000;
+
+    /// Initial reputation score for new peers (F7).
+    pub const PEER_INITIAL_REPUTATION: i32 = 100;
+    /// Reputation threshold below which a peer is banned (F7).
+    pub const PEER_BAN_THRESHOLD: i32 = 20;
+    /// Duration of a peer ban in seconds (F7).
+    pub const PEER_BAN_DURATION_SECS: u64 = 3600;
+    /// Reputation penalty for a rate-limit violation (F7).
+    pub const PEER_PENALTY_RATE_LIMIT: i32 = 10;
+    /// Reputation penalty for an invalid message (F7).
+    pub const PEER_PENALTY_INVALID_MSG: i32 = 20;
+    /// Reputation penalty for a handshake failure (F7).
+    pub const PEER_PENALTY_HANDSHAKE_FAIL: i32 = 30;
+
+    /// Number of epochs of finalized data to retain in memory (F12).
+    pub const PRUNING_RETAIN_EPOCHS: u64 = 100;
+
+    /// Current protocol version for upgrade signaling (F16).
+    pub const PROTOCOL_VERSION_ID: u32 = 1;
+    /// Threshold fraction (numerator) for protocol upgrade activation (F16).
+    /// Activation requires > UPGRADE_THRESHOLD_NUM / UPGRADE_THRESHOLD_DEN signals.
+    pub const UPGRADE_THRESHOLD_NUM: u64 = 75;
+    /// Threshold fraction (denominator) for protocol upgrade activation (F16).
+    pub const UPGRADE_THRESHOLD_DEN: u64 = 100;
 
     /// Minimum transaction fee (in base units).
     ///

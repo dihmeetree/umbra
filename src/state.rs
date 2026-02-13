@@ -49,8 +49,12 @@ pub struct ChainState {
     commitments: Vec<Commitment>,
     /// Incremental depth-20 Merkle tree over commitments (Rescue Prime)
     commitment_tree: IncrementalMerkleTree,
-    /// Set of revealed nullifiers (spent outputs)
+    /// Set of revealed nullifiers (spent outputs) — in-memory cache
     nullifiers: NullifierSet,
+    /// Optional sled-backed nullifier storage for scalability (F12).
+    /// When present, new nullifiers are written to both memory and sled,
+    /// and `is_spent()` falls back to sled for lookups.
+    nullifier_storage: Option<sled::Tree>,
     /// Incremental hash accumulator over nullifiers (for state root)
     nullifier_hash: Hash,
     /// Registered validators
@@ -87,6 +91,7 @@ impl ChainState {
             commitments: Vec::new(),
             commitment_tree: IncrementalMerkleTree::new(),
             nullifiers: NullifierSet::new(),
+            nullifier_storage: None,
             nullifier_hash: [0u8; 32],
             validators: HashMap::new(),
             validator_bonds: HashMap::new(),
@@ -101,16 +106,30 @@ impl ChainState {
 
     /// Apply a finalized vertex to the state.
     ///
-    /// Uses two-pass validation: first validates all transactions without
-    /// mutating state, then applies them. Creates a coinbase output for the
-    /// vertex proposer containing the block reward plus transaction fees.
+    /// Uses two-pass validation: first validates all transactions in parallel
+    /// using rayon (F14), then applies them sequentially. Creates a coinbase
+    /// output for the vertex proposer containing the block reward plus
+    /// transaction fees.
     ///
     /// Returns the coinbase `TxOutput` if one was created (requires the
     /// proposer to be a registered validator with a KEM public key).
     pub fn apply_vertex(&mut self, vertex: &Vertex) -> Result<Option<TxOutput>, StateError> {
-        // H9: Pass 1 — validate all transactions without applying
-        for tx in &vertex.transactions {
-            self.validate_transaction(tx)?;
+        // H9: Pass 1 — validate all transactions without applying.
+        // F14: Use rayon parallel iteration for independent tx validation.
+        if vertex.transactions.len() > 1 {
+            use rayon::prelude::*;
+            let results: Vec<Result<(), StateError>> = vertex
+                .transactions
+                .par_iter()
+                .map(|tx| self.validate_transaction(tx))
+                .collect();
+            for r in results {
+                r?;
+            }
+        } else {
+            for tx in &vertex.transactions {
+                self.validate_transaction(tx)?;
+            }
         }
 
         // Record fees before applying transactions
@@ -298,6 +317,10 @@ impl ChainState {
     /// Record a nullifier as spent, updating the incremental hash accumulator.
     fn record_nullifier(&mut self, nullifier: Nullifier) {
         if self.nullifiers.insert(nullifier) {
+            // Persist to sled if available
+            if let Some(ref tree) = self.nullifier_storage {
+                let _ = tree.insert(nullifier.0, &[1u8]);
+            }
             // Update incremental hash: new = H(old || nullifier)
             self.nullifier_hash =
                 crate::hash_concat(&[b"spectra.nullifier_acc", &self.nullifier_hash, &nullifier.0]);
@@ -331,8 +354,17 @@ impl ChainState {
     }
 
     /// Check if a nullifier has been used.
+    ///
+    /// Checks in-memory set first, then falls back to sled storage if present.
     pub fn is_spent(&self, nullifier: &Nullifier) -> bool {
-        self.nullifiers.contains(nullifier)
+        if self.nullifiers.contains(nullifier) {
+            return true;
+        }
+        // Fall back to sled storage if available
+        if let Some(ref tree) = self.nullifier_storage {
+            return tree.contains_key(nullifier.0).unwrap_or(false);
+        }
+        false
     }
 
     /// Register a validator (internal — use apply_transaction for public API).
@@ -475,6 +507,29 @@ impl ChainState {
     /// Get the nullifier hash accumulator (for state snapshots).
     pub fn nullifier_hash(&self) -> &Hash {
         &self.nullifier_hash
+    }
+
+    /// Attach sled-backed nullifier storage for scalability.
+    ///
+    /// After calling this, new nullifiers are written to both memory and sled,
+    /// and `is_spent()` falls back to sled for lookups not in memory.
+    pub fn set_nullifier_storage(&mut self, tree: sled::Tree) {
+        self.nullifier_storage = Some(tree);
+    }
+
+    /// Migrate in-memory nullifiers to sled storage.
+    ///
+    /// Writes all current in-memory nullifiers to the sled tree, then clears
+    /// the in-memory set to free RAM. After migration, `is_spent()` reads from
+    /// sled and new nullifiers are written to both sled and a fresh in-memory set.
+    pub fn migrate_nullifiers_to_storage(&mut self, tree: sled::Tree) -> usize {
+        let count = self.nullifiers.len();
+        for nullifier in self.nullifiers.iter() {
+            let _ = tree.insert(nullifier.0, &[1u8]);
+        }
+        self.nullifiers = NullifierSet::new();
+        self.nullifier_storage = Some(tree);
+        count
     }
 
     /// Get the current epoch seed for VRF evaluation.
@@ -704,6 +759,7 @@ impl ChainState {
             commitments,
             commitment_tree,
             nullifiers,
+            nullifier_storage: None,
             nullifier_hash: meta.nullifier_hash,
             validators,
             validator_bonds,
@@ -1113,5 +1169,53 @@ mod tests {
         assert_eq!(ledger.state.commitment_count(), 1);
         // DAG should have genesis only
         assert_eq!(ledger.dag.len(), 1);
+    }
+
+    #[test]
+    fn sled_backed_nullifier_lookup() {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        let tree = db.open_tree("nullifiers").unwrap();
+
+        let mut state = ChainState::new();
+        state.set_nullifier_storage(tree);
+
+        let n = Nullifier::derive(&[10u8; 32], &[20u8; 32]);
+        assert!(!state.is_spent(&n));
+
+        state.mark_nullifier(n);
+        assert!(state.is_spent(&n));
+
+        // Also verify sled has it
+        let sled_tree = state.nullifier_storage.as_ref().unwrap();
+        assert!(sled_tree.contains_key(n.0).unwrap());
+    }
+
+    #[test]
+    fn migrate_nullifiers_to_storage() {
+        let mut state = ChainState::new();
+
+        // Add nullifiers to in-memory set
+        let n1 = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        let n2 = Nullifier::derive(&[3u8; 32], &[4u8; 32]);
+        state.mark_nullifier(n1);
+        state.mark_nullifier(n2);
+        assert_eq!(state.nullifier_count(), 2);
+
+        // Migrate to sled
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        let tree = db.open_tree("nullifiers").unwrap();
+        let migrated = state.migrate_nullifiers_to_storage(tree);
+        assert_eq!(migrated, 2);
+
+        // In-memory is empty, but is_spent still works via sled
+        assert_eq!(state.nullifiers.len(), 0);
+        assert!(state.is_spent(&n1));
+        assert!(state.is_spent(&n2));
+
+        // New nullifiers go to both sled and memory
+        let n3 = Nullifier::derive(&[5u8; 32], &[6u8; 32]);
+        state.mark_nullifier(n3);
+        assert!(state.is_spent(&n3));
+        assert_eq!(state.nullifiers.len(), 1);
     }
 }

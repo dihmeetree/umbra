@@ -16,6 +16,7 @@
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 
 /// Spectra post-quantum cryptocurrency node and wallet.
 #[derive(Parser, Debug)]
@@ -109,6 +110,23 @@ enum WalletAction {
     /// Show received encrypted messages.
     Messages,
 
+    /// Show transaction history.
+    History,
+
+    /// Consolidate all unspent outputs into one.
+    Consolidate {
+        /// Transaction fee (in base units).
+        #[arg(long)]
+        fee: u64,
+    },
+
+    /// Recover a wallet from a mnemonic phrase + backup file.
+    Recover {
+        /// 24-word recovery phrase (space-separated, in quotes).
+        #[arg(long)]
+        phrase: String,
+    },
+
     /// Export wallet address to a file for sharing.
     Export {
         /// Output file path.
@@ -139,17 +157,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Load config file (spectra.toml) — CLI flags override config values
+    let config = spectra::config::SpectraConfig::load(&cli.data_dir);
+
     let rpc_addr: SocketAddr = format!("{}:{}", cli.rpc_host, cli.rpc_port).parse()?;
 
     match cli.command {
-        // Default (no subcommand) → run node for backward compatibility
+        // Default (no subcommand) → run node with config file defaults
         None => {
+            let listen_addr: SocketAddr =
+                format!("{}:{}", config.node.p2p_host, config.node.p2p_port).parse()?;
+            let peers = if config.node.bootstrap_peers.is_empty() {
+                vec![]
+            } else {
+                config.parse_bootstrap_peers()
+            };
             run_node(
                 cli.data_dir,
                 rpc_addr,
-                "0.0.0.0:9732".parse()?,
-                vec![],
-                false,
+                listen_addr,
+                peers,
+                config.node.genesis_validator,
             )
             .await
         }
@@ -160,12 +188,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             peers,
             genesis_validator,
         }) => {
+            // CLI flags override config file
             let listen_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+            let all_peers = if peers.is_empty() {
+                config.parse_bootstrap_peers()
+            } else {
+                peers
+            };
             run_node(
                 cli.data_dir,
                 rpc_addr,
                 listen_addr,
-                peers,
+                all_peers,
                 genesis_validator,
             )
             .await
@@ -210,7 +244,14 @@ async fn run_node(
     };
     tokio::spawn(spectra::rpc::serve(rpc_addr, rpc_state));
 
-    node.run().await;
+    let shutdown = CancellationToken::new();
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Ctrl+C received, shutting down...");
+        shutdown_signal.cancel();
+    });
+    node.run(shutdown).await;
     Ok(())
 }
 
@@ -222,7 +263,7 @@ async fn run_wallet_command(
     use spectra::wallet_cli;
 
     match action {
-        WalletAction::Init => wallet_cli::cmd_init(data_dir),
+        WalletAction::Init => wallet_cli::cmd_init_with_recovery(data_dir),
         WalletAction::Address => wallet_cli::cmd_address(data_dir),
         WalletAction::Balance => wallet_cli::cmd_balance(data_dir, rpc_addr).await,
         WalletAction::Scan => wallet_cli::cmd_scan(data_dir, rpc_addr).await,
@@ -233,6 +274,11 @@ async fn run_wallet_command(
             message,
         } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, fee, message).await,
         WalletAction::Messages => wallet_cli::cmd_messages(data_dir),
+        WalletAction::History => wallet_cli::cmd_history(data_dir),
+        WalletAction::Consolidate { fee } => {
+            wallet_cli::cmd_consolidate(data_dir, rpc_addr, fee).await
+        }
+        WalletAction::Recover { phrase } => wallet_cli::cmd_recover(data_dir, &phrase),
         WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
         WalletAction::Web { host, port } => {
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -466,6 +512,7 @@ fn run_demo() {
         state_root: [0u8; 32],
         signature: Signature(vec![]),
         vrf_proof: None,
+        protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
     };
     dag.insert_unchecked(v1).unwrap();
     dag.finalize(&v1_id);
@@ -486,6 +533,7 @@ fn run_demo() {
         state_root: [0u8; 32],
         signature: Signature(vec![]),
         vrf_proof: None,
+        protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
     };
     dag.insert_unchecked(v2).unwrap();
     dag.finalize(&v2_id);
@@ -506,6 +554,7 @@ fn run_demo() {
         state_root: [0u8; 32],
         signature: Signature(vec![]),
         vrf_proof: None,
+        protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
     };
     dag.insert_unchecked(v3).unwrap();
     dag.finalize(&v3_id);

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::crypto::keys::PublicAddress;
-use crate::wallet::{Wallet, WalletError};
+use crate::wallet::{TxDirection, Wallet, WalletError};
 
 /// Default wallet file name within data_dir.
 const WALLET_FILENAME: &str = "wallet.dat";
@@ -278,6 +278,153 @@ pub fn cmd_messages(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Show transaction history.
+pub fn cmd_history(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let path = wallet_path(data_dir);
+    let (wallet, _) = Wallet::load_from_file(&path)?;
+
+    let history = wallet.history();
+    if history.is_empty() {
+        println!("No transaction history.");
+        return Ok(());
+    }
+
+    println!("{} transaction(s):", history.len());
+    for (i, entry) in history.iter().enumerate() {
+        let dir = match entry.direction {
+            TxDirection::Send => "SEND",
+            TxDirection::Receive => "RECV",
+            TxDirection::Coinbase => "MINE",
+        };
+        let tx_short = hex::encode(&entry.tx_id[..8]);
+        println!(
+            "  [{}] {} {} units (fee: {}) tx:{} epoch:{}",
+            i + 1,
+            dir,
+            entry.amount,
+            entry.fee,
+            tx_short,
+            entry.epoch
+        );
+    }
+    Ok(())
+}
+
+/// Consolidate all unspent outputs into a single output.
+pub async fn cmd_consolidate(
+    data_dir: &Path,
+    rpc_addr: SocketAddr,
+    fee: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = wallet_path(data_dir);
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
+
+    // Scan chain first
+    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr).await?;
+
+    let unspent_count = wallet.unspent_outputs().len();
+    if unspent_count < 2 {
+        println!(
+            "Only {} unspent output(s), nothing to consolidate.",
+            unspent_count
+        );
+        return Ok(());
+    }
+
+    println!("Consolidating {} unspent outputs...", unspent_count);
+    let tx = wallet.build_consolidation_tx(fee, None)?;
+    let tx_id = tx.tx_id();
+
+    // Submit
+    let tx_bytes = crate::serialize(&tx)?;
+    let tx_hex = hex::encode(&tx_bytes);
+    let client = RpcClient::new(rpc_addr);
+    let result = client.submit_tx(&tx_hex).await?;
+
+    wallet.save_to_file(&path, scanned_to)?;
+
+    println!("Consolidation submitted!");
+    println!("TX ID: {}", result.tx_id);
+    println!("Fee: {} units", fee);
+    println!("Remaining balance: {} units", wallet.balance());
+    let _ = tx_id;
+    Ok(())
+}
+
+/// Initialize a wallet and display recovery phrase.
+pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let path = wallet_path(data_dir);
+    if path.exists() {
+        return Err("wallet already exists at this location".into());
+    }
+    std::fs::create_dir_all(data_dir)?;
+
+    let wallet = Wallet::new();
+
+    // Create recovery backup
+    let (words, backup) = wallet.create_recovery_backup();
+    let recovery_path = data_dir.join("wallet.recovery");
+    std::fs::write(&recovery_path, &backup)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&recovery_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    wallet.save_to_file(&path, 0)?;
+
+    // Export address
+    let addr = wallet.address();
+    let addr_bytes = crate::serialize(&addr)?;
+    let addr_hex = hex::encode(&addr_bytes);
+    std::fs::write(address_path(data_dir), &addr_hex)?;
+
+    println!("Wallet created: {}", path.display());
+    println!("Address ID: {}", hex::encode(&addr.address_id()[..16]));
+    println!("Recovery backup: {}", recovery_path.display());
+    println!();
+    println!("=== RECOVERY PHRASE (write down and store safely!) ===");
+    println!("{}", words.join(" "));
+    println!("=====================================================");
+    println!();
+    println!("WARNING: This phrase will NOT be shown again.");
+    println!("Both the phrase AND the wallet.recovery file are needed to recover.");
+
+    Ok(())
+}
+
+/// Recover a wallet from a mnemonic phrase and backup file.
+pub fn cmd_recover(data_dir: &Path, phrase: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = wallet_path(data_dir);
+    if path.exists() {
+        return Err("wallet already exists — move or delete it first".into());
+    }
+
+    let recovery_path = data_dir.join("wallet.recovery");
+    if !recovery_path.exists() {
+        return Err(format!("recovery backup not found at {}", recovery_path.display()).into());
+    }
+
+    let words: Vec<String> = phrase.split_whitespace().map(|s| s.to_string()).collect();
+    let backup = std::fs::read(&recovery_path)?;
+
+    let wallet = Wallet::recover_from_backup(&words, &backup)?;
+    std::fs::create_dir_all(data_dir)?;
+    wallet.save_to_file(&path, 0)?;
+
+    // Export address
+    let addr = wallet.address();
+    let addr_bytes = crate::serialize(&addr)?;
+    let addr_hex = hex::encode(&addr_bytes);
+    std::fs::write(address_path(data_dir), &addr_hex)?;
+
+    println!("Wallet recovered successfully!");
+    println!("Address ID: {}", hex::encode(&addr.address_id()[..16]));
+    println!("Note: run 'wallet scan' to resync outputs from the chain.");
+    Ok(())
+}
+
 /// Export wallet address to a file for sharing.
 pub fn cmd_export(data_dir: &Path, file: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let wp = wallet_path(data_dir);
@@ -428,5 +575,56 @@ mod tests {
 
         // messages on a fresh wallet should succeed (just print "No messages")
         cmd_messages(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn cmd_init_with_recovery_creates_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init_with_recovery(dir.path()).unwrap();
+
+        assert!(wallet_path(dir.path()).exists());
+        assert!(address_path(dir.path()).exists());
+        assert!(dir.path().join("wallet.recovery").exists());
+    }
+
+    #[test]
+    fn cmd_recover_restores_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create wallet with recovery
+        cmd_init_with_recovery(dir.path()).unwrap();
+
+        // Load the original wallet to get its address
+        let (original_wallet, _) = Wallet::load_from_file(&wallet_path(dir.path())).unwrap();
+        let original_addr = original_wallet.address().address_id();
+
+        // Read the recovery backup (exists from init)
+        let _backup = std::fs::read(dir.path().join("wallet.recovery")).unwrap();
+
+        // Need the mnemonic — recreate it from the wallet's keys
+        let (words, _backup_bytes) = original_wallet.create_recovery_backup();
+
+        // Delete the wallet file
+        std::fs::remove_file(wallet_path(dir.path())).unwrap();
+        std::fs::remove_file(address_path(dir.path())).unwrap();
+
+        // Write the new backup (since create_recovery_backup generates fresh mnemonic)
+        std::fs::write(dir.path().join("wallet.recovery"), &_backup_bytes).unwrap();
+
+        // Recover
+        let phrase = words.join(" ");
+        cmd_recover(dir.path(), &phrase).unwrap();
+
+        // Verify recovered wallet has same address
+        let (recovered, _) = Wallet::load_from_file(&wallet_path(dir.path())).unwrap();
+        assert_eq!(recovered.address().address_id(), original_addr);
+    }
+
+    #[test]
+    fn cmd_history_empty_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        cmd_init(dir.path()).unwrap();
+
+        // history on a fresh wallet should succeed
+        cmd_history(dir.path()).unwrap();
     }
 }

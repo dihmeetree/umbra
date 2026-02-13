@@ -289,6 +289,41 @@ pub struct P2pConfig {
     pub our_signing_keypair: SigningKeypair,
 }
 
+/// Peer reputation tracking (F7).
+#[allow(dead_code)]
+struct PeerReputation {
+    score: i32,
+    violations: u32,
+    banned_until: Option<Instant>,
+}
+
+impl PeerReputation {
+    fn new() -> Self {
+        PeerReputation {
+            score: crate::constants::PEER_INITIAL_REPUTATION,
+            violations: 0,
+            banned_until: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn penalize(&mut self, amount: i32) {
+        self.score -= amount;
+        self.violations += 1;
+        if self.score < crate::constants::PEER_BAN_THRESHOLD {
+            let ban_duration =
+                std::time::Duration::from_secs(crate::constants::PEER_BAN_DURATION_SECS);
+            self.banned_until = Some(Instant::now() + ban_duration);
+        }
+    }
+
+    fn is_banned(&self) -> bool {
+        self.banned_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false)
+    }
+}
+
 /// State for a single peer connection.
 struct PeerConnection {
     peer_id: PeerId,
@@ -296,7 +331,10 @@ struct PeerConnection {
     public_key: SigningPublicKey,
     addr: SocketAddr,
     msg_tx: mpsc::Sender<Message>,
+    is_outbound: bool,
 }
+
+use std::time::Instant;
 
 /// Internal event from connection tasks to the main P2P loop.
 enum InternalEvent {
@@ -306,6 +344,7 @@ enum InternalEvent {
         public_key: SigningPublicKey,
         addr: SocketAddr,
         msg_tx: mpsc::Sender<Message>,
+        is_outbound: bool,
     },
     /// A message was received from a peer.
     Message { from: PeerId, message: Box<Message> },
@@ -407,13 +446,19 @@ async fn p2p_loop(
     event_tx: mpsc::Sender<P2pEvent>,
 ) {
     let mut peers: HashMap<PeerId, PeerConnection> = HashMap::new();
+    let mut reputations: HashMap<PeerId, PeerReputation> = HashMap::new();
+    let mut inbound_count: usize = 0;
+    let mut outbound_count: usize = 0;
+    let max_inbound = config.max_peers / 2;
+    let max_outbound = config.max_peers - max_inbound;
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalEvent>(256);
 
     loop {
         tokio::select! {
             result = listener.accept() => {
                 if let Ok((stream, addr)) = result {
-                    if peers.len() >= config.max_peers {
+                    // F8: Connection diversity — enforce inbound slot limit
+                    if inbound_count >= max_inbound || peers.len() >= config.max_peers {
                         continue;
                     }
                     let config_clone = config.clone();
@@ -429,7 +474,8 @@ async fn p2p_loop(
             Some(cmd) = command_rx.recv() => {
                 match cmd {
                     P2pCommand::Connect(addr) => {
-                        if peers.len() >= config.max_peers {
+                        // F8: Connection diversity — enforce outbound slot limit
+                        if outbound_count >= max_outbound || peers.len() >= config.max_peers {
                             continue;
                         }
                         let config_clone = config.clone();
@@ -470,14 +516,29 @@ async fn p2p_loop(
 
             Some(event) = internal_rx.recv() => {
                 match event {
-                    InternalEvent::Connected { peer_id, public_key, addr, msg_tx } => {
+                    InternalEvent::Connected { peer_id, public_key, addr, msg_tx, is_outbound } => {
+                        // F7: Check if peer is banned
+                        if let Some(rep) = reputations.get(&peer_id) {
+                            if rep.is_banned() {
+                                tracing::debug!("Rejected banned peer {}", hex::encode(&peer_id[..8]));
+                                continue;
+                            }
+                        }
                         if peers.len() < config.max_peers && !peers.contains_key(&peer_id) {
+                            // F8: Update connection direction counters
+                            if is_outbound {
+                                outbound_count += 1;
+                            } else {
+                                inbound_count += 1;
+                            }
                             peers.insert(peer_id, PeerConnection {
                                 peer_id,
                                 public_key,
                                 addr,
                                 msg_tx,
+                                is_outbound,
                             });
+                            reputations.entry(peer_id).or_insert_with(PeerReputation::new);
                             let _ = event_tx.send(P2pEvent::PeerConnected(peer_id)).await;
                         }
                     }
@@ -485,7 +546,14 @@ async fn p2p_loop(
                         let _ = event_tx.send(P2pEvent::MessageReceived { from, message }).await;
                     }
                     InternalEvent::Disconnected(peer_id) => {
-                        peers.remove(&peer_id);
+                        // F8: Update connection direction counters
+                        if let Some(peer) = peers.remove(&peer_id) {
+                            if peer.is_outbound {
+                                outbound_count = outbound_count.saturating_sub(1);
+                            } else {
+                                inbound_count = inbound_count.saturating_sub(1);
+                            }
+                        }
                         let _ = event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await;
                     }
                 }
@@ -591,6 +659,7 @@ async fn handle_inbound_inner(
         writer,
         session_keys,
         internal_tx,
+        false, // inbound
     )
     .await
 }
@@ -678,11 +747,13 @@ async fn handle_outbound(
         writer,
         session_keys,
         internal_tx,
+        true, // outbound
     )
     .await
 }
 
 /// Spawn encrypted read and write tasks for an authenticated connection.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_encrypted_connection_tasks(
     peer_id: PeerId,
     public_key: SigningPublicKey,
@@ -691,6 +762,7 @@ async fn spawn_encrypted_connection_tasks(
     writer: OwnedWriteHalf,
     session_keys: SessionKeys,
     internal_tx: mpsc::Sender<InternalEvent>,
+    is_outbound: bool,
 ) -> Result<(), P2pError> {
     let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(128);
 
@@ -700,6 +772,7 @@ async fn spawn_encrypted_connection_tasks(
             public_key,
             addr,
             msg_tx,
+            is_outbound,
         })
         .await
         .map_err(|_| P2pError::Shutdown)?;
