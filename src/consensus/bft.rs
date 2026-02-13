@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn advance_epoch_clears_vrf_commitments() {
-        let (keypairs, validators) = make_committee(3);
+        let (_keypairs, validators) = make_committee(3);
         let chain_id = test_chain_id();
         let mut bft = BftState::new(0, validators.clone(), chain_id);
 

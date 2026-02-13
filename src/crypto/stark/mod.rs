@@ -38,6 +38,23 @@ pub type StarkCoin = DefaultRandomCoin<Rp64_256>;
 pub use balance_prover::prove_balance;
 pub use spend_prover::prove_spend;
 
+/// Lightweight proof options for testing and simulation.
+///
+/// NOT suitable for production use — provides weaker security guarantees.
+/// Uses reduced grinding factor for faster proof generation.
+pub fn light_proof_options() -> ProofOptions {
+    ProofOptions::new(
+        42, // num_queries
+        8,  // blowup_factor (winterfell minimum)
+        10, // grinding_factor (reduced from 16)
+        FieldExtension::Quadratic,
+        8,   // FRI folding factor
+        255, // FRI max remainder degree
+        BatchingMethod::Linear,
+        BatchingMethod::Linear,
+    )
+}
+
 /// Default STARK proof options targeting ~128-bit conjectured security.
 ///
 /// Uses quadratic field extension (128-bit field security) so the bottleneck

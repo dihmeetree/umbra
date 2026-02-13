@@ -1992,8 +1992,12 @@ mod tests {
             epoch: 0,
             signatures: vec![],
         };
-        let result =
-            ledger.finalize_vertex(&vertex_id, &fake_cert, &[validator.clone()], &chain_id);
+        let result = ledger.finalize_vertex(
+            &vertex_id,
+            &fake_cert,
+            std::slice::from_ref(&validator),
+            &chain_id,
+        );
         assert!(
             matches!(result, Err(StateError::InvalidCertificate)),
             "expected InvalidCertificate, got {:?}",

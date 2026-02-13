@@ -284,6 +284,13 @@ impl Node {
             let total_validators = ledger.state.total_validators();
             // H1: Set epoch context for VRF verification on incoming votes
             bft.set_epoch_context(epoch_seed, total_validators);
+            // Set initial committee from genesis validators so epoch 0 votes are accepted
+            bft.committee = ledger
+                .state
+                .active_validators()
+                .into_iter()
+                .cloned()
+                .collect();
 
             if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
                 tracing::info!("Selected for epoch 0 committee via VRF");
@@ -292,6 +299,15 @@ impl Node {
             } else {
                 tracing::info!("Not selected for epoch 0 committee");
             }
+
+            // Store genesis vertex in finalized index (sequence 0)
+            // so that subsequent finalized vertices start at index 1.
+            let genesis_vid = crate::consensus::dag::Dag::genesis_vertex().id;
+            storage
+                .put_finalized_vertex_index(0, &genesis_vid)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to persist genesis vertex index: {}", e)
+                });
 
             // Create genesis coinbase (initial coin distribution)
             if let Some(genesis_cb) = ledger
@@ -334,6 +350,12 @@ impl Node {
             let meta = ledger.state.to_chain_state_meta(fc);
             let _ = storage.put_chain_state_meta(&meta);
             let _ = storage.flush();
+
+            // Advance BFT and DAG rounds past genesis (round 0 is settled).
+            // This allows the first vertex proposal at round 1 to be accepted
+            // by receive_vote (which checks vote.round == bft.round).
+            bft.advance_round();
+            ledger.dag.advance_round();
 
             tracing::info!(
                 "Registered as genesis validator: {}",
@@ -1028,6 +1050,24 @@ impl Node {
                             )
                             .await;
                     } else {
+                        // Advance BFT and DAG rounds to match highest finalized vertex
+                        // so that new proposals start at the correct round.
+                        {
+                            let mut state = self.state.write().await;
+                            let highest_round = state
+                                .ledger
+                                .dag
+                                .finalized_order()
+                                .iter()
+                                .filter_map(|vid| state.ledger.dag.get(vid))
+                                .map(|v| v.round)
+                                .max()
+                                .unwrap_or(0);
+                            while state.bft.round <= highest_round {
+                                state.bft.advance_round();
+                                state.ledger.dag.advance_round();
+                            }
+                        }
                         tracing::info!("Sync complete");
                         self.sync_state = SyncState::Synced;
                     }
@@ -1458,7 +1498,7 @@ impl Node {
             .drain_highest_fee(crate::constants::VERTEX_MAX_DRAIN);
 
         let epoch = state.ledger.state.epoch();
-        let round = state.bft.round + 1;
+        let round = state.bft.round;
 
         // Collect current tips as parents
         let parents: Vec<VertexId> = state

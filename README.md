@@ -105,6 +105,8 @@ spectra/
     wallet_cli.rs           Wallet CLI commands (init, send, balance, history, consolidate, recover)
     wallet_web.rs           Wallet web UI (askama templates, axum server)
     main.rs                 Node + wallet binary with clap subcommands and config file loading
+    bin/
+      simulator.rs          Network simulator: multi-node BFT consensus, traffic, attack scenarios
   templates/
     base.html               Base layout with navigation and CSS
     dashboard.html          Balance, outputs, chain state, scan button
@@ -117,7 +119,7 @@ spectra/
     error.html              Error display
 ```
 
-**~18,000 lines of Rust** across 36 source files with **294 tests**.
+**~22,000 lines of Rust** across 37 source files with **314 tests**.
 
 ## Building
 
@@ -398,7 +400,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 294 tests cover:
+All 314 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -423,6 +425,34 @@ All 294 tests cover:
 - **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; MAC verification failure on corrupted frames; counter replay rejection; self-connection detection
 - **Node** — persistent signing + KEM keypair load/save roundtrip
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
+
+## Network Simulator
+
+A standalone binary that exercises the full Spectra stack end-to-end with real nodes, real P2P networking, DAG-BFT consensus, wallet transactions, and adversarial attack scenarios.
+
+```bash
+cargo run --release --bin simulator
+```
+
+### What It Tests
+
+The simulator runs 6 phases with 23 automated checks:
+
+1. **Bootstrap Network** — starts 3 validator nodes on localhost with real P2P connections and BFT consensus
+2. **Genesis Funding** — creates wallets for Alice and Bob, funds each with 10M coins from the genesis coinbase via proper transactions with full zk-STARK proofs
+3. **Normal Traffic** — 5 rounds of Alice/Bob transactions with balance conservation verification after each round
+4. **Chaos Agent (Mallory)** — 7 attack scenarios, each verified to be rejected:
+   - Corrupted zk-STARK proof bytes
+   - Wrong chain ID
+   - Overflow fee (exceeds `MAX_TX_FEE`)
+   - Zero fee (below `MIN_TX_FEE`)
+   - Empty transaction (no inputs/outputs)
+   - Duplicate nullifier within a single transaction
+   - Oversized encrypted message
+5. **State Integrity** — verifies chain state is uncorrupted after all attacks
+6. **Monitoring** — checks node health, epoch state, commitment tree, validator set, mempool, and validator health across all nodes
+
+All transactions use full-security `default_proof_options()` (not lightweight test proofs). The simulator prints a colored pass/fail summary and exits with code 0 on success.
 
 ## Demo
 
@@ -585,6 +615,8 @@ Proves in zero knowledge:
 | `tokio-util` | Graceful shutdown via `CancellationToken` |
 | `toml` | TOML config file parsing |
 | `rayon` | Parallel proof verification for vertex validation |
+| `tempfile` | Temporary directories for simulator and testing |
+| `colored` | Terminal color output for simulator results |
 
 ## Security Model
 
@@ -699,7 +731,7 @@ All transaction validity is verified via zk-STARKs:
 Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (three internal audits have been completed, addressing 47+ findings across all severity levels and expanding test coverage from 226 to 294 tests with targeted state correctness, validation bypass, and regression tests)
+- **External security audit** — independent cryptographic protocol review and penetration testing (three internal audits have been completed, addressing 47+ findings across all severity levels and expanding test coverage from 226 to 314 tests with targeted state correctness, validation bypass, and regression tests; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

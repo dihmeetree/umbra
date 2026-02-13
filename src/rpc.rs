@@ -1002,7 +1002,7 @@ mod tests {
         let app = router(state);
 
         // Valid hex that decodes to random bytes (not a valid serialized transaction)
-        let garbage_hex = hex::encode(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]);
+        let garbage_hex = hex::encode([0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]);
         let (status, body) = post_tx_hex(&app, &garbage_hex).await;
         assert_eq!(status, HttpStatus::BAD_REQUEST);
         assert!(
