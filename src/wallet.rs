@@ -1487,4 +1487,335 @@ mod tests {
         let result = wallet.build_consolidation_tx(10, None);
         assert!(matches!(result, Err(WalletError::NothingToConsolidate)));
     }
+
+    /// Helper: create a wallet and fund it via a coinbase-style transaction with a given amount.
+    /// Returns (wallet, funding_tx).
+    fn funded_wallet(amount: u64) -> Wallet {
+        let mut wallet = Wallet::new();
+        let funding_tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: amount + 1,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(wallet.kem_public_key().clone(), amount)
+            .set_fee(1)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        wallet.scan_transaction(&funding_tx);
+        wallet
+    }
+
+    #[test]
+    fn expire_pending_returns_outputs() {
+        let mut alice = funded_wallet(10000);
+        let bob = Wallet::new();
+        assert_eq!(alice.balance(), 10000);
+
+        // Build a transaction, marking the output as Pending with created_epoch=0
+        let _tx = alice
+            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .unwrap();
+        assert_eq!(alice.balance(), 0);
+
+        // Manually set created_epoch to 5 to control the test
+        for output in &mut alice.outputs {
+            if let SpendStatus::Pending {
+                ref mut created_epoch,
+                ..
+            } = output.status
+            {
+                *created_epoch = 5;
+            }
+        }
+
+        // current_epoch=5+PENDING_EXPIRY_EPOCHS+1 = 16 should expire (> 15)
+        let count = alice.expire_pending(5 + PENDING_EXPIRY_EPOCHS + 1, PENDING_EXPIRY_EPOCHS);
+        assert_eq!(count, 1);
+        assert_eq!(alice.balance(), 10000); // Balance restored
+    }
+
+    #[test]
+    fn expire_pending_not_yet_expired() {
+        let mut alice = funded_wallet(10000);
+        let bob = Wallet::new();
+
+        let _tx = alice
+            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .unwrap();
+        assert_eq!(alice.balance(), 0);
+
+        // Manually set created_epoch to 5
+        for output in &mut alice.outputs {
+            if let SpendStatus::Pending {
+                ref mut created_epoch,
+                ..
+            } = output.status
+            {
+                *created_epoch = 5;
+            }
+        }
+
+        // current_epoch=10 is not enough (5 + 10 = 15, need > 15)
+        let count = alice.expire_pending(10, PENDING_EXPIRY_EPOCHS);
+        assert_eq!(count, 0);
+        assert_eq!(alice.balance(), 0); // Still pending
+    }
+
+    #[test]
+    fn expire_pending_boundary_epoch() {
+        let mut alice = funded_wallet(10000);
+        let bob = Wallet::new();
+
+        let _tx = alice
+            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .unwrap();
+
+        // Set created_epoch=5, max_age=10 => threshold is created_epoch + max_age = 15
+        for output in &mut alice.outputs {
+            if let SpendStatus::Pending {
+                ref mut created_epoch,
+                ..
+            } = output.status
+            {
+                *created_epoch = 5;
+            }
+        }
+
+        // current_epoch=15: condition is 15 > 5 + 10 = 15, which is false (not strictly greater)
+        let count = alice.expire_pending(15, PENDING_EXPIRY_EPOCHS);
+        assert_eq!(count, 0);
+        assert_eq!(alice.balance(), 0); // Still pending
+
+        // current_epoch=16: condition is 16 > 15, which is true
+        let count = alice.expire_pending(16, PENDING_EXPIRY_EPOCHS);
+        assert_eq!(count, 1);
+        assert_eq!(alice.balance(), 10000); // Restored
+    }
+
+    #[test]
+    fn build_transaction_insufficient_funds() {
+        let mut alice = funded_wallet(5000);
+        let bob = Wallet::new();
+
+        // Try to spend more than the balance
+        let result = alice.build_transaction(bob.kem_public_key(), 5000, 100, None);
+        assert!(matches!(
+            result,
+            Err(WalletError::InsufficientFunds {
+                available: 5000,
+                needed: 5100
+            })
+        ));
+    }
+
+    #[test]
+    fn build_transaction_arithmetic_overflow() {
+        let mut alice = funded_wallet(5000);
+        let bob = Wallet::new();
+
+        // amount + fee overflows u64
+        let result = alice.build_transaction(bob.kem_public_key(), u64::MAX, 1, None);
+        assert!(matches!(result, Err(WalletError::ArithmeticOverflow)));
+    }
+
+    #[test]
+    fn balance_saturating_add() {
+        let mut wallet = Wallet::new();
+
+        // Manually insert two outputs whose values sum to more than u64::MAX
+        let val1 = u64::MAX / 2 + 1;
+        let val2 = u64::MAX / 2 + 1;
+        // val1 + val2 = u64::MAX + 1, which would overflow
+
+        let blinding1 = BlindingFactor::random();
+        let blinding2 = BlindingFactor::random();
+        wallet.outputs.push(OwnedOutput {
+            commitment: Commitment::commit(val1, &blinding1),
+            value: val1,
+            blinding: blinding1,
+            spend_auth: crate::hash_domain(b"test", b"auth1"),
+            status: SpendStatus::Unspent,
+            commitment_index: None,
+        });
+        wallet.outputs.push(OwnedOutput {
+            commitment: Commitment::commit(val2, &blinding2),
+            value: val2,
+            blinding: blinding2,
+            spend_auth: crate::hash_domain(b"test", b"auth2"),
+            status: SpendStatus::Unspent,
+            commitment_index: None,
+        });
+
+        // balance() should saturate at u64::MAX, not panic or wrap
+        assert_eq!(wallet.balance(), u64::MAX);
+    }
+
+    #[test]
+    fn build_consolidation_tx_success() {
+        let mut wallet = Wallet::new();
+
+        // Fund wallet with 3 separate outputs
+        for i in 0..3 {
+            let funding_tx = TransactionBuilder::new()
+                .add_input(InputSpec {
+                    value: 1001,
+                    blinding: BlindingFactor::from_bytes([i + 10; 32]),
+                    spend_auth: crate::hash_domain(b"test", &[i]),
+                    merkle_path: vec![],
+                })
+                .add_output(wallet.kem_public_key().clone(), 1000)
+                .set_fee(1)
+                .set_proof_options(test_proof_options())
+                .build()
+                .unwrap();
+            wallet.scan_transaction(&funding_tx);
+        }
+
+        assert_eq!(wallet.unspent_outputs().len(), 3);
+        assert_eq!(wallet.balance(), 3000);
+
+        let history_before = wallet.history().len(); // 3 receives
+
+        // Consolidate with fee=10
+        let tx = wallet.build_consolidation_tx(10, None).unwrap();
+        assert_eq!(tx.fee, 10);
+        // One output (consolidated amount back to self)
+        assert_eq!(tx.outputs.len(), 1);
+
+        // All original outputs should now be Pending
+        let pending_count = wallet
+            .outputs
+            .iter()
+            .filter(|o| matches!(o.status, SpendStatus::Pending { .. }))
+            .count();
+        assert_eq!(pending_count, 3);
+
+        // Balance is 0 (all pending)
+        assert_eq!(wallet.balance(), 0);
+
+        // History should have a new Send entry
+        assert_eq!(wallet.history().len(), history_before + 1);
+        let last_entry = wallet.history().last().unwrap();
+        assert_eq!(last_entry.direction, TxDirection::Send);
+        assert_eq!(last_entry.amount, 2990); // 3000 - 10 fee
+        assert_eq!(last_entry.fee, 10);
+    }
+
+    #[test]
+    fn build_consolidation_tx_fee_exceeds_total() {
+        let mut wallet = Wallet::new();
+
+        // Fund wallet with 2 small outputs
+        for i in 0..2 {
+            let funding_tx = TransactionBuilder::new()
+                .add_input(InputSpec {
+                    value: 101,
+                    blinding: BlindingFactor::from_bytes([i + 20; 32]),
+                    spend_auth: crate::hash_domain(b"test", &[i + 20]),
+                    merkle_path: vec![],
+                })
+                .add_output(wallet.kem_public_key().clone(), 100)
+                .set_fee(1)
+                .set_proof_options(test_proof_options())
+                .build()
+                .unwrap();
+            wallet.scan_transaction(&funding_tx);
+        }
+
+        assert_eq!(wallet.balance(), 200);
+        assert_eq!(wallet.unspent_outputs().len(), 2);
+
+        // Try to consolidate with fee that exceeds total (total <= fee)
+        let result = wallet.build_consolidation_tx(200, None);
+        assert!(matches!(
+            result,
+            Err(WalletError::InsufficientFunds {
+                available: 200,
+                needed: 200,
+            })
+        ));
+
+        // Also try with fee > total
+        let result = wallet.build_consolidation_tx(300, None);
+        assert!(matches!(result, Err(WalletError::InsufficientFunds { .. })));
+    }
+
+    #[test]
+    fn push_history_cap() {
+        let mut wallet = Wallet::new();
+
+        // Push MAX_HISTORY_ENTRIES + 1 entries
+        for i in 0..=MAX_HISTORY_ENTRIES {
+            wallet.push_history(TxHistoryEntry {
+                tx_id: [i as u8; 32],
+                direction: TxDirection::Receive,
+                amount: i as u64,
+                fee: 0,
+                epoch: 0,
+            });
+        }
+
+        // Should be capped at MAX_HISTORY_ENTRIES
+        assert_eq!(wallet.history().len(), MAX_HISTORY_ENTRIES);
+
+        // Oldest entry (index 0 with amount=0) should have been drained.
+        // The remaining entries should be the last MAX_HISTORY_ENTRIES ones,
+        // i.e., amount=1 through amount=MAX_HISTORY_ENTRIES.
+        assert_eq!(wallet.history()[0].amount, 1);
+        assert_eq!(
+            wallet.history().last().unwrap().amount,
+            MAX_HISTORY_ENTRIES as u64
+        );
+    }
+
+    #[test]
+    fn scan_coinbase_output() {
+        let mut wallet = Wallet::new();
+        let state = crate::state::ChainState::new();
+
+        // Create a coinbase output for this wallet using the same approach
+        // as ChainState::create_coinbase_output — build a TxOutput addressed
+        // to the wallet's KEM key at output_index=0.
+        let amount = 50_000u64;
+        let blinding = BlindingFactor::random();
+        let commitment = Commitment::commit(amount, &blinding);
+
+        // Generate stealth address at index 0 (coinbase convention)
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(wallet.kem_public_key(), 0).unwrap();
+        let stealth_address = stealth_result.address;
+
+        // Encode and encrypt note data
+        let mut note_data = Vec::with_capacity(40);
+        note_data.extend_from_slice(&amount.to_le_bytes());
+        note_data.extend_from_slice(&blinding.0);
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt_with_shared_secret(
+                &stealth_result.shared_secret,
+                stealth_address.kem_ciphertext.clone(),
+                &note_data,
+            )
+            .unwrap();
+
+        let coinbase_output = crate::transaction::TxOutput {
+            commitment,
+            stealth_address,
+            encrypted_note,
+        };
+
+        assert_eq!(wallet.balance(), 0);
+        assert_eq!(wallet.history().len(), 0);
+
+        wallet.scan_coinbase_output(&coinbase_output, Some(&state));
+
+        assert_eq!(wallet.balance(), amount);
+        assert_eq!(wallet.output_count(), 1);
+        assert_eq!(wallet.history().len(), 1);
+        assert_eq!(wallet.history()[0].direction, TxDirection::Coinbase);
+        assert_eq!(wallet.history()[0].amount, amount);
+        assert_eq!(wallet.history()[0].fee, 0);
+    }
 }

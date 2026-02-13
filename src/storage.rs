@@ -680,4 +680,151 @@ mod tests {
         storage.remove_validator(&id).unwrap();
         assert!(storage.get_validator(&id).unwrap().is_none());
     }
+
+    fn test_proof_options() -> winterfell::ProofOptions {
+        winterfell::ProofOptions::new(
+            42,
+            8,
+            10,
+            winterfell::FieldExtension::Quadratic,
+            8,
+            255,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        )
+    }
+
+    fn make_test_tx(fee: u64, seed: u8) -> Transaction {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let input_value = fee + 100;
+        crate::transaction::builder::TransactionBuilder::new()
+            .add_input(crate::transaction::builder::InputSpec {
+                value: input_value,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([seed; 32]),
+                spend_auth: crate::hash_domain(b"test", &[seed]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    fn make_test_output() -> TxOutput {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let blinding = crate::crypto::commitment::BlindingFactor::random();
+        let commitment = crate::crypto::commitment::Commitment::commit(500, &blinding);
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&recipient.kem.public, 0).unwrap();
+        let note_data = {
+            let mut d = Vec::with_capacity(40);
+            d.extend_from_slice(&500u64.to_le_bytes());
+            d.extend_from_slice(&blinding.0);
+            d
+        };
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt_with_shared_secret(
+                &stealth_result.shared_secret,
+                stealth_result.address.kem_ciphertext.clone(),
+                &note_data,
+            )
+            .unwrap();
+        TxOutput {
+            commitment,
+            stealth_address: stealth_result.address,
+            encrypted_note,
+        }
+    }
+
+    #[test]
+    fn transaction_put_get_roundtrip() {
+        let storage = temp_storage();
+        let tx = make_test_tx(10, 1);
+        let tx_id = tx.tx_id();
+
+        storage.put_transaction(&tx).unwrap();
+        let retrieved = storage.get_transaction(&tx_id).unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.tx_id(), tx_id);
+        assert_eq!(retrieved.fee, 10);
+        assert_eq!(retrieved.inputs.len(), tx.inputs.len());
+        assert_eq!(retrieved.outputs.len(), tx.outputs.len());
+    }
+
+    #[test]
+    fn transaction_not_found() {
+        let storage = temp_storage();
+        let missing_id = TxId([99u8; 32]);
+        assert!(storage.get_transaction(&missing_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn coinbase_output_put_get_roundtrip() {
+        let storage = temp_storage();
+        let output = make_test_output();
+        let sequence = 42u64;
+
+        storage.put_coinbase_output(sequence, &output).unwrap();
+        let retrieved = storage.get_coinbase_output(sequence).unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.commitment.0, output.commitment.0);
+        assert_eq!(
+            retrieved.stealth_address.one_time_key,
+            output.stealth_address.one_time_key
+        );
+    }
+
+    #[test]
+    fn coinbase_output_not_found() {
+        let storage = temp_storage();
+        assert!(storage.get_coinbase_output(9999).unwrap().is_none());
+    }
+
+    #[test]
+    fn overwrite_vertex() {
+        let storage = temp_storage();
+
+        // Create first vertex
+        let id = VertexId(crate::hash_domain(b"test", b"overwrite"));
+        let v1 = Vertex {
+            id,
+            parents: vec![],
+            epoch: 1,
+            round: 10,
+            proposer: SigningKeypair::generate().public,
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        storage.put_vertex(&v1).unwrap();
+
+        // Create second vertex with the same ID but different fields
+        let v2 = Vertex {
+            id,
+            parents: vec![],
+            epoch: 2,
+            round: 20,
+            proposer: SigningKeypair::generate().public,
+            transactions: vec![],
+            timestamp: 2000,
+            state_root: [1u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        storage.put_vertex(&v2).unwrap();
+
+        // Get should return the second version
+        let retrieved = storage.get_vertex(&id).unwrap().unwrap();
+        assert_eq!(retrieved.epoch, 2);
+        assert_eq!(retrieved.round, 20);
+        assert_eq!(retrieved.timestamp, 2000);
+        assert_eq!(retrieved.state_root, [1u8; 32]);
+    }
 }

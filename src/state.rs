@@ -960,11 +960,138 @@ pub enum StateError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::dag::{Vertex, VertexId};
     use crate::crypto::commitment::{BlindingFactor, Commitment};
-    use crate::crypto::keys::SigningKeypair;
+    use crate::crypto::keys::{
+        FullKeypair, KemKeypair, Signature, SigningKeypair, SigningPublicKey,
+    };
     use crate::crypto::nullifier::Nullifier;
     use crate::crypto::stark::spend_air::MERKLE_DEPTH;
     use crate::storage::SledStorage;
+    use crate::transaction::builder::{InputSpec, TransactionBuilder};
+    use crate::transaction::Transaction;
+
+    fn test_proof_options() -> winterfell::ProofOptions {
+        winterfell::ProofOptions::new(
+            42,
+            8,
+            10,
+            winterfell::FieldExtension::Quadratic,
+            8,
+            255,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        )
+    }
+
+    /// Build a valid transfer transaction that spends a commitment already in the state.
+    /// The commitment is added to the state before building the tx, so the merkle root matches.
+    fn build_valid_tx_for_state(
+        state: &mut ChainState,
+        value: u64,
+        fee: u64,
+        seed: u8,
+    ) -> Transaction {
+        let blinding = BlindingFactor::from_bytes([seed; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[seed]);
+        let commitment = Commitment::commit(value, &blinding);
+
+        // Add the commitment to the state so the merkle root in the spend proof matches
+        state.add_commitment(commitment);
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), value - fee)
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    /// Create a test vertex containing given transactions, with a specific proposer key.
+    /// Uses insert_unchecked pattern (skips signature verification).
+    fn make_test_vertex(
+        parents: Vec<VertexId>,
+        round: u64,
+        epoch: u64,
+        proposer: &SigningPublicKey,
+        transactions: Vec<Transaction>,
+    ) -> Vertex {
+        let proposer_fp = proposer.fingerprint();
+        // Compute tx_root
+        let tx_root = if transactions.is_empty() {
+            [0u8; 32]
+        } else {
+            let tx_hashes: Vec<crate::Hash> = transactions.iter().map(|tx| tx.tx_id().0).collect();
+            let (root, _) = crate::crypto::proof::build_merkle_tree(&tx_hashes);
+            root
+        };
+        let id = Vertex::compute_id(&parents, epoch, round, &proposer_fp, &tx_root, None);
+        Vertex {
+            id,
+            parents,
+            epoch,
+            round,
+            proposer: proposer.clone(),
+            transactions,
+            timestamp: round * 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        }
+    }
+
+    /// Create a dummy (structurally incomplete) transaction for tests that check
+    /// errors before full validation (e.g., intra-vertex duplicate nullifiers).
+    fn make_dummy_tx_with_nullifier(nullifier: Nullifier) -> Transaction {
+        let recipient = FullKeypair::generate();
+        let blinding = BlindingFactor::random();
+        let commitment = Commitment::commit(100, &blinding);
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&recipient.kem.public, 0).unwrap();
+        let note_data = vec![0u8; 40];
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt_with_shared_secret(
+                &stealth_result.shared_secret,
+                stealth_result.address.kem_ciphertext.clone(),
+                &note_data,
+            )
+            .unwrap();
+        Transaction {
+            inputs: vec![crate::transaction::TxInput {
+                nullifier,
+                proof_link: [0u8; 32],
+                spend_proof: crate::crypto::stark::types::SpendStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: vec![],
+                },
+            }],
+            outputs: vec![crate::transaction::TxOutput {
+                commitment,
+                stealth_address: stealth_result.address,
+                encrypted_note,
+            }],
+            fee: 10,
+            chain_id: crate::constants::chain_id(),
+            expiry_epoch: 0,
+            balance_proof: crate::crypto::stark::types::BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+            tx_type: crate::transaction::TxType::Transfer,
+        }
+    }
 
     #[test]
     fn state_commitment_tree() {
@@ -1291,5 +1418,330 @@ mod tests {
         state.mark_nullifier(n3).unwrap();
         assert!(state.is_spent(&n3));
         assert_eq!(state.nullifiers.len(), 1);
+    }
+
+    // ── New tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_vertex_basic() {
+        let mut state = ChainState::new();
+
+        // Register a validator (with KEM key so coinbase can be created)
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        state.register_genesis_validator(validator);
+
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Build a valid transaction against the current state
+        let fee = 50;
+        let tx = build_valid_tx_for_state(&mut state, 1000, fee, 1);
+        let tx_nullifier = tx.inputs[0].nullifier;
+        let tx_output_commitment = tx.outputs[0].commitment;
+
+        let commitments_before = state.commitment_count();
+        let nullifiers_before = state.nullifier_count();
+        let fees_before = state.epoch_fees();
+
+        // Build a vertex containing this transaction
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx]);
+        let vertex_id = vertex.id;
+
+        let result = state.apply_vertex(&vertex);
+        assert!(result.is_ok(), "apply_vertex failed: {:?}", result.err());
+
+        // Verify outputs added to commitment tree (tx output + coinbase output)
+        // The tx has 1 output. Coinbase adds another output.
+        assert!(state.commitment_count() > commitments_before);
+        assert!(state.find_commitment(&tx_output_commitment).is_some());
+
+        // Verify nullifier recorded
+        assert_eq!(state.nullifier_count(), nullifiers_before + 1);
+        assert!(state.is_spent(&tx_nullifier));
+
+        // Verify fees accumulated
+        assert_eq!(state.epoch_fees(), fees_before + fee);
+
+        // Verify last_finalized updated
+        assert_eq!(state.last_finalized(), Some(&vertex_id));
+    }
+
+    #[test]
+    fn apply_vertex_too_many_transactions() {
+        let mut state = ChainState::new();
+
+        let kp = SigningKeypair::generate();
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Create a vertex with MAX_TXS_PER_VERTEX + 1 dummy transactions
+        let dummy_txs: Vec<Transaction> = (0..crate::constants::MAX_TXS_PER_VERTEX + 1)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let n = Nullifier::derive(&seed, &[0u8; 32]);
+                make_dummy_tx_with_nullifier(n)
+            })
+            .collect();
+
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &kp.public, dummy_txs);
+
+        let result = state.apply_vertex(&vertex);
+        assert!(
+            matches!(result, Err(StateError::TooManyTransactions)),
+            "expected TooManyTransactions, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn apply_vertex_intra_vertex_duplicate_nullifier() {
+        let mut state = ChainState::new();
+
+        let kp = SigningKeypair::generate();
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Create two dummy transactions sharing the same nullifier
+        let shared_nullifier = Nullifier::derive(&[42u8; 32], &[43u8; 32]);
+        let tx1 = make_dummy_tx_with_nullifier(shared_nullifier);
+        let tx2 = make_dummy_tx_with_nullifier(shared_nullifier);
+
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &kp.public, vec![tx1, tx2]);
+
+        let result = state.apply_vertex(&vertex);
+        assert!(
+            matches!(result, Err(StateError::DoubleSpend(_))),
+            "expected DoubleSpend, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn apply_vertex_epoch_fee_accumulation() {
+        let mut state = ChainState::new();
+
+        // Register a validator with KEM key for coinbase
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        state.register_genesis_validator(validator);
+
+        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+
+        // Build and apply first vertex with fee=30
+        let fee1 = 30;
+        let tx1 = build_valid_tx_for_state(&mut state, 500, fee1, 10);
+        let v1 = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx1]);
+        state.apply_vertex(&v1).unwrap();
+        let fees_after_v1 = state.epoch_fees();
+        assert_eq!(fees_after_v1, fee1);
+
+        // Build and apply second vertex with fee=70 in the same epoch
+        let fee2 = 70;
+        let tx2 = build_valid_tx_for_state(&mut state, 800, fee2, 20);
+        let v2 = make_test_vertex(vec![genesis_id], 2, 0, &val_signing.public, vec![tx2]);
+        state.apply_vertex(&v2).unwrap();
+        let fees_after_v2 = state.epoch_fees();
+
+        // Regression: fees must accumulate, not reset per vertex
+        assert_eq!(
+            fees_after_v2,
+            fee1 + fee2,
+            "epoch_fees should accumulate across vertices: expected {}, got {}",
+            fee1 + fee2,
+            fees_after_v2
+        );
+    }
+
+    #[test]
+    fn validate_transaction_wrong_chain_id() {
+        let state = ChainState::new();
+
+        // Build a valid transaction but with a wrong chain_id
+        let recipient = FullKeypair::generate();
+        let wrong_chain_id = crate::hash_domain(b"wrong.chain", b"not-spectra");
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 200,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 150)
+            .set_fee(50)
+            .set_chain_id(wrong_chain_id)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::WrongChainId)),
+            "expected WrongChainId, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validate_transaction_double_spend() {
+        let mut state = ChainState::new();
+
+        // Build a valid transaction against the state
+        let tx = build_valid_tx_for_state(&mut state, 300, 20, 50);
+        let nullifier = tx.inputs[0].nullifier;
+
+        // First validation + application should succeed
+        state.apply_transaction(&tx).unwrap();
+        assert!(state.is_spent(&nullifier));
+
+        // Second validation of the same transaction should fail with DoubleSpend
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::DoubleSpend(_))),
+            "expected DoubleSpend, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validate_transaction_register_already_registered() {
+        let mut state = ChainState::new();
+
+        // Register a validator via genesis (bypasses transaction validation)
+        let val_kp = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
+        let vid = validator.id;
+        state.register_genesis_validator(validator);
+        assert!(state.is_active_validator(&vid));
+
+        // Build a ValidatorRegister transaction with the same signing key.
+        // The validate_transaction chain_id check passes, then validate_structure
+        // runs, then the ValidatorAlreadyRegistered check happens.
+        // We need a transaction that passes validate_structure first.
+        let bond = crate::constants::VALIDATOR_BOND;
+        let min_fee = bond + crate::constants::MIN_TX_FEE;
+        let total_input = min_fee + 100; // enough for output + fee
+
+        // Add a commitment to the state so merkle root matches
+        let blinding = BlindingFactor::from_bytes([77u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[77u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment);
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(min_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: val_kp.public.clone(),
+                kem_public_key: val_kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::ValidatorAlreadyRegistered)),
+            "expected ValidatorAlreadyRegistered, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn record_nullifier_returns_result() {
+        let mut state = ChainState::new();
+        let n = Nullifier::derive(&[99u8; 32], &[100u8; 32]);
+
+        // Basic regression test: record_nullifier returns Ok(())
+        let result = state.record_nullifier(n);
+        assert!(result.is_ok());
+
+        // Recording the same nullifier again is also Ok (insert returns false, no error)
+        let result2 = state.record_nullifier(n);
+        assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn create_coinbase_no_kem_key() {
+        let mut state = ChainState::new();
+
+        // Register a validator WITHOUT a KEM key
+        let val_kp = SigningKeypair::generate();
+        let validator = Validator::new(val_kp.public.clone()); // no KEM key
+        state.register_genesis_validator(validator);
+
+        let vertex_id = VertexId([1u8; 32]);
+        let amount = 50_000u64;
+
+        // create_coinbase_output should return None because there's no KEM key
+        let result = state.create_coinbase_output(&vertex_id, &val_kp.public, amount);
+        assert!(
+            result.is_none(),
+            "expected None when validator has no KEM key"
+        );
+
+        // Now register a validator WITH a KEM key
+        let val_kp2 = SigningKeypair::generate();
+        let val_kem2 = KemKeypair::generate();
+        let validator2 = Validator::with_kem(val_kp2.public.clone(), val_kem2.public.clone());
+        state.register_genesis_validator(validator2);
+
+        let commitments_before = state.commitment_count();
+        let minted_before = state.total_minted();
+
+        let result2 = state.create_coinbase_output(&vertex_id, &val_kp2.public, amount);
+        assert!(
+            result2.is_some(),
+            "expected Some(TxOutput) when validator has KEM key"
+        );
+
+        // Verify commitment was added and total_minted updated
+        assert_eq!(state.commitment_count(), commitments_before + 1);
+        assert_eq!(state.total_minted(), minted_before + amount);
+    }
+
+    #[test]
+    fn eligible_validators_respects_activation_epoch() {
+        let mut state = ChainState::new();
+
+        // Register a validator at epoch 0 with activation_epoch = 1
+        // (simulating what apply_transaction_unchecked does: activation_epoch = self.epoch + 1)
+        let val_kp = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let mut validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
+        validator.activation_epoch = 1; // eligible starting epoch 1
+        let vid = validator.id;
+        state.register_genesis_validator(validator);
+
+        // At epoch 0, this validator should NOT be eligible
+        let eligible_0 = state.eligible_validators(0);
+        assert!(
+            !eligible_0.iter().any(|v| v.id == vid),
+            "validator with activation_epoch=1 should NOT be eligible at epoch 0"
+        );
+
+        // At epoch 1, this validator SHOULD be eligible
+        let eligible_1 = state.eligible_validators(1);
+        assert!(
+            eligible_1.iter().any(|v| v.id == vid),
+            "validator with activation_epoch=1 SHOULD be eligible at epoch 1"
+        );
+
+        // At epoch 5, still eligible
+        let eligible_5 = state.eligible_validators(5);
+        assert!(
+            eligible_5.iter().any(|v| v.id == vid),
+            "validator with activation_epoch=1 SHOULD be eligible at epoch 5"
+        );
     }
 }

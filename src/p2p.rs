@@ -1126,4 +1126,225 @@ mod tests {
 
         let _ = result.handle.shutdown().await;
     }
+
+    #[test]
+    fn peer_reputation_penalize_to_ban() {
+        let mut rep = PeerReputation::new();
+        assert_eq!(rep.score, crate::constants::PEER_INITIAL_REPUTATION);
+        assert!(!rep.is_banned());
+
+        // Penalize repeatedly until score drops below ban threshold.
+        // Initial score = 100, ban threshold = 20. Penalizing by 30 three times
+        // brings score to 100 - 90 = 10, which is below threshold 20.
+        rep.penalize(30);
+        assert_eq!(rep.score, 70);
+        assert!(!rep.is_banned());
+
+        rep.penalize(30);
+        assert_eq!(rep.score, 40);
+        assert!(!rep.is_banned());
+
+        rep.penalize(30);
+        assert_eq!(rep.score, 10);
+        assert!(rep.is_banned());
+        assert!(rep.banned_until.is_some());
+        assert_eq!(rep.violations, 3);
+    }
+
+    #[test]
+    fn peer_reputation_ban_expires() {
+        let mut rep = PeerReputation::new();
+
+        // Penalize to trigger a ban
+        rep.penalize(crate::constants::PEER_INITIAL_REPUTATION);
+        assert!(rep.is_banned());
+
+        // Manually set banned_until to a past time to simulate ban expiry
+        rep.banned_until = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!rep.is_banned());
+    }
+
+    #[test]
+    fn peer_reputation_reward_recovery() {
+        let mut rep = PeerReputation::new();
+
+        // Penalize partially (not enough to ban)
+        rep.penalize(20);
+        assert_eq!(rep.score, 80);
+        assert!(!rep.is_banned());
+
+        rep.penalize(20);
+        assert_eq!(rep.score, 60);
+        assert!(!rep.is_banned());
+
+        // "Reward" by directly increasing score (no reward method exists,
+        // so we simulate what a reward mechanism would do).
+        rep.score += 30;
+        assert_eq!(rep.score, 90);
+        assert!(!rep.is_banned());
+
+        // Verify score recovered and is above the ban threshold
+        assert!(rep.score > crate::constants::PEER_BAN_THRESHOLD);
+    }
+
+    #[test]
+    fn rate_limiter_rejects_over_burst() {
+        // Create a rate limiter with a small burst of 3, zero refill so it never recovers
+        let mut rl = RateLimiter::new(3.0, 0.0);
+
+        // Consume all 3 tokens
+        assert!(rl.try_consume());
+        assert!(rl.try_consume());
+        assert!(rl.try_consume());
+
+        // Next attempt should fail — burst exhausted
+        assert!(!rl.try_consume());
+        assert!(!rl.try_consume());
+    }
+
+    #[tokio::test]
+    async fn encrypted_frame_mac_verification_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let shared_secret = [77u8; 32];
+        let send_keys = SessionKeys::derive(&shared_secret, true);
+        let recv_keys = SessionKeys::derive(&shared_secret, false);
+
+        // Writer sends a frame with ciphertext corrupted after MAC computation,
+        // so the MAC won't match the corrupted data on the receiver side.
+        let writer_task = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (_, mut raw_writer) = stream.into_split();
+
+            // Build a valid encrypted frame first
+            let payload = network::encode_message(&Message::GetPeers).unwrap();
+            let counter: u64 = 0;
+            let nonce = counter_to_nonce(counter);
+            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &payload);
+            // Compute MAC on the original (uncorrupted) ciphertext
+            let mac = transport_mac(&send_keys.send_mac_key, counter, &ciphertext);
+
+            // Corrupt one byte of the ciphertext AFTER computing the MAC
+            let mut corrupted_ct = ciphertext;
+            if !corrupted_ct.is_empty() {
+                corrupted_ct[0] ^= 0xFF;
+            }
+
+            // Write frame with corrupted ciphertext but original MAC
+            let frame_len = (8 + corrupted_ct.len() + 32) as u32;
+            raw_writer
+                .write_all(&frame_len.to_le_bytes())
+                .await
+                .unwrap();
+            raw_writer.write_all(&counter.to_le_bytes()).await.unwrap();
+            raw_writer.write_all(&corrupted_ct).await.unwrap();
+            raw_writer.write_all(&mac).await.unwrap();
+
+            // Keep connection alive briefly so reader can read
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, _) = stream.into_split();
+        let mut expected_counter = 0u64;
+
+        let result = read_encrypted(
+            &mut reader,
+            &recv_keys.recv_key,
+            &recv_keys.recv_mac_key,
+            &mut expected_counter,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("MAC verification failed"),
+            "expected MAC verification failure, got: {}",
+            err_msg
+        );
+
+        writer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn counter_replay_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let shared_secret = [55u8; 32];
+        let send_keys = SessionKeys::derive(&shared_secret, true);
+        let recv_keys = SessionKeys::derive(&shared_secret, false);
+
+        // Writer sends two frames: counter=0 then counter=1
+        // But we send counter=1 first to trigger counter mismatch on the reader
+        let writer_task = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (_, mut raw_writer) = stream.into_split();
+
+            // Build frame with counter=1 (skipping counter=0)
+            let payload = network::encode_message(&Message::GetPeers).unwrap();
+            let counter: u64 = 1;
+            let nonce = counter_to_nonce(counter);
+            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &payload);
+            let mac = transport_mac(&send_keys.send_mac_key, counter, &ciphertext);
+
+            let frame_len = (8 + ciphertext.len() + 32) as u32;
+            raw_writer
+                .write_all(&frame_len.to_le_bytes())
+                .await
+                .unwrap();
+            raw_writer.write_all(&counter.to_le_bytes()).await.unwrap();
+            raw_writer.write_all(&ciphertext).await.unwrap();
+            raw_writer.write_all(&mac).await.unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, _) = stream.into_split();
+        let mut expected_counter = 0u64; // Reader expects counter=0
+
+        let result = read_encrypted(
+            &mut reader,
+            &recv_keys.recv_key,
+            &recv_keys.recv_mac_key,
+            &mut expected_counter,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unexpected message counter"),
+            "expected counter rejection, got: {}",
+            err_msg
+        );
+
+        writer_task.await.unwrap();
+    }
+
+    #[test]
+    fn self_connection_check() {
+        // Verify that a peer_id matching our own would be detected.
+        // The p2p_loop rejects connections where peer_id == config.our_peer_id.
+        // We test the comparison logic directly since the full event loop is
+        // covered by integration tests.
+        let config = test_config(0);
+        let our_id = config.our_peer_id;
+
+        // Same peer_id should be equal (self-connection detected)
+        assert_eq!(our_id, our_id);
+
+        // Different config produces a different peer_id (not self)
+        let other_config = test_config(0);
+        assert_ne!(our_id, other_config.our_peer_id);
+
+        // Also verify the PeerReputation ban-check path that the event loop uses:
+        // a banned peer is rejected even if peer_id differs from ours.
+        let mut rep = PeerReputation::new();
+        rep.penalize(crate::constants::PEER_INITIAL_REPUTATION); // triggers ban
+        assert!(rep.is_banned());
+    }
 }

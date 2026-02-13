@@ -685,4 +685,224 @@ mod tests {
         let b = deregister_sign_data(&chain_id, &vid, &content);
         assert_eq!(a, b);
     }
+
+    // ── New validation tests ──
+
+    #[test]
+    fn validate_rejects_register_insufficient_bond() {
+        // Build a valid TX, then change its type to ValidatorRegister.
+        // The fee (100) is far below VALIDATOR_BOND + MIN_TX_FEE (1_000_001).
+        // The InsufficientBond check (line 209) runs before the binding check (line 245),
+        // so it will trigger first.
+        let mut tx = make_test_tx();
+        let kp = FullKeypair::generate();
+        tx.tx_type = TxType::ValidatorRegister {
+            signing_key: kp.signing.public.clone(),
+            kem_public_key: kp.kem.public.clone(),
+        };
+        // tx.fee is 100, which is below VALIDATOR_BOND (1_000_000) + MIN_TX_FEE (1)
+        assert!(tx.fee < crate::constants::VALIDATOR_BOND + crate::constants::MIN_TX_FEE);
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::InsufficientBond)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_register_invalid_signing_key_size() {
+        // Regression test for the is_valid_size() fix.
+        // A signing key of 100 bytes is not a valid Dilithium5 public key (2592 bytes).
+        // The InvalidValidatorKey check runs before the binding check.
+        let mut tx = make_test_tx();
+        tx.fee = crate::constants::VALIDATOR_BOND + crate::constants::MIN_TX_FEE;
+        let kp = FullKeypair::generate();
+        tx.tx_type = TxType::ValidatorRegister {
+            signing_key: SigningPublicKey(vec![0xAB; 100]), // wrong size: 100 != 2592
+            kem_public_key: kp.kem.public.clone(),
+        };
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::InvalidValidatorKey)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_register_invalid_kem_key_size() {
+        // A KEM key of 200 bytes is not a valid Kyber1024 public key (1568 bytes).
+        let mut tx = make_test_tx();
+        tx.fee = crate::constants::VALIDATOR_BOND + crate::constants::MIN_TX_FEE;
+        let kp = FullKeypair::generate();
+        tx.tx_type = TxType::ValidatorRegister {
+            signing_key: kp.signing.public.clone(),        // valid size
+            kem_public_key: KemPublicKey(vec![0xCD; 200]), // wrong size: 200 != 1568
+        };
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::InvalidValidatorKey)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_deregister_zero_commitment() {
+        // A ValidatorDeregister with an all-zero bond_return_commitment triggers
+        // InvalidBondReturn. This check runs before the binding check.
+        let mut tx = make_test_tx();
+        let kp = FullKeypair::generate();
+        // Construct a TxOutput with a zero commitment
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&kp.kem.public, 0).unwrap();
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt(&kp.kem.public, b"bond return")
+                .unwrap();
+        tx.tx_type = TxType::ValidatorDeregister {
+            validator_id: [0x42; 32],
+            auth_signature: Signature(vec![]),
+            bond_return_output: Box::new(TxOutput {
+                commitment: crate::crypto::commitment::Commitment([0u8; 32]), // all zeros
+                stealth_address: stealth_result.address,
+                encrypted_note,
+            }),
+            bond_blinding: [0u8; 32],
+        };
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::InvalidBondReturn)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_message_too_large() {
+        // Build a TX via the builder with a message whose plaintext is larger than
+        // MAX_MESSAGE_SIZE (65536). The ciphertext will be the same size as the
+        // plaintext (XOR cipher), so it will exceed the limit. The builder does
+        // not enforce MAX_MESSAGE_SIZE, only MAX_ENCRYPT_PLAINTEXT (1 MiB).
+        // validate_structure checks message size AFTER proof verification, so the
+        // TX must have valid proofs — which the builder provides.
+        let recipient = FullKeypair::generate();
+        let oversized_plaintext = vec![0xAA; crate::constants::MAX_MESSAGE_SIZE + 1];
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 900)
+            .add_message(recipient.kem.public.clone(), oversized_plaintext)
+            .set_fee(100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert!(tx.messages[0].payload.ciphertext.len() > crate::constants::MAX_MESSAGE_SIZE);
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::MessageTooLarge)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_proof_link_mismatch() {
+        // This tests the L5 proof link cross-check between the spend proof's
+        // proof_link and the transaction input's proof_link field (line 298).
+        //
+        // The cross-check code path at lines 297-310 verifies:
+        //   1. spend_pub.proof_link == hash_to_felts(&input.proof_link)
+        //      (spend proof's proof_link matches the transaction input field)
+        //   2. spend_pub.proof_link == balance_pub.input_proof_links[i]
+        //      (spend proof's proof_link matches the balance proof's entry)
+        //
+        // To trigger the mismatch, we build a valid TX and then tamper with the
+        // input's proof_link field. This will cause the binding check to fail
+        // first (since proof_link is part of tx_content_hash), so we also
+        // recompute the binding to get past that check. The balance proof
+        // verification will then succeed (it has the original proof_links
+        // baked in), and when the cross-check compares the spend proof's
+        // proof_link against the (now-tampered) balance_pub.input_proof_links,
+        // it will find a mismatch.
+        //
+        // However, the balance proof cross-check at line 266 compares
+        // balance_pub.input_proof_links against the tampered tx input
+        // proof_links, which will also mismatch. So the actual error is
+        // InvalidBalanceProof("input proof_links mismatch") rather than
+        // InvalidSpendProof, because the balance cross-check runs first.
+        //
+        // This confirms the defense-in-depth: ANY proof_link tampering is
+        // caught — either by the balance proof cross-check (line 266) or the
+        // spend proof cross-check (line 298/307).
+        let mut tx = make_test_tx();
+        // Tamper with the input's proof_link
+        tx.inputs[0].proof_link = [0xFF; 32];
+        // Recompute binding so we get past the binding check
+        tx.tx_binding = tx.tx_content_hash();
+
+        let result = tx.validate_structure(0);
+        assert!(result.is_err());
+        // The error will be from the balance proof cross-check (proof_links mismatch)
+        // because that check runs before the spend proof cross-check.
+        match &result {
+            Err(TxValidationError::InvalidBalanceProof(msg)) => {
+                assert!(
+                    msg.contains("proof_links mismatch")
+                        || msg.contains("tx_content_hash mismatch"),
+                    "expected proof_links or tx_content_hash mismatch, got: {msg}"
+                );
+            }
+            Err(TxValidationError::InvalidSpendProof(msg)) => {
+                assert!(
+                    msg.contains("proof_link"),
+                    "expected proof_link mismatch, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidBalanceProof or InvalidSpendProof, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_no_expiry() {
+        // A TX with expiry_epoch=0 means "no expiry" and should pass validation
+        // regardless of the current epoch. Build a valid TX (which has expiry_epoch=0
+        // by default) and validate at a high epoch.
+        let tx = make_test_tx();
+        assert_eq!(tx.expiry_epoch, 0);
+        // Validate at epoch 100 — should pass because 0 means no expiry
+        assert!(tx.validate_structure(100).is_ok());
+    }
+
+    #[test]
+    fn validate_expiry_boundary() {
+        // Test the exact boundary of expiry: the condition is
+        // `current_epoch > expiry_epoch` (strictly greater), so
+        // current_epoch == expiry_epoch should PASS (not yet expired),
+        // and current_epoch == expiry_epoch + 1 should FAIL.
+        //
+        // We set expiry_epoch=5 and rebuild the binding and proofs via
+        // the builder so the TX is fully valid at the boundary.
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 900)
+            .set_fee(100)
+            .set_expiry_epoch(5)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert_eq!(tx.expiry_epoch, 5);
+        // current_epoch=5 == expiry_epoch=5 → NOT expired (passes)
+        assert!(
+            tx.validate_structure(5).is_ok(),
+            "TX should be valid when current_epoch == expiry_epoch"
+        );
+        // current_epoch=6 > expiry_epoch=5 → expired
+        assert!(matches!(
+            tx.validate_structure(6),
+            Err(TxValidationError::Expired)
+        ));
+    }
 }

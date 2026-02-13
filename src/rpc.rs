@@ -893,4 +893,171 @@ mod tests {
         assert_eq!(json["found"], true);
         assert_eq!(json["source"], "mempool");
     }
+
+    fn test_proof_options() -> winterfell::ProofOptions {
+        winterfell::ProofOptions::new(
+            42,
+            8,
+            10,
+            winterfell::FieldExtension::Quadratic,
+            8,
+            255,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        )
+    }
+
+    fn make_valid_tx(fee: u64, seed: u8) -> crate::transaction::Transaction {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let input_value = fee + 100;
+        crate::transaction::builder::TransactionBuilder::new()
+            .add_input(crate::transaction::builder::InputSpec {
+                value: input_value,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([seed; 32]),
+                spend_auth: crate::hash_domain(b"test", &[seed]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    async fn post_tx_hex(app: &axum::Router, tx_hex: &str) -> (HttpStatus, String) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"tx_hex": tx_hex}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body).to_string();
+        (status, text)
+    }
+
+    #[tokio::test]
+    async fn submit_tx_oversized_payload() {
+        let state = test_rpc_state();
+        let app = router(state);
+
+        // The router has a 2 MB body limit (DefaultBodyLimit::max(2 * 1024 * 1024)).
+        // Send a payload larger than that limit to trigger rejection.
+        // The JSON wrapper adds some overhead, so a hex string of ~2 MB will exceed 2 MB total.
+        let oversized_hex = "aa".repeat(1024 * 1024 + 1); // ~1 MB of hex = ~0.5 MB decoded
+        let large_json = serde_json::json!({"tx_hex": oversized_hex}).to_string();
+        assert!(
+            large_json.len() > 2 * 1024 * 1024,
+            "payload must exceed body limit"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(large_json))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Axum's DefaultBodyLimit returns 413 Payload Too Large
+        assert_eq!(response.status(), HttpStatus::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn submit_tx_valid_hex_invalid_bincode() {
+        let state = test_rpc_state();
+        let app = router(state);
+
+        // Valid hex that decodes to random bytes (not a valid serialized transaction)
+        let garbage_hex = hex::encode(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]);
+        let (status, body) = post_tx_hex(&app, &garbage_hex).await;
+        assert_eq!(status, HttpStatus::BAD_REQUEST);
+        assert!(
+            body.contains("invalid transaction"),
+            "unexpected error body: {}",
+            body
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_tx_duplicate() {
+        let state = test_rpc_state();
+
+        let tx = make_valid_tx(100, 200);
+        let tx_hex = hex::encode(crate::serialize(&tx).unwrap());
+
+        // First submission should succeed
+        let app = router(state.clone());
+        let (status1, _) = post_tx_hex(&app, &tx_hex).await;
+        assert_eq!(status1, HttpStatus::OK);
+
+        // Second submission of the same tx should fail as duplicate
+        let app2 = router(state);
+        let (status2, body2) = post_tx_hex(&app2, &tx_hex).await;
+        assert_eq!(status2, HttpStatus::BAD_REQUEST);
+        assert!(
+            body2.contains("already in mempool")
+                || body2.contains("Duplicate")
+                || body2.contains("duplicate"),
+            "unexpected error body: {}",
+            body2
+        );
+    }
+
+    #[tokio::test]
+    async fn get_tx_invalid_hex_id() {
+        let state = test_rpc_state();
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tx/not-valid-hex")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_tx_wrong_length_id() {
+        let state = test_rpc_state();
+        let app = router(state);
+
+        // Valid hex but only 3 bytes — not 32 bytes
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tx/aabbcc")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_peers_returns_json() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/peers").await;
+        assert_eq!(status, HttpStatus::OK);
+        // Should be a JSON array (empty since no peers connected)
+        assert!(json.is_array());
+    }
 }

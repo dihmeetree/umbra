@@ -762,4 +762,232 @@ mod tests {
         assert_eq!(dag.len(), 1);
         assert!(dag.get(&v2.id).is_some());
     }
+
+    #[test]
+    fn reject_too_many_parents() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Build enough parent vertices first (MAX_PARENTS + 1 parents needed)
+        let max = crate::constants::MAX_PARENTS; // 8
+        let mut parent_ids = Vec::new();
+        for i in 0..(max + 1) {
+            let v = make_vertex_with_nonce(vec![gid], 1, i as u8);
+            dag.insert_unchecked(v.clone()).unwrap();
+            parent_ids.push(v.id);
+        }
+
+        // Create a vertex with MAX_PARENTS + 1 parents
+        let bad_vertex = make_vertex_with_nonce(parent_ids, 2, 99);
+        let result = dag.insert_unchecked(bad_vertex);
+        assert!(matches!(result, Err(VertexError::TooManyParents)));
+    }
+
+    #[test]
+    fn reject_too_many_transactions() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Create a vertex with more than MAX_TXS_PER_VERTEX transactions
+        let id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[0; 32], None);
+        let dummy_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            fee: 0,
+            chain_id: [0u8; 32],
+            expiry_epoch: 0,
+            balance_proof: crate::crypto::stark::types::BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+            tx_type: crate::transaction::TxType::Transfer,
+        };
+        let txs: Vec<Transaction> = (0..crate::constants::MAX_TXS_PER_VERTEX + 1)
+            .map(|_| dummy_tx.clone())
+            .collect();
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: txs,
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        let result = dag.insert_unchecked(v);
+        assert!(matches!(result, Err(VertexError::TooManyTransactions)));
+    }
+
+    #[test]
+    fn reject_duplicate_parent() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex(vec![gid], 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+
+        // Create a vertex with the same parent listed twice
+        let id = Vertex::compute_id(&[v1.id, v1.id], 0, 2, &[0; 32], &[0; 32], None);
+        let dup_parent_vertex = Vertex {
+            id,
+            parents: vec![v1.id, v1.id],
+            epoch: 0,
+            round: 2,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: vec![],
+            timestamp: 2000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        let result = dag.insert_unchecked(dup_parent_vertex);
+        assert!(matches!(result, Err(VertexError::DuplicateParent)));
+    }
+
+    #[test]
+    fn reject_no_parents_non_genesis() {
+        let genesis = Dag::genesis_vertex();
+        let mut dag = Dag::new(genesis);
+
+        // Create a vertex with round > 0 but no parents
+        let id = Vertex::compute_id(&[], 0, 1, &[0; 32], &[0; 32], None);
+        let v = Vertex {
+            id,
+            parents: vec![],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        let result = dag.insert_unchecked(v);
+        assert!(matches!(result, Err(VertexError::NoParents)));
+    }
+
+    #[test]
+    fn reject_too_many_unfinalized() {
+        // The MAX_UNFINALIZED limit is 10_000. To test this efficiently,
+        // we manually build a DAG with a long chain and control finalization.
+        // We create a chain of vertices from genesis, none finalized (except genesis).
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+        // Genesis is finalized. We need 10_000 unfinalized vertices.
+        // unfinalized_count = vertices.len() - finalized.len()
+        // After inserting N vertices: vertices = N+1, finalized = 1, unfinalized = N
+        // We need N = 10_000 to trigger the limit on the next insert.
+
+        let mut prev_id = gid;
+        for round in 1..=10_000u64 {
+            let v = make_vertex_with_nonce(vec![prev_id], round, (round % 256) as u8);
+            prev_id = v.id;
+            dag.insert_unchecked(v).unwrap();
+        }
+
+        // Now unfinalized_count = 10_000, which equals MAX_UNFINALIZED
+        // The next insert should be rejected
+        let overflow_v = make_vertex_with_nonce(vec![prev_id], 10_001, 42);
+        let result = dag.insert_unchecked(overflow_v);
+        assert!(matches!(result, Err(VertexError::TooManyUnfinalized)));
+    }
+
+    #[test]
+    fn finalized_order_excludes_non_finalized() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex_with_nonce(vec![gid], 1, 0);
+        let v2 = make_vertex_with_nonce(vec![gid], 1, 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+        dag.insert_unchecked(v2.clone()).unwrap();
+
+        // Finalize only v1, not v2
+        dag.finalize(&v1.id);
+
+        let order = dag.finalized_order();
+        // Should contain genesis and v1 only
+        assert_eq!(order.len(), 2);
+        assert!(order.contains(&gid));
+        assert!(order.contains(&v1.id));
+        assert!(!order.contains(&v2.id));
+    }
+
+    #[test]
+    fn finalize_unknown_vertex_returns_false() {
+        let genesis = Dag::genesis_vertex();
+        let mut dag = Dag::new(genesis);
+
+        let unknown_id = VertexId([0xAB; 32]);
+        assert!(!dag.finalize(&unknown_id));
+    }
+
+    #[test]
+    fn safe_indexing_missing_vertex() {
+        // Regression test: after pruning, finalized_order must not panic
+        // even if the finalized set references vertex IDs that have been
+        // removed from the vertices map.
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Build: genesis -> v1 (epoch 0) -> v2 (epoch 100)
+        let id1 = Vertex::compute_id(&[gid], 0, 1, &[1; 32], &[1; 32], None);
+        let v1 = Vertex {
+            id: id1,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![1; 32]),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        dag.insert_unchecked(v1.clone()).unwrap();
+        dag.finalize(&v1.id);
+
+        let id2 = Vertex::compute_id(&[v1.id], 100, 2, &[2; 32], &[2; 32], None);
+        let v2 = Vertex {
+            id: id2,
+            parents: vec![v1.id],
+            epoch: 100,
+            round: 2,
+            proposer: SigningPublicKey(vec![2; 32]),
+            transactions: vec![],
+            timestamp: 100000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        dag.insert_unchecked(v2.clone()).unwrap();
+        dag.finalize(&v2.id);
+
+        // Prune vertices older than epoch 50 (removes genesis and v1)
+        let pruned = dag.prune_finalized(50);
+        assert_eq!(pruned, 2);
+
+        // finalized_order should not panic; it should return only v2
+        // (genesis and v1 were pruned from vertices map)
+        let order = dag.finalized_order();
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0], v2.id);
+    }
 }

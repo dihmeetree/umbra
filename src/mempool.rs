@@ -605,4 +605,216 @@ mod tests {
             assert!(percentiles[i] <= percentiles[i + 1]);
         }
     }
+
+    #[test]
+    fn byte_limit_eviction() {
+        // Insert a single tx to measure its size
+        let sample_tx = make_test_tx(5, 80);
+        let one_tx_size = sample_tx.estimated_size();
+
+        // Set max_bytes to hold at most 2 transactions
+        let config = MempoolConfig {
+            max_transactions: usize::MAX,
+            max_bytes: one_tx_size * 2 + one_tx_size / 2, // ~2.5x one tx
+        };
+        let mut pool = Mempool::new(config);
+
+        let tx_low = make_test_tx(5, 81);
+        let tx_mid = make_test_tx(10, 82);
+        pool.insert(tx_low.clone()).unwrap();
+        pool.insert(tx_mid.clone()).unwrap();
+        assert_eq!(pool.len(), 2);
+        let bytes_after_two = pool.total_bytes();
+        assert!(bytes_after_two > 0);
+
+        // Inserting a third tx with a higher fee should evict the lowest-fee tx
+        let tx_high = make_test_tx(20, 83);
+        pool.insert(tx_high.clone()).unwrap();
+        assert_eq!(pool.len(), 2);
+        // The lowest fee tx (fee=5) should have been evicted
+        assert!(!pool.contains(&tx_low.tx_id()));
+        assert!(pool.contains(&tx_mid.tx_id()));
+        assert!(pool.contains(&tx_high.tx_id()));
+        // total_bytes should stay within max_bytes
+        assert!(pool.total_bytes() <= pool.config.max_bytes);
+    }
+
+    #[test]
+    fn fee_too_low_boundary() {
+        let config = MempoolConfig {
+            max_transactions: 2,
+            max_bytes: usize::MAX,
+        };
+        let mut pool = Mempool::new(config);
+
+        let tx_a = make_test_tx(10, 90);
+        let tx_b = make_test_tx(20, 91);
+        pool.insert(tx_a.clone()).unwrap();
+        pool.insert(tx_b.clone()).unwrap();
+        assert_eq!(pool.len(), 2);
+
+        // The minimum fee in pool is 10. Inserting a tx with fee == 10 should
+        // be rejected because the condition is `fee <= lowest_fee`.
+        let tx_equal = make_test_tx(10, 92);
+        match pool.insert(tx_equal) {
+            Err(MempoolError::FeeTooLow { fee, min_fee }) => {
+                assert_eq!(fee, 10);
+                assert_eq!(min_fee, 11); // lowest_fee + 1
+            }
+            other => panic!("expected FeeTooLow, got {:?}", other),
+        }
+        assert_eq!(pool.len(), 2);
+
+        // Inserting a tx with fee = 11 (one above lowest) should succeed and evict fee=10
+        let tx_above = make_test_tx(11, 93);
+        pool.insert(tx_above.clone()).unwrap();
+        assert_eq!(pool.len(), 2);
+        assert!(!pool.contains(&tx_a.tx_id())); // fee=10 evicted
+        assert!(pool.contains(&tx_b.tx_id())); // fee=20 stays
+        assert!(pool.contains(&tx_above.tx_id())); // fee=11 accepted
+    }
+
+    #[test]
+    fn drain_cleans_nullifier_index() {
+        let mut pool = Mempool::with_defaults();
+
+        // Build two transactions with the same nullifier (same value, blinding, spend_auth)
+        // but different outputs (different recipients) so they have different tx_ids.
+        let value = 110u64;
+        let fee = 10u64;
+        let blinding = BlindingFactor::from_bytes([100; 32]);
+        let spend_auth = crate::hash_domain(b"test", &[100]);
+
+        let recipient1 = crate::crypto::keys::FullKeypair::generate();
+        let tx1 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding: blinding.clone(),
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(recipient1.kem.public.clone(), value - fee)
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let recipient2 = crate::crypto::keys::FullKeypair::generate();
+        let tx2 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding: blinding.clone(),
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(recipient2.kem.public.clone(), value - fee)
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        // Confirm same nullifier, different tx_ids
+        let nullifier = tx1.inputs[0].nullifier;
+        assert_eq!(tx2.inputs[0].nullifier, nullifier);
+        assert_ne!(tx1.tx_id(), tx2.tx_id());
+
+        // Insert tx1, then drain
+        pool.insert(tx1).unwrap();
+        assert_eq!(pool.len(), 1);
+        let drained = pool.drain_highest_fee(100);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(pool.len(), 0);
+
+        // tx2 has the same nullifier; it should be accepted since drain cleaned nullifier index
+        assert!(pool.insert(tx2).is_ok());
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn epoch_reject_expired_on_insert() {
+        let mut pool = Mempool::with_defaults();
+        pool.set_epoch(10);
+
+        // Build a tx with expiry_epoch=5: it's already expired at epoch 10
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx_expired = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 110,
+                blinding: BlindingFactor::from_bytes([110; 32]),
+                spend_auth: crate::hash_domain(b"test", &[110]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(10)
+            .set_expiry_epoch(5)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        // validate_structure(10) should reject: 10 > 5 → Expired
+        match pool.insert(tx_expired) {
+            Err(MempoolError::ValidationFailed(ref e)) => {
+                // Should be a TxValidationError::Expired wrapped in ValidationFailed
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("expired") || msg.contains("Expired"),
+                    "unexpected error: {}",
+                    msg
+                );
+            }
+            other => panic!("expected ValidationFailed(Expired), got {:?}", other),
+        }
+
+        // Build a tx with expiry_epoch=0 (no expiry) — should be accepted
+        let tx_no_expiry = make_test_tx(10, 111);
+        assert_eq!(tx_no_expiry.expiry_epoch, 0);
+        assert!(pool.insert(tx_no_expiry).is_ok());
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn fee_percentiles_single_tx() {
+        let mut pool = Mempool::with_defaults();
+        pool.insert(make_test_tx(42, 120)).unwrap();
+
+        let percentiles = pool.fee_percentiles().unwrap();
+        // With a single transaction, all percentiles should be the same value
+        for &p in &percentiles {
+            assert_eq!(p, 42);
+        }
+    }
+
+    #[test]
+    fn total_bytes_accurate_after_operations() {
+        let mut pool = Mempool::with_defaults();
+
+        let tx1 = make_test_tx(10, 130);
+        let tx2 = make_test_tx(20, 131);
+        let tx3 = make_test_tx(30, 132);
+        let tx1_size = tx1.estimated_size();
+        let tx2_size = tx2.estimated_size();
+        let tx3_size = tx3.estimated_size();
+        let tx2_id = tx2.tx_id();
+
+        pool.insert(tx1).unwrap();
+        pool.insert(tx2).unwrap();
+        pool.insert(tx3).unwrap();
+
+        let bytes_after_three = pool.total_bytes();
+        assert_eq!(bytes_after_three, tx1_size + tx2_size + tx3_size);
+
+        // Remove tx2 by txid
+        pool.remove(&tx2_id);
+        assert_eq!(pool.total_bytes(), bytes_after_three - tx2_size);
+
+        // Insert another
+        let tx4 = make_test_tx(40, 133);
+        let tx4_size = tx4.estimated_size();
+        pool.insert(tx4).unwrap();
+        assert_eq!(pool.total_bytes(), bytes_after_three - tx2_size + tx4_size);
+
+        // Drain all
+        pool.drain_highest_fee(100);
+        assert_eq!(pool.total_bytes(), 0);
+    }
 }
