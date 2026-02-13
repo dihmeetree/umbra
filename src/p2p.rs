@@ -1,19 +1,230 @@
 //! P2P networking layer using async TCP with tokio.
 //!
-//! Uses the existing `network::Message` framing (4-byte LE length prefix + bincode).
-//! Architecture: channel-based communication between the application and the P2P
-//! event loop via `P2pHandle` (commands) and `P2pEvent` (events).
+//! All connections are encrypted and mutually authenticated:
+//! 1. Hello exchange (plaintext) — version check + KEM public key exchange
+//! 2. Kyber1024 KEM handshake — initiator encapsulates to responder's KEM PK
+//! 3. Dilithium5 auth — both sides sign the handshake transcript
+//! 4. Encrypted transport — BLAKE3 XOR keystream + keyed-BLAKE3 MAC per message
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::crypto::keys::SigningPublicKey;
+use crate::crypto::keys::{KemKeypair, SigningKeypair, SigningPublicKey};
 use crate::network::{self, Message, PeerId, PeerInfo, PROTOCOL_VERSION};
 use crate::Hash;
+
+// ── Rate Limiting ──
+
+/// Simple token-bucket rate limiter for per-peer message throttling.
+struct RateLimiter {
+    tokens: f64,
+    max_tokens: f64,
+    refill_per_sec: f64,
+    last_refill: std::time::Instant,
+}
+
+impl RateLimiter {
+    fn new(max_tokens: f64, refill_per_sec: f64) -> Self {
+        RateLimiter {
+            tokens: max_tokens,
+            max_tokens,
+            refill_per_sec,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    fn try_consume(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.max_tokens);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ── Transport Encryption ──
+
+/// Nonce size for the BLAKE3 XOR keystream cipher.
+const TRANSPORT_NONCE_SIZE: usize = 24;
+
+/// Session keys for encrypted P2P transport.
+/// Initiator and responder derive mirrored send/recv key pairs so that
+/// each side's send key is the other side's recv key.
+struct SessionKeys {
+    send_key: [u8; 32],
+    recv_key: [u8; 32],
+    send_mac_key: [u8; 32],
+    recv_mac_key: [u8; 32],
+}
+
+impl SessionKeys {
+    fn derive(shared_secret: &[u8; 32], is_initiator: bool) -> Self {
+        let init_send = crate::hash_domain(b"spectra.p2p.init.send", shared_secret);
+        let resp_send = crate::hash_domain(b"spectra.p2p.resp.send", shared_secret);
+        let init_mac = crate::hash_domain(b"spectra.p2p.init.mac", shared_secret);
+        let resp_mac = crate::hash_domain(b"spectra.p2p.resp.mac", shared_secret);
+        if is_initiator {
+            SessionKeys {
+                send_key: init_send,
+                recv_key: resp_send,
+                send_mac_key: init_mac,
+                recv_mac_key: resp_mac,
+            }
+        } else {
+            SessionKeys {
+                send_key: resp_send,
+                recv_key: init_send,
+                send_mac_key: resp_mac,
+                recv_mac_key: init_mac,
+            }
+        }
+    }
+}
+
+/// Convert a message counter to a 24-byte nonce for the XOR keystream.
+fn counter_to_nonce(counter: u64) -> [u8; TRANSPORT_NONCE_SIZE] {
+    let mut nonce = [0u8; TRANSPORT_NONCE_SIZE];
+    nonce[..8].copy_from_slice(&counter.to_le_bytes());
+    nonce
+}
+
+/// BLAKE3-based XOR keystream cipher (same construction as crypto/encryption.rs).
+fn xor_keystream(key: &[u8; 32], nonce: &[u8; TRANSPORT_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(data.len());
+    let mut block_counter = 0u64;
+    let mut pos = 0;
+    while pos < data.len() {
+        let mut block_input = Vec::with_capacity(32 + TRANSPORT_NONCE_SIZE + 8);
+        block_input.extend_from_slice(key);
+        block_input.extend_from_slice(nonce);
+        block_input.extend_from_slice(&block_counter.to_le_bytes());
+        let block = crate::hash_domain(b"spectra.keystream", &block_input);
+        let remaining = data.len() - pos;
+        let take = remaining.min(32);
+        for i in 0..take {
+            output.push(data[pos + i] ^ block[i]);
+        }
+        pos += take;
+        block_counter += 1;
+    }
+    output
+}
+
+/// Compute keyed-BLAKE3 MAC for an encrypted transport frame.
+fn transport_mac(mac_key: &[u8; 32], counter: u64, ciphertext: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new_keyed(mac_key);
+    hasher.update(&counter.to_le_bytes());
+    hasher.update(&(ciphertext.len() as u64).to_le_bytes());
+    hasher.update(ciphertext);
+    *hasher.finalize().as_bytes()
+}
+
+/// Compute the handshake transcript hash for mutual authentication.
+/// Binds both peer identities and the KEM ciphertext to prevent replay/MITM.
+fn compute_transcript_hash(initiator_id: &Hash, responder_id: &Hash, kem_ct: &[u8]) -> Hash {
+    let mut buf = Vec::with_capacity(32 + 32 + kem_ct.len());
+    buf.extend_from_slice(initiator_id);
+    buf.extend_from_slice(responder_id);
+    buf.extend_from_slice(kem_ct);
+    crate::hash_domain(b"spectra.p2p.transcript", &buf)
+}
+
+/// Write an encrypted + authenticated message frame.
+///
+/// Frame format: `[4-byte LE frame_len][8-byte LE counter][ciphertext][32-byte MAC]`
+async fn write_encrypted(
+    writer: &mut OwnedWriteHalf,
+    msg: &Message,
+    send_key: &[u8; 32],
+    send_mac_key: &[u8; 32],
+    counter: &mut u64,
+) -> Result<(), P2pError> {
+    let payload = network::encode_message(msg).map_err(|e| P2pError::SendFailed(e.to_string()))?;
+    let nonce = counter_to_nonce(*counter);
+    let ciphertext = xor_keystream(send_key, &nonce, &payload);
+    let mac = transport_mac(send_mac_key, *counter, &ciphertext);
+
+    let frame_len = (8 + ciphertext.len() + 32) as u32;
+    let mut frame = Vec::with_capacity(4 + frame_len as usize);
+    frame.extend_from_slice(&frame_len.to_le_bytes());
+    frame.extend_from_slice(&counter.to_le_bytes());
+    frame.extend_from_slice(&ciphertext);
+    frame.extend_from_slice(&mac);
+
+    *counter += 1;
+    writer
+        .write_all(&frame)
+        .await
+        .map_err(|e| P2pError::SendFailed(e.to_string()))?;
+    Ok(())
+}
+
+/// Read and decrypt an authenticated message frame.
+async fn read_encrypted(
+    reader: &mut OwnedReadHalf,
+    recv_key: &[u8; 32],
+    recv_mac_key: &[u8; 32],
+    expected_counter: &mut u64,
+) -> Result<Message, P2pError> {
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
+    let frame_len = u32::from_le_bytes(len_buf) as usize;
+    // Minimum: 8 (counter) + 0 (empty ciphertext) + 32 (MAC)
+    if frame_len < 40 {
+        return Err(P2pError::ConnectionFailed(
+            "encrypted frame too short".into(),
+        ));
+    }
+    if frame_len > crate::constants::MAX_NETWORK_MESSAGE_BYTES + 44 {
+        return Err(P2pError::ConnectionFailed(
+            "encrypted frame too large".into(),
+        ));
+    }
+
+    let mut frame = vec![0u8; frame_len];
+    reader
+        .read_exact(&mut frame)
+        .await
+        .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
+
+    // Parse: [8-byte counter][ciphertext][32-byte MAC]
+    let counter = u64::from_le_bytes(frame[..8].try_into().unwrap());
+    let ciphertext = &frame[8..frame_len - 32];
+    let mac: [u8; 32] = frame[frame_len - 32..].try_into().unwrap();
+
+    if counter != *expected_counter {
+        return Err(P2pError::ConnectionFailed(
+            "unexpected message counter".into(),
+        ));
+    }
+    *expected_counter += 1;
+
+    let expected_mac = transport_mac(recv_mac_key, counter, ciphertext);
+    if !crate::constant_time_eq(&expected_mac, &mac) {
+        return Err(P2pError::ConnectionFailed("MAC verification failed".into()));
+    }
+
+    let nonce = counter_to_nonce(counter);
+    let plaintext = xor_keystream(recv_key, &nonce, ciphertext);
+
+    network::decode_message(&plaintext)
+        .ok_or_else(|| P2pError::ConnectionFailed("decode failed after decryption".into()))
+}
+
+// ── Public Types ──
 
 /// Errors from P2P operations.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -65,13 +276,17 @@ pub struct P2pHandle {
 }
 
 /// Configuration for the P2P layer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct P2pConfig {
     pub listen_addr: SocketAddr,
     pub max_peers: usize,
     pub our_peer_id: Hash,
     pub our_public_key: SigningPublicKey,
     pub listen_port: u16,
+    /// KEM keypair for transport encryption (Kyber1024).
+    pub our_kem_keypair: KemKeypair,
+    /// Signing keypair for handshake authentication (Dilithium5).
+    pub our_signing_keypair: SigningKeypair,
 }
 
 /// State for a single peer connection.
@@ -97,6 +312,8 @@ enum InternalEvent {
     /// A peer disconnected.
     Disconnected(PeerId),
 }
+
+// ── P2pHandle ──
 
 impl P2pHandle {
     /// Create a handle from a raw sender (for testing).
@@ -151,6 +368,8 @@ impl P2pHandle {
     }
 }
 
+// ── Startup & Event Loop ──
+
 /// Result of starting the P2P layer.
 pub struct P2pStartResult {
     pub handle: P2pHandle,
@@ -160,9 +379,6 @@ pub struct P2pStartResult {
 }
 
 /// Start the P2P networking layer.
-///
-/// Returns a handle for sending commands, a receiver for events, and the
-/// actual bound address.
 pub async fn start(config: P2pConfig) -> Result<P2pStartResult, P2pError> {
     let listener = TcpListener::bind(config.listen_addr)
         .await
@@ -195,7 +411,6 @@ async fn p2p_loop(
 
     loop {
         tokio::select! {
-            // Accept incoming connections
             result = listener.accept() => {
                 if let Ok((stream, addr)) = result {
                     if peers.len() >= config.max_peers {
@@ -211,7 +426,6 @@ async fn p2p_loop(
                 }
             }
 
-            // Handle commands from application
             Some(cmd) = command_rx.recv() => {
                 match cmd {
                     P2pCommand::Connect(addr) => {
@@ -254,7 +468,6 @@ async fn p2p_loop(
                 }
             }
 
-            // Handle internal events from connection tasks
             Some(event) = internal_rx.recv() => {
                 match event {
                     InternalEvent::Connected { peer_id, public_key, addr, msg_tx } => {
@@ -281,10 +494,10 @@ async fn p2p_loop(
     }
 }
 
-/// Handle an inbound TCP connection: perform handshake, then spawn read/write tasks.
-///
-/// M9: The entire handshake is wrapped in a timeout to prevent slow-loris
-/// attacks where a peer connects but never completes the handshake.
+// ── Connection Handling ──
+
+/// Handle an inbound TCP connection: handshake (with timeout), KEM exchange,
+/// mutual auth, then spawn encrypted read/write tasks.
 async fn handle_inbound(
     stream: TcpStream,
     addr: SocketAddr,
@@ -300,24 +513,25 @@ async fn handle_inbound(
     .map_err(|_| P2pError::ConnectionFailed("inbound handshake timeout".into()))?
 }
 
+/// Inbound handshake (responder side).
 async fn handle_inbound_inner(
     stream: TcpStream,
     addr: SocketAddr,
     config: &P2pConfig,
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> Result<(), P2pError> {
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, mut writer) = stream.into_split();
 
-    // Send our Hello
+    // 1. Hello exchange (plaintext)
     let hello = Message::Hello {
         version: PROTOCOL_VERSION,
         peer_id: config.our_peer_id,
         public_key: config.our_public_key.clone(),
         listen_port: config.listen_port,
+        kem_public_key: config.our_kem_keypair.public.clone(),
     };
     write_message(&mut writer, &hello).await?;
 
-    // Read their Hello
     let their_hello = read_message(&mut reader).await?;
     let (peer_id, public_key) = match their_hello {
         Message::Hello {
@@ -334,10 +548,54 @@ async fn handle_inbound_inner(
         _ => return Err(P2pError::InvalidHandshake),
     };
 
-    spawn_connection_tasks(peer_id, public_key, addr, reader, writer, internal_tx).await
+    // 2. Receive KEM ciphertext from initiator
+    let key_exchange_msg = read_message(&mut reader).await?;
+    let kem_ct = match key_exchange_msg {
+        Message::KeyExchange { kem_ciphertext } => kem_ciphertext,
+        _ => return Err(P2pError::InvalidHandshake),
+    };
+
+    // 3. Decapsulate to get shared secret
+    let shared_secret = config
+        .our_kem_keypair
+        .decapsulate(&kem_ct)
+        .ok_or(P2pError::InvalidHandshake)?;
+
+    // 4. Derive session keys (responder)
+    let session_keys = SessionKeys::derive(&shared_secret.0, false);
+
+    // 5. Compute transcript hash (canonical: initiator_id || responder_id || kem_ct)
+    let transcript = compute_transcript_hash(&peer_id, &config.our_peer_id, &kem_ct.0);
+
+    // 6. Verify initiator's auth signature
+    let auth_msg = read_message(&mut reader).await?;
+    match auth_msg {
+        Message::AuthResponse { ref signature } => {
+            if !public_key.verify(&transcript, signature) {
+                return Err(P2pError::InvalidHandshake);
+            }
+        }
+        _ => return Err(P2pError::InvalidHandshake),
+    }
+
+    // 7. Sign transcript and send our auth
+    let signature = config.our_signing_keypair.sign(&transcript);
+    write_message(&mut writer, &Message::AuthResponse { signature }).await?;
+
+    // 8. Switch to encrypted transport
+    spawn_encrypted_connection_tasks(
+        peer_id,
+        public_key,
+        addr,
+        reader,
+        writer,
+        session_keys,
+        internal_tx,
+    )
+    .await
 }
 
-/// Handle an outbound TCP connection: connect, perform handshake, spawn tasks.
+/// Handle an outbound TCP connection (initiator side).
 async fn handle_outbound(
     addr: SocketAddr,
     config: &P2pConfig,
@@ -349,49 +607,93 @@ async fn handle_outbound(
         .map_err(|_| P2pError::ConnectionFailed("timeout".into()))?
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
 
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, mut writer) = stream.into_split();
 
-    // Send our Hello
+    // 1. Hello exchange (plaintext)
     let hello = Message::Hello {
         version: PROTOCOL_VERSION,
         peer_id: config.our_peer_id,
         public_key: config.our_public_key.clone(),
         listen_port: config.listen_port,
+        kem_public_key: config.our_kem_keypair.public.clone(),
     };
     write_message(&mut writer, &hello).await?;
 
-    // Read their Hello
     let their_hello = read_message(&mut reader).await?;
-    let (peer_id, public_key) = match their_hello {
+    let (peer_id, public_key, peer_kem_pk) = match their_hello {
         Message::Hello {
             version,
             peer_id,
             public_key,
+            kem_public_key,
             ..
         } => {
             if version != PROTOCOL_VERSION {
                 return Err(P2pError::InvalidHandshake);
             }
-            (peer_id, public_key)
+            (peer_id, public_key, kem_public_key)
         }
         _ => return Err(P2pError::InvalidHandshake),
     };
 
-    spawn_connection_tasks(peer_id, public_key, addr, reader, writer, internal_tx).await
+    // 2. KEM encapsulate to peer's public key
+    let (shared_secret, kem_ct) = peer_kem_pk
+        .encapsulate()
+        .ok_or(P2pError::InvalidHandshake)?;
+
+    // 3. Derive session keys and transcript BEFORE sending (kem_ct is moved by send)
+    let session_keys = SessionKeys::derive(&shared_secret.0, true);
+    let transcript = compute_transcript_hash(&config.our_peer_id, &peer_id, &kem_ct.0);
+
+    // 4. Send KEM ciphertext
+    write_message(
+        &mut writer,
+        &Message::KeyExchange {
+            kem_ciphertext: kem_ct,
+        },
+    )
+    .await?;
+
+    // 5. Sign transcript and send auth
+    let signature = config.our_signing_keypair.sign(&transcript);
+    write_message(&mut writer, &Message::AuthResponse { signature }).await?;
+
+    // 6. Verify responder's auth signature
+    let auth_msg = read_message(&mut reader).await?;
+    match auth_msg {
+        Message::AuthResponse { signature } => {
+            if !public_key.verify(&transcript, &signature) {
+                return Err(P2pError::InvalidHandshake);
+            }
+        }
+        _ => return Err(P2pError::InvalidHandshake),
+    }
+
+    // 7. Switch to encrypted transport
+    spawn_encrypted_connection_tasks(
+        peer_id,
+        public_key,
+        addr,
+        reader,
+        writer,
+        session_keys,
+        internal_tx,
+    )
+    .await
 }
 
-/// Spawn read and write tasks for an established connection.
-async fn spawn_connection_tasks(
+/// Spawn encrypted read and write tasks for an authenticated connection.
+async fn spawn_encrypted_connection_tasks(
     peer_id: PeerId,
     public_key: SigningPublicKey,
     addr: SocketAddr,
-    mut reader: tokio::io::ReadHalf<TcpStream>,
-    mut writer: tokio::io::WriteHalf<TcpStream>,
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    session_keys: SessionKeys,
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> Result<(), P2pError> {
     let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(128);
 
-    // Notify that connection is established
     internal_tx
         .send(InternalEvent::Connected {
             peer_id,
@@ -405,11 +707,47 @@ async fn spawn_connection_tasks(
     let internal_tx_read = internal_tx.clone();
     let internal_tx_disconnect = internal_tx;
 
-    // Read task
+    let SessionKeys {
+        send_key,
+        recv_key,
+        send_mac_key,
+        recv_mac_key,
+    } = session_keys;
+
+    // Encrypted read task with per-peer rate limiting
     tokio::spawn(async move {
+        let mut rate_limiter = RateLimiter::new(
+            crate::constants::PEER_MSG_BURST,
+            crate::constants::PEER_MSG_RATE_LIMIT,
+        );
+        let mut violations: u32 = 0;
+        let mut reader = reader;
+        let mut expected_counter: u64 = 0;
+
         loop {
-            match read_message(&mut reader).await {
+            match read_encrypted(&mut reader, &recv_key, &recv_mac_key, &mut expected_counter).await
+            {
                 Ok(message) => {
+                    if !rate_limiter.try_consume() {
+                        violations += 1;
+                        tracing::warn!(
+                            "Rate limit exceeded for peer {} ({}/{})",
+                            hex::encode(&peer_id[..8]),
+                            violations,
+                            crate::constants::PEER_RATE_LIMIT_STRIKES
+                        );
+                        if violations >= crate::constants::PEER_RATE_LIMIT_STRIKES {
+                            tracing::warn!(
+                                "Disconnecting peer {} for repeated rate violations",
+                                hex::encode(&peer_id[..8])
+                            );
+                            let _ = internal_tx_read
+                                .send(InternalEvent::Disconnected(peer_id))
+                                .await;
+                            break;
+                        }
+                        continue;
+                    }
                     if internal_tx_read
                         .send(InternalEvent::Message {
                             from: peer_id,
@@ -431,10 +769,15 @@ async fn spawn_connection_tasks(
         }
     });
 
-    // Write task
+    // Encrypted write task
     tokio::spawn(async move {
+        let mut writer = writer;
+        let mut counter: u64 = 0;
         while let Some(msg) = msg_rx.recv().await {
-            if write_message(&mut writer, &msg).await.is_err() {
+            if write_encrypted(&mut writer, &msg, &send_key, &send_mac_key, &mut counter)
+                .await
+                .is_err()
+            {
                 let _ = internal_tx_disconnect
                     .send(InternalEvent::Disconnected(peer_id))
                     .await;
@@ -446,8 +789,10 @@ async fn spawn_connection_tasks(
     Ok(())
 }
 
-/// Read a single framed message from a TCP stream.
-async fn read_message(stream: &mut tokio::io::ReadHalf<TcpStream>) -> Result<Message, P2pError> {
+// ── Plaintext I/O (used during handshake only) ──
+
+/// Read a single plaintext framed message from a TCP stream.
+async fn read_message(stream: &mut OwnedReadHalf) -> Result<Message, P2pError> {
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
@@ -463,7 +808,6 @@ async fn read_message(stream: &mut tokio::io::ReadHalf<TcpStream>) -> Result<Mes
         .await
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
 
-    // Build the full frame for decode_message
     let mut frame = Vec::with_capacity(4 + len);
     frame.extend_from_slice(&len_buf);
     frame.extend_from_slice(&payload);
@@ -471,14 +815,15 @@ async fn read_message(stream: &mut tokio::io::ReadHalf<TcpStream>) -> Result<Mes
         .ok_or_else(|| P2pError::ConnectionFailed("decode failed".into()))
 }
 
-/// Write a single framed message to a TCP stream.
-async fn write_message(
-    stream: &mut tokio::io::WriteHalf<TcpStream>,
-    msg: &Message,
-) -> Result<(), P2pError> {
+/// Write a single plaintext framed message to a TCP stream.
+async fn write_message(stream: &mut OwnedWriteHalf, msg: &Message) -> Result<(), P2pError> {
     let bytes = network::encode_message(msg).map_err(|e| P2pError::SendFailed(e.to_string()))?;
     stream
         .write_all(&bytes)
+        .await
+        .map_err(|e| P2pError::SendFailed(e.to_string()))?;
+    stream
+        .flush()
         .await
         .map_err(|e| P2pError::SendFailed(e.to_string()))?;
     Ok(())
@@ -487,22 +832,25 @@ async fn write_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::keys::SigningKeypair;
+    use crate::crypto::keys::{KemKeypair, SigningKeypair};
 
     fn test_config(port: u16) -> P2pConfig {
         let kp = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
         P2pConfig {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], port)),
             max_peers: crate::constants::MAX_PEERS,
             our_peer_id: kp.public.fingerprint(),
-            our_public_key: kp.public,
+            our_public_key: kp.public.clone(),
             listen_port: port,
+            our_kem_keypair: kem_kp,
+            our_signing_keypair: kp,
         }
     }
 
     #[tokio::test]
     async fn start_and_connect() {
-        let config1 = test_config(0); // OS-assigned port
+        let config1 = test_config(0);
         let result1 = start(config1).await.unwrap();
         let handle1 = result1.handle;
         let mut events1 = result1.events;
@@ -513,19 +861,135 @@ mod tests {
         let handle2 = result2.handle;
         let mut events2 = result2.events;
 
-        // Connect peer2 to peer1's actual bound address
         handle2.connect(addr1).await.unwrap();
 
-        // Both should get PeerConnected events
-        let timeout = std::time::Duration::from_secs(2);
+        let timeout = std::time::Duration::from_secs(5);
         let event1 = tokio::time::timeout(timeout, events1.recv()).await;
         let event2 = tokio::time::timeout(timeout, events2.recv()).await;
 
-        // At least one side should see a connection event
         assert!(event1.is_ok() || event2.is_ok());
 
         let _ = handle1.shutdown().await;
         let _ = handle2.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn encrypted_message_exchange() {
+        let config1 = test_config(0);
+        let peer_id1 = config1.our_peer_id;
+        let result1 = start(config1).await.unwrap();
+        let handle1 = result1.handle;
+        let mut events1 = result1.events;
+        let addr1 = result1.local_addr;
+
+        let config2 = test_config(0);
+        let result2 = start(config2).await.unwrap();
+        let handle2 = result2.handle;
+        let mut events2 = result2.events;
+
+        handle2.connect(addr1).await.unwrap();
+
+        let timeout = std::time::Duration::from_secs(5);
+        // Wait for both PeerConnected events
+        let _ = tokio::time::timeout(timeout, events1.recv()).await;
+        let _ = tokio::time::timeout(timeout, events2.recv()).await;
+
+        // Send a message from peer2 to peer1 (over encrypted channel)
+        handle2.send_to(peer_id1, Message::GetPeers).await.unwrap();
+
+        // peer1 should receive the encrypted message
+        let msg_event = tokio::time::timeout(timeout, events1.recv())
+            .await
+            .expect("timeout waiting for message")
+            .expect("channel closed");
+        match msg_event {
+            P2pEvent::MessageReceived { message, .. } => {
+                assert!(matches!(*message, Message::GetPeers));
+            }
+            other => panic!("expected MessageReceived, got {:?}", other),
+        }
+
+        let _ = handle1.shutdown().await;
+        let _ = handle2.shutdown().await;
+    }
+
+    #[test]
+    fn session_keys_symmetry() {
+        let shared_secret = [42u8; 32];
+        let init_keys = SessionKeys::derive(&shared_secret, true);
+        let resp_keys = SessionKeys::derive(&shared_secret, false);
+
+        // Initiator's send = responder's recv
+        assert_eq!(init_keys.send_key, resp_keys.recv_key);
+        assert_eq!(init_keys.send_mac_key, resp_keys.recv_mac_key);
+        // Responder's send = initiator's recv
+        assert_eq!(resp_keys.send_key, init_keys.recv_key);
+        assert_eq!(resp_keys.send_mac_key, init_keys.recv_mac_key);
+        // Send and recv are different
+        assert_ne!(init_keys.send_key, init_keys.recv_key);
+    }
+
+    #[tokio::test]
+    async fn encrypted_transport_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let shared_secret = [99u8; 32];
+        let send_keys = SessionKeys::derive(&shared_secret, true);
+        let recv_keys = SessionKeys::derive(&shared_secret, false);
+
+        let writer_task = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (_, mut writer) = stream.into_split();
+            let mut counter = 0u64;
+            write_encrypted(
+                &mut writer,
+                &Message::GetPeers,
+                &send_keys.send_key,
+                &send_keys.send_mac_key,
+                &mut counter,
+            )
+            .await
+            .unwrap();
+            assert_eq!(counter, 1);
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, _) = stream.into_split();
+        let mut expected_counter = 0u64;
+        let msg = read_encrypted(
+            &mut reader,
+            &recv_keys.recv_key,
+            &recv_keys.recv_mac_key,
+            &mut expected_counter,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(msg, Message::GetPeers));
+        assert_eq!(expected_counter, 1);
+        writer_task.await.unwrap();
+    }
+
+    #[test]
+    fn rate_limiter_allows_within_burst() {
+        let mut rl = RateLimiter::new(10.0, 5.0);
+        for _ in 0..10 {
+            assert!(rl.try_consume());
+        }
+        assert!(!rl.try_consume());
+    }
+
+    #[test]
+    fn rate_limiter_refills_over_time() {
+        let mut rl = RateLimiter::new(5.0, 100.0);
+        for _ in 0..5 {
+            assert!(rl.try_consume());
+        }
+        assert!(!rl.try_consume());
+
+        rl.last_refill = std::time::Instant::now() - std::time::Duration::from_millis(100);
+        assert!(rl.try_consume());
     }
 
     #[tokio::test]

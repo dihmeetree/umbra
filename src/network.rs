@@ -2,25 +2,20 @@
 //!
 //! Defines the wire protocol messages exchanged between nodes.
 //!
-//! # Transport security (H2, H3)
+//! # Transport security
 //!
-//! The current transport is plaintext TCP. Production deployment MUST add:
-//! - **Authentication**: Verify peer identity via Dilithium5 signature
-//!   challenge-response during the Hello handshake.
-//! - **Encryption**: Use a Kyber1024 KEM handshake to establish a shared
-//!   secret, then encrypt the TCP stream (e.g., Noise_KK pattern with
-//!   post-quantum KEM, or a simple BLAKE3-based stream cipher similar to
-//!   the transaction encryption module).
-//!
-//! Until transport encryption is implemented, the protocol relies on
-//! application-layer authentication (signed votes, signed vertices) for
-//! integrity of consensus-critical messages.
+//! All P2P connections are encrypted and authenticated:
+//! - **KEM handshake**: Kyber1024 key encapsulation establishes a shared secret.
+//! - **Mutual authentication**: Dilithium5 signatures over the handshake
+//!   transcript prove both peers' identities.
+//! - **Stream encryption**: BLAKE3-based XOR keystream cipher with per-message
+//!   counters and keyed-BLAKE3 MACs protect confidentiality and integrity.
 
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::bft::{Certificate, Vote};
 use crate::consensus::dag::{Vertex, VertexId};
-use crate::crypto::keys::SigningPublicKey;
+use crate::crypto::keys::{KemCiphertext, KemPublicKey, Signature, SigningPublicKey};
 use crate::transaction::Transaction;
 use crate::Hash;
 
@@ -64,13 +59,21 @@ pub enum Message {
     BftCertificate(Certificate),
 
     // ── Peer Discovery ──
-    /// Announce ourselves to a peer
+    /// Announce ourselves to a peer (includes KEM public key for encrypted transport)
     Hello {
         version: u32,
         peer_id: PeerId,
         public_key: SigningPublicKey,
         listen_port: u16,
+        kem_public_key: KemPublicKey,
     },
+
+    // ── Encrypted Transport Handshake ──
+    /// KEM ciphertext for establishing encrypted transport
+    KeyExchange { kem_ciphertext: KemCiphertext },
+
+    /// Signed transcript proving peer identity
+    AuthResponse { signature: Signature },
 
     /// Request known peers
     GetPeers,
@@ -111,8 +114,8 @@ pub struct PeerInfo {
     pub last_seen: u64,
 }
 
-/// Protocol version.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Protocol version (v2: encrypted transport with KEM + auth).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Network errors.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -175,16 +178,18 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::keys::SigningKeypair;
+    use crate::crypto::keys::{KemKeypair, SigningKeypair};
 
     #[test]
     fn message_roundtrip() {
         let kp = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
         let msg = Message::Hello {
             version: PROTOCOL_VERSION,
             peer_id: kp.public.fingerprint(),
             public_key: kp.public,
             listen_port: 9000,
+            kem_public_key: kem_kp.public,
         };
         let bytes = encode_message(&msg).unwrap();
         let decoded = decode_message(&bytes).unwrap();

@@ -81,6 +81,22 @@ pub mod constants {
     /// Timeout for sync requests in milliseconds
     pub const SYNC_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
+    /// Maximum messages per second from a single peer (token bucket refill rate).
+    pub const PEER_MSG_RATE_LIMIT: f64 = 100.0;
+    /// Maximum burst size for per-peer rate limiting.
+    pub const PEER_MSG_BURST: f64 = 200.0;
+    /// Number of rate limit violations before disconnecting a peer.
+    pub const PEER_RATE_LIMIT_STRIKES: u32 = 5;
+
+    /// Cooldown in milliseconds before retrying a failed sync peer.
+    pub const SYNC_PEER_COOLDOWN_MS: u64 = 60_000;
+
+    /// View change timeout: if no finalization within this many proposal
+    /// intervals, broadcast GetTips to discover missing state.
+    pub const VIEW_CHANGE_TIMEOUT_INTERVALS: u64 = 10;
+    /// Maximum round lag from peers before triggering re-sync.
+    pub const MAX_ROUND_LAG: u64 = 5;
+
     /// Minimum transaction fee (in base units).
     ///
     /// Enforced by `validate_structure()` to prevent zero-fee spam. Coinbase or

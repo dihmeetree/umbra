@@ -21,7 +21,7 @@ use crate::Hash;
 // Expected key sizes for validation
 const DILITHIUM5_PK_BYTES: usize = 2592;
 const _DILITHIUM5_SK_BYTES: usize = 4896;
-const DILITHIUM5_SIG_BYTES: usize = 4595;
+const DILITHIUM5_SIG_BYTES: usize = 4627;
 const KYBER1024_PK_BYTES: usize = 1568;
 const _KYBER1024_SK_BYTES: usize = 3168;
 const KYBER1024_CT_BYTES: usize = 1568;
@@ -40,7 +40,7 @@ pub struct SigningPublicKey(pub Vec<u8>);
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SigningSecretKey(pub(crate) Vec<u8>);
 
-/// A Dilithium5 detached signature (4595 bytes).
+/// A Dilithium5 detached signature (4627 bytes, ML-DSA-87).
 ///
 /// L6: Size is validated during deserialization to prevent oversized payloads.
 #[derive(Clone, Debug)]

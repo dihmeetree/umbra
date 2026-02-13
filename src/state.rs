@@ -262,7 +262,9 @@ impl ChainState {
                 signing_key,
                 kem_public_key,
             } => {
-                let validator = Validator::with_kem(signing_key.clone(), kem_public_key.clone());
+                let mut validator =
+                    Validator::with_kem(signing_key.clone(), kem_public_key.clone());
+                validator.activation_epoch = self.epoch + 1; // eligible next epoch
                 let vid = validator.id;
 
                 // Escrow bond, remainder goes to epoch fees
@@ -369,6 +371,16 @@ impl ChainState {
     /// Get the bond escrowed for a validator.
     pub fn validator_bond(&self, id: &Hash) -> Option<u64> {
         self.validator_bonds.get(id).copied()
+    }
+
+    /// Get validators eligible for committee selection in the given epoch.
+    ///
+    /// A validator is eligible if it is active and its activation_epoch <= epoch.
+    pub fn eligible_validators(&self, epoch: u64) -> Vec<&Validator> {
+        self.validators
+            .values()
+            .filter(|v| v.active && v.activation_epoch <= epoch)
+            .collect()
     }
 
     /// Count of active validators.

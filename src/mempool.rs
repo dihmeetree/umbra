@@ -262,6 +262,28 @@ impl Mempool {
         self.fee_index.last_key_value().map(|(k, _)| k.fee())
     }
 
+    /// Remove all transactions whose `expiry_epoch` has passed.
+    ///
+    /// A transaction is considered expired when `tx.expiry_epoch > 0` (has an
+    /// expiry) and `tx.expiry_epoch < self.current_epoch`. Returns the number
+    /// of transactions evicted.
+    pub fn evict_expired(&mut self) -> usize {
+        let expired_ids: Vec<TxId> = self
+            .txs
+            .iter()
+            .filter(|(_, entry)| {
+                entry.tx.expiry_epoch > 0 && entry.tx.expiry_epoch < self.current_epoch
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        let count = expired_ids.len();
+        for id in expired_ids {
+            self.remove_entry(&id);
+        }
+        count
+    }
+
     /// Stats for RPC reporting.
     pub fn stats(&self) -> MempoolStats {
         MempoolStats {
@@ -482,6 +504,49 @@ mod tests {
         assert_eq!(stats.transaction_count, 1);
         assert!(stats.total_bytes > 0);
         assert_eq!(stats.min_fee, Some(10));
+    }
+
+    #[test]
+    fn evict_expired_removes_old_transactions() {
+        let mut pool = Mempool::with_defaults();
+
+        // Build a tx with expiry_epoch = 5 through the builder
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 110,
+                blinding: BlindingFactor::from_bytes([60; 32]),
+                spend_auth: crate::hash_domain(b"test", &[60]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(10)
+            .set_expiry_epoch(5)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        pool.set_epoch(0);
+        pool.insert(tx).unwrap();
+        assert_eq!(pool.len(), 1);
+
+        // expiry_epoch=5 means tx is valid through epoch 5; expired at epoch 6
+        pool.set_epoch(5);
+        assert_eq!(pool.evict_expired(), 0); // 5 < 5 is false
+
+        pool.set_epoch(6);
+        assert_eq!(pool.evict_expired(), 1);
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn evict_expired_keeps_no_expiry() {
+        let mut pool = Mempool::with_defaults();
+        let tx = make_test_tx(10, 61); // expiry_epoch = 0 (no expiry)
+        pool.insert(tx).unwrap();
+        pool.set_epoch(1000);
+        assert_eq!(pool.evict_expired(), 0);
+        assert_eq!(pool.len(), 1);
     }
 
     #[test]

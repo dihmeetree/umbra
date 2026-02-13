@@ -6,10 +6,11 @@
 //! participates in consensus: proposing vertices, casting BFT votes, and
 //! managing epoch transitions.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -33,6 +34,10 @@ pub struct NodeState {
     pub mempool: Mempool,
     pub storage: SledStorage,
     pub bft: BftState,
+    /// Time of last vertex finalization (for view change detection).
+    pub last_finalized_time: Option<Instant>,
+    /// Highest round observed from peer vertices/votes (for lag detection).
+    pub peer_highest_round: u64,
 }
 
 /// Sync progress tracking for catching up with the network.
@@ -45,6 +50,8 @@ enum SyncState {
         next_seq: u64,
         #[allow(dead_code)]
         target: u64,
+        /// When we last received a sync response (for timeout detection).
+        last_activity: Instant,
     },
     /// Fully synced with the network.
     Synced,
@@ -59,6 +66,10 @@ pub struct Node {
     our_validator_id: Hash,
     our_vrf_output: Option<VrfOutput>,
     sync_state: SyncState,
+    /// Counter for periodic mempool eviction.
+    proposal_tick_count: u64,
+    /// Peers that failed sync recently (with cooldown timestamp).
+    sync_failed_peers: HashMap<crate::network::PeerId, Instant>,
 }
 
 /// Node configuration.
@@ -222,8 +233,9 @@ impl Node {
             _ => Ledger::new(),
         };
 
-        // Create mempool
-        let mempool = Mempool::with_defaults();
+        // Create mempool and set epoch for expiry validation
+        let mut mempool = Mempool::with_defaults();
+        mempool.set_epoch(ledger.state.epoch());
 
         let our_validator_id = config.keypair.public.fingerprint();
 
@@ -315,6 +327,8 @@ impl Node {
             our_peer_id: our_validator_id,
             our_public_key: config.keypair.public.clone(),
             listen_port: config.listen_addr.port(),
+            our_kem_keypair: config.kem_keypair.clone(),
+            our_signing_keypair: config.keypair.clone(),
         };
         let p2p_result = crate::p2p::start(p2p_config).await?;
         let p2p = p2p_result.handle;
@@ -330,6 +344,8 @@ impl Node {
             mempool,
             storage,
             bft,
+            last_finalized_time: None,
+            peer_highest_round: 0,
         }));
 
         let sync_state = SyncState::NeedSync { our_finalized };
@@ -342,6 +358,8 @@ impl Node {
             our_validator_id,
             our_vrf_output,
             sync_state,
+            proposal_tick_count: 0,
+            sync_failed_peers: HashMap::new(),
         })
     }
 
@@ -360,6 +378,7 @@ impl Node {
         let mut proposal_interval = tokio::time::interval(std::time::Duration::from_millis(
             crate::constants::VERTEX_PROPOSAL_INTERVAL_MS,
         ));
+        let mut sync_check_interval = tokio::time::interval(std::time::Duration::from_secs(5));
 
         loop {
             tokio::select! {
@@ -367,7 +386,19 @@ impl Node {
                     self.handle_p2p_event(event).await;
                 }
                 _ = proposal_interval.tick() => {
+                    self.proposal_tick_count += 1;
+                    // Periodic mempool eviction (~every 50 seconds)
+                    if self.proposal_tick_count.is_multiple_of(100) {
+                        let mut state = self.state.write().await;
+                        let evicted = state.mempool.evict_expired();
+                        if evicted > 0 {
+                            tracing::debug!("Periodic eviction: removed {} expired txs", evicted);
+                        }
+                    }
                     self.try_propose_vertex().await;
+                }
+                _ = sync_check_interval.tick() => {
+                    self.check_sync_and_view_change().await;
                 }
             }
         }
@@ -418,6 +449,11 @@ impl Node {
             }
             Message::NewVertex(vertex) => {
                 let mut state = self.state.write().await;
+
+                // Track peer's highest round for view change detection
+                if vertex.round > state.peer_highest_round {
+                    state.peer_highest_round = vertex.round;
+                }
 
                 // C3: Validate VRF proof before accepting the vertex.
                 // Genesis vertex (round=0) has no VRF proof.
@@ -479,6 +515,10 @@ impl Node {
             }
             Message::BftVote(vote) => {
                 let mut state = self.state.write().await;
+                // Track peer's highest round for view change detection
+                if vote.round > state.peer_highest_round {
+                    state.peer_highest_round = vote.round;
+                }
                 // H5: Only re-broadcast if the vote was accepted
                 if let Some(cert) = state.bft.receive_vote(vote.clone()) {
                     // Quorum reached — finalize
@@ -613,6 +653,15 @@ impl Node {
             } => {
                 // Check if we need to sync from this peer
                 if let SyncState::NeedSync { our_finalized } = self.sync_state {
+                    // Skip peers on cooldown from recent failures
+                    if self.sync_failed_peers.contains_key(&from) {
+                        tracing::debug!(
+                            "Skipping sync peer {} (on cooldown)",
+                            hex::encode(&from[..8])
+                        );
+                        return;
+                    }
+
                     let state = self.state.read().await;
                     let our_nullifiers = state.ledger.state.nullifier_count() as u64;
                     drop(state);
@@ -635,6 +684,7 @@ impl Node {
                             peer: from,
                             next_seq: start_after,
                             target: 0, // unknown until first response
+                            last_activity: Instant::now(),
                         };
                         let _ = self
                             .p2p
@@ -754,6 +804,7 @@ impl Node {
                             peer: from,
                             next_seq: last_seq,
                             target: total_finalized,
+                            last_activity: Instant::now(),
                         };
                         let _ = self
                             .p2p
@@ -771,11 +822,34 @@ impl Node {
                     }
                 }
             }
+            Message::TipsResponse(tips) => {
+                // View change: check for tips we don't have
+                let state = self.state.read().await;
+                let missing: Vec<VertexId> = tips
+                    .iter()
+                    .filter(|tip| state.ledger.dag.get(tip).is_none())
+                    .copied()
+                    .collect();
+                drop(state);
+
+                for tip in missing {
+                    let _ = self.p2p.send_to(from, Message::GetVertex(tip)).await;
+                }
+            }
+            Message::VertexResponse(maybe_vertex) => {
+                if let Some(vertex) = maybe_vertex {
+                    // Insert into DAG if we don't have it yet
+                    let mut state = self.state.write().await;
+                    if state.ledger.dag.get(&vertex.id).is_none() {
+                        let _ = state.ledger.insert_vertex(*vertex);
+                    }
+                }
+            }
             // Response messages that don't need special handling
             Message::TransactionResponse(_)
-            | Message::VertexResponse(_)
-            | Message::TipsResponse(_)
-            | Message::Hello { .. } => {}
+            | Message::Hello { .. }
+            | Message::KeyExchange { .. }
+            | Message::AuthResponse { .. } => {}
         }
     }
 
@@ -803,6 +877,7 @@ impl Node {
 
         match state.ledger.finalize_vertex(vertex_id) {
             Ok(coinbase) => {
+                state.last_finalized_time = Some(Instant::now());
                 // Remove conflicting mempool txs
                 state.mempool.remove_conflicting(&nullifiers);
 
@@ -905,12 +980,94 @@ impl Node {
                     } else {
                         tracing::info!("Not selected for epoch {} committee", dag_epoch);
                     }
+
+                    // Update mempool epoch and evict expired transactions
+                    state.mempool.set_epoch(dag_epoch);
+                    let evicted = state.mempool.evict_expired();
+                    if evicted > 0 {
+                        tracing::info!("Evicted {} expired txs on epoch transition", evicted);
+                    }
+
+                    let eligible = state.ledger.state.eligible_validators(dag_epoch);
+                    tracing::info!(
+                        "Epoch {}: {} eligible validators of {} active",
+                        dag_epoch,
+                        eligible.len(),
+                        total_validators,
+                    );
                 }
 
                 tracing::info!("Finalized vertex {}", hex::encode(&vertex_id.0[..8]));
             }
             Err(e) => {
                 tracing::debug!("Failed to finalize vertex: {}", e);
+            }
+        }
+    }
+
+    /// Check sync timeout and view change conditions.
+    ///
+    /// Called periodically (every 5s) to detect:
+    /// - Sync peers that stopped responding (revert to NeedSync)
+    /// - Stale finalization or round lag (broadcast GetTips to discover missing state)
+    async fn check_sync_and_view_change(&mut self) {
+        // Sync timeout: if syncing peer hasn't responded, try another
+        if let SyncState::Syncing {
+            peer,
+            next_seq,
+            last_activity,
+            ..
+        } = &self.sync_state
+        {
+            let elapsed = last_activity.elapsed();
+            if elapsed > std::time::Duration::from_millis(crate::constants::SYNC_REQUEST_TIMEOUT_MS)
+            {
+                tracing::warn!(
+                    "Sync timeout: peer {} unresponsive for {}ms, retrying",
+                    hex::encode(&peer[..8]),
+                    elapsed.as_millis()
+                );
+                let peer_id = *peer;
+                let seq = *next_seq;
+
+                self.sync_failed_peers.insert(peer_id, Instant::now());
+                self.sync_state = SyncState::NeedSync { our_finalized: seq };
+                let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
+            }
+        }
+
+        // Clean expired cooldowns
+        let cutoff = std::time::Duration::from_millis(crate::constants::SYNC_PEER_COOLDOWN_MS);
+        self.sync_failed_peers
+            .retain(|_, failed_at| failed_at.elapsed() < cutoff);
+
+        // View change: if synced but no finalization for too long, or peers
+        // are ahead, broadcast GetTips to discover missing state
+        if matches!(self.sync_state, SyncState::Synced) {
+            let state = self.state.read().await;
+            let view_change_timeout = std::time::Duration::from_millis(
+                crate::constants::VIEW_CHANGE_TIMEOUT_INTERVALS
+                    * crate::constants::VERTEX_PROPOSAL_INTERVAL_MS,
+            );
+
+            let stale = match state.last_finalized_time {
+                Some(t) => t.elapsed() > view_change_timeout,
+                None => false,
+            };
+
+            let our_round = state.bft.round;
+            let peer_round = state.peer_highest_round;
+            drop(state);
+
+            if stale || peer_round > our_round + crate::constants::MAX_ROUND_LAG {
+                tracing::warn!(
+                    "View change: stale={}, our_round={}, peer_round={}. Broadcasting GetTips.",
+                    stale,
+                    our_round,
+                    peer_round
+                );
+                let _ = self.p2p.broadcast(Message::GetTips, None).await;
+                let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
             }
         }
     }
@@ -924,18 +1081,12 @@ impl Node {
 
         let mut state = self.state.write().await;
 
-        // Only propose if mempool has transactions
-        if state.mempool.is_empty() {
-            return;
-        }
-
-        // Drain transactions from mempool
+        // Drain transactions from mempool (may be empty — empty vertices are
+        // allowed for liveness so that epochs advance and coinbase rewards
+        // are distributed even during low-activity periods).
         let transactions = state
             .mempool
             .drain_highest_fee(crate::constants::VERTEX_MAX_DRAIN);
-        if transactions.is_empty() {
-            return;
-        }
 
         let epoch = state.ledger.state.epoch();
         let round = state.bft.round + 1;

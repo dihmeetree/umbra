@@ -56,6 +56,11 @@ pub struct Validator {
     pub id: Hash,
     /// Whether currently active (bonded)
     pub active: bool,
+    /// Epoch in which this validator becomes eligible for committee selection.
+    /// Validators registered in epoch N have activation_epoch = N+1.
+    /// Genesis validators have activation_epoch = 0.
+    #[serde(default)]
+    pub activation_epoch: u64,
 }
 
 impl Validator {
@@ -66,6 +71,7 @@ impl Validator {
             kem_public_key: None,
             id,
             active: true,
+            activation_epoch: 0,
         }
     }
 
@@ -76,6 +82,23 @@ impl Validator {
             kem_public_key: Some(kem_public_key),
             id,
             active: true,
+            activation_epoch: 0,
+        }
+    }
+
+    /// Create a validator with a specified activation epoch.
+    pub fn with_activation(
+        public_key: SigningPublicKey,
+        kem_public_key: KemPublicKey,
+        activation_epoch: u64,
+    ) -> Self {
+        let id = public_key.fingerprint();
+        Validator {
+            public_key,
+            kem_public_key: Some(kem_public_key),
+            id,
+            active: true,
+            activation_epoch,
         }
     }
 }
@@ -448,8 +471,9 @@ pub fn select_committee(
     let total = validators.len();
     let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
 
+    let current_epoch = epoch_seed.epoch;
     for (keypair, validator) in validators {
-        if !validator.active {
+        if !validator.active || validator.activation_epoch > current_epoch {
             continue;
         }
         let input = epoch_seed.vrf_input(&validator.id);
@@ -462,10 +486,10 @@ pub fn select_committee(
 
     // Ensure minimum committee size for BFT safety
     if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
-        // Fall back: include all active validators sorted by VRF
+        // Fall back: include all eligible validators sorted by VRF
         candidates.clear();
         for (keypair, validator) in validators {
-            if !validator.active {
+            if !validator.active || validator.activation_epoch > current_epoch {
                 continue;
             }
             let input = epoch_seed.vrf_input(&validator.id);

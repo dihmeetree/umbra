@@ -20,13 +20,13 @@ All cryptographic primitives are post-quantum secure:
 
 | Primitive | Algorithm | Security |
 |-----------|-----------|----------|
-| Signatures | CRYSTALS-Dilithium5 | NIST Level 5 (~256-bit classical) |
-| Key encapsulation | CRYSTALS-Kyber1024 | NIST Level 5 |
+| Signatures | CRYSTALS-Dilithium5 (ML-DSA-87) | NIST Level 5 (~256-bit classical) |
+| Key encapsulation | CRYSTALS-Kyber1024 (ML-KEM-1024) | NIST Level 5 |
 | Commitments & Merkle tree | Rescue Prime (Rp64_256) | STARK-friendly, post-quantum |
 | General hashing | BLAKE3 | 256-bit (128-bit quantum via Grover) |
 | Zero-knowledge proofs | zk-STARKs (winterfell) | ~127-bit conjectured security |
 
-No trusted setup is required. All proofs are transparent.
+No trusted setup is required. All proofs are transparent. The P2P transport layer uses the same post-quantum primitives (Kyber1024 for key exchange, Dilithium5 for mutual authentication, BLAKE3 for encryption and MACs), so all node-to-node communication is quantum-resistant.
 
 ### Coin Emission
 
@@ -94,11 +94,11 @@ spectra/
       bft.rs                BFT voting with VRF proofs, certification, committee selection
     mempool.rs              Fee-priority transaction pool with nullifier conflict detection
     storage.rs              Persistent storage trait + sled backend (vertices, txs, validators)
-    p2p.rs                  Async TCP P2P networking with channel-based architecture
+    p2p.rs                  Encrypted P2P networking (Kyber KEM + Dilithium5 auth + BLAKE3 transport)
     node.rs                 Node orchestrator: active consensus, persistent keypair, BFT voting
     rpc.rs                  JSON HTTP API (axum): tx, state, peers, mempool, validators
     state.rs                Chain state (bonds, slashing, epoch seed), Ledger (two-phase vertex flow)
-    network.rs              P2P protocol message types and serialization
+    network.rs              P2P wire protocol (message types, KEM handshake, auth messages)
     wallet.rs               Key management, output scanning, tx building, persistence
     wallet_cli.rs           Wallet CLI commands (init, send, balance, scan, messages)
     wallet_web.rs           Wallet web UI (askama templates, axum server)
@@ -114,7 +114,7 @@ spectra/
     error.html              Error display
 ```
 
-**~14,800 lines of Rust** across 34 source files with **190 tests**.
+**~16,000 lines of Rust** across 34 source files with **197 tests**.
 
 ## Building
 
@@ -281,6 +281,7 @@ Fee-priority transaction pool with configurable limits:
 - Nullifier conflict detection prevents double-spend attempts within the pool
 - When full, the lowest-fee transaction is evicted to make room for higher-fee submissions
 - `drain_highest_fee(n)` extracts the top-*n* transactions for vertex proposal
+- Expired transaction eviction — `evict_expired()` removes transactions past their `expiry_epoch`
 - Configurable size limits: max 10,000 transactions / 50 MiB (default)
 
 ### Persistent Storage
@@ -296,12 +297,18 @@ Fee-priority transaction pool with configurable limits:
 
 ### P2P Networking
 
-Async TCP transport built on tokio with channel-based architecture:
+Async TCP transport built on tokio with post-quantum encrypted channels:
 
 - `P2pHandle` — clone-friendly handle for sending commands (connect, broadcast, send, shutdown)
 - `P2pEvent` — events received by the node (peer connected/disconnected, message received)
-- Per-connection Hello handshake followed by spawned read/write tasks
-- Uses the existing `network::encode_message/decode_message` framing (4-byte LE length prefix + bincode)
+- **Encrypted transport** — all peer connections are encrypted and mutually authenticated:
+  1. Hello exchange (plaintext) — version check + Kyber1024 public key exchange
+  2. Kyber1024 KEM handshake — initiator encapsulates to responder's KEM public key
+  3. Dilithium5 mutual authentication — both sides sign a transcript hash binding peer IDs + KEM ciphertext
+  4. BLAKE3-based XOR keystream cipher with counter-based nonces for all subsequent messages
+  5. Keyed-BLAKE3 MAC on every encrypted frame; counter-based replay protection
+  6. Domain-separated session key derivation — initiator and responder derive mirrored send/recv keys from the shared secret
+- **Per-peer rate limiting** — token-bucket rate limiter (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 violations
 - Configurable max peers (default 64) and connection timeout (5 seconds)
 
 ### Node Orchestrator
@@ -310,10 +317,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 
 - **Persistent validator identity** — signing and KEM keypairs are saved to `data_dir/validator.key` on first run and loaded on subsequent startups (legacy key files without KEM are auto-upgraded)
 - **Active consensus participation** — when selected for the committee via VRF, the node proposes vertices (draining high-fee transactions from the mempool) and casts BFT votes on incoming vertices
+- **Liveness guarantee** — vertices are proposed even when the mempool is empty, ensuring epoch advancement and coinbase emission regardless of transaction volume
 - **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, creates a coinbase output for the proposer, purges conflicting mempool entries, persists to storage, and slashes equivocators
-- **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root
+- **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root. Newly registered validators activate in the next epoch (activation delay prevents mid-epoch committee manipulation)
 - **State persistence** — every finalized vertex persists its transactions, nullifiers, Merkle tree nodes, finalized index, coinbase output, validators, and a `ChainStateMeta` snapshot to storage, then flushes. On restart the full chain state (Merkle tree, nullifier set, validators, epoch state, total minted) is restored from the snapshot
-- **State sync** — new nodes joining the network request finalized vertices in batches from peers via `GetFinalizedVertices` / `FinalizedVerticesResponse` messages. A three-state machine (`NeedSync → Syncing → Synced`) tracks sync progress
+- **State sync with timeout/retry** — new nodes joining the network request finalized vertices in batches from peers via `GetFinalizedVertices` / `FinalizedVerticesResponse` messages. A three-state machine (`NeedSync → Syncing → Synced`) tracks sync progress. Unresponsive peers are timed out after `SYNC_REQUEST_TIMEOUT_MS` and placed on cooldown before retrying with another peer
+- **Fork resolution** — if no vertex is finalized for `VIEW_CHANGE_TIMEOUT_INTERVALS` proposal ticks or peers report rounds more than `MAX_ROUND_LAG` ahead, the node broadcasts `GetTips` and `GetEpochState` to discover and fetch missing vertices
+- **Mempool expiry eviction** — expired transactions are periodically evicted from the mempool (every ~50 seconds and on epoch transitions)
 - Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
 - Peer discovery via `GetPeers` / `PeersResponse` messages
 - Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed and KEM key for coinbase, no funding tx required)
@@ -324,7 +334,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 190 tests cover:
+All 197 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -343,10 +353,10 @@ All 190 tests cover:
 - **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status)
 - **Wallet CLI** — init (creates files, rejects duplicate), address display, export creates valid address file, messages on empty wallet
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
-- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain
+- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction
 - **Storage** — vertex/transaction/nullifier/validator/coinbase persistence, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval
 - **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking
-- **P2P** — peer connection establishment, message exchange
+- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst + refill)
 - **Node** — persistent signing + KEM keypair load/save roundtrip
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
 
@@ -465,6 +475,12 @@ Proves in zero knowledge:
 | `VERTEX_MAX_DRAIN` | 1,000 | Max transactions drained per vertex proposal |
 | `SYNC_BATCH_SIZE` | 100 | Finalized vertices per sync request batch |
 | `SYNC_REQUEST_TIMEOUT_MS` | 30,000 | Timeout for sync requests |
+| `SYNC_PEER_COOLDOWN_MS` | 60,000 | Cooldown before retrying a failed sync peer |
+| `PEER_MSG_RATE_LIMIT` | 100.0 | Per-peer message rate limit (msgs/sec refill) |
+| `PEER_MSG_BURST` | 200.0 | Per-peer max burst messages |
+| `PEER_RATE_LIMIT_STRIKES` | 5 | Rate violations before disconnecting peer |
+| `VIEW_CHANGE_TIMEOUT_INTERVALS` | 10 | Proposal ticks without finalization before fork resolution |
+| `MAX_ROUND_LAG` | 5 | Max rounds behind peers before triggering view change |
 
 ## Dependencies
 
@@ -548,6 +564,15 @@ All transaction validity is verified via zk-STARKs:
 - **Deterministic coinbase blinding** — coinbase output blinding factors are derived from `hash_domain("spectra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while using the same commitment format as private outputs
 - **Consensus-verifiable supply** — `total_minted` is included in the state root hash, so any disagreement on emission is detected by state root divergence
 - **Fee redirection fallback** — if a vertex proposer lacks a KEM key (cannot receive coinbase), fees are returned to the epoch fee pool rather than being lost
+- **Post-quantum encrypted transport** — all P2P connections use Kyber1024 KEM for key exchange and Dilithium5 for mutual authentication, followed by BLAKE3-based XOR keystream encryption with keyed-BLAKE3 MACs, providing quantum-resistant confidentiality and integrity for all inter-node communication
+- **Transport replay protection** — encrypted frames include monotonic counters; out-of-order or replayed frames are rejected
+- **Transcript-bound authentication** — handshake auth signatures cover a transcript hash binding both peer IDs and the KEM ciphertext, preventing relay and MITM attacks
+- **Per-peer rate limiting** — token-bucket rate limiter per connection (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 strikes, preventing message-flooding DoS
+- **Sync timeout and peer cooldown** — sync requests that receive no response within `SYNC_REQUEST_TIMEOUT_MS` trigger a fallback to another peer; failed peers are placed on a 60-second cooldown to prevent retry storms
+- **Fork resolution / view change** — if no vertex is finalized for a configurable timeout or peers report rounds significantly ahead, the node proactively requests tips and missing vertices to rejoin consensus
+- **Epoch committee activation delay** — newly registered validators only become eligible for committee selection in the epoch after registration, preventing mid-epoch committee manipulation
+- **Mempool expiry eviction** — transactions past their `expiry_epoch` are periodically removed from the mempool, preventing stale transaction accumulation
+- **Liveness guarantee** — empty vertices (no transactions) are proposed when the mempool is empty, ensuring epochs advance and coinbase emission continues
 - **Inbound connection timeout** — P2P inbound handshakes are wrapped in a configurable timeout (`PEER_CONNECT_TIMEOUT_MS`), preventing slowloris-style connection exhaustion
 - **Merkle tree capacity enforcement** — the incremental Merkle tree rejects appends beyond `2^MERKLE_DEPTH` leaves, preventing silent overflow
 - **Bounded DAG traversal** — ancestor queries are depth-bounded (default `2 * EPOCH_LENGTH`), preventing unbounded memory usage from deep graph exploration
@@ -556,9 +581,8 @@ All transaction validity is verified via zk-STARKs:
 
 ## Production Roadmap
 
-Spectra includes a full node implementation with P2P networking, persistent storage, state sync, mempool, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership, coin emission with halving schedule, and a client-side wallet (CLI + web UI). A production deployment would additionally require:
+Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with expiry eviction, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI). A production deployment would additionally require:
 
-- **Post-quantum handshakes** — upgrade the P2P transport layer with Noise/Kyber for quantum-resistant peer connections
 - **Peer reputation and discovery** — DHT-based peer discovery, reputation scoring, and ban management
 - **Wallet GUI** — graphical interface for non-technical users
 - **Formal security audit** — cryptographic protocol review and implementation audit

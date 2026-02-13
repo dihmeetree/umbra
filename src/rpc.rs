@@ -377,6 +377,8 @@ mod tests {
             mempool,
             storage,
             bft,
+            last_finalized_time: None,
+            peer_highest_round: 0,
         }));
         // Create a P2pHandle from a channel (we won't use it in most tests)
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
