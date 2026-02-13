@@ -117,7 +117,7 @@ spectra/
     error.html              Error display
 ```
 
-**~18,000 lines of Rust** across 36 source files with **226 tests**.
+**~18,000 lines of Rust** across 36 source files with **294 tests**.
 
 ## Building
 
@@ -398,7 +398,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 226 tests cover:
+All 294 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -408,19 +408,19 @@ All 226 tests cover:
 - **Merkle tree** — construction, path verification, depth-20 canonical padding, restore from stored level data, last-appended path coverage
 - **Encryption** — message roundtrips, authentication, tamper detection
 - **VRF** — evaluation, verification, committee selection statistics
-- **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices
-- **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement
+- **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices; validation of too many parents, too many transactions, duplicate parents, no parents on non-genesis, too many unfinalized (DoS limit); finalized order excludes non-finalized vertices; finalize unknown vertex returns false; safe indexing after pruning (regression)
+- **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state
 - **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses
-- **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages)
+- **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
 - **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
-- **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found and not-found), /vertices/finalized; POST /tx (valid submission, invalid hex rejection); full submit-and-retrieve roundtrip
-- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt; UTXO consolidation
+- **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found, not-found, invalid hex, wrong length), /vertices/finalized, /peers; POST /tx (valid submission, invalid hex, valid hex with invalid bincode, duplicate submission, oversized payload); full submit-and-retrieve roundtrip
+- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt; UTXO consolidation (success path with history, fee exceeds total); pending output expiry (basic, not-yet-expired, exact boundary epoch); insufficient funds and arithmetic overflow; saturating balance addition; history cap enforcement; coinbase output scanning
 - **Wallet CLI** — init with recovery phrase (creates wallet + backup files), recover from mnemonic + backup, history display, address display, export creates valid address file, messages on empty wallet
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
-- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty and populated pools)
-- **Storage** — vertex/transaction/nullifier/validator/coinbase persistence, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval
-- **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled
-- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst + refill)
+- **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty, single-tx edge case, populated pools); byte-limit eviction with total_bytes tracking, fee boundary rejection (equal fee rejected), drain cleans nullifier index, epoch-based expiry on insert, total_bytes accuracy across insert/remove/drain
+- **Storage** — vertex/transaction/nullifier/validator/coinbase persistence and roundtrips, not-found returns None, vertex overwrite, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval
+- **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled; apply_vertex (basic state transition, too many transactions, intra-vertex duplicate nullifier, epoch fee accumulation regression); validate_transaction (wrong chain_id, double spend, already registered); record_nullifier Result return type (regression); coinbase output creation (with and without KEM key); eligible_validators activation epoch filtering
+- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; MAC verification failure on corrupted frames; counter replay rejection; self-connection detection
 - **Node** — persistent signing + KEM keypair load/save roundtrip
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
 
@@ -699,7 +699,7 @@ All transaction validity is verified via zk-STARKs:
 Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (two internal security audits have been completed, addressing 30+ findings across all severity levels including bugs, security vulnerabilities, logic errors, and quality improvements)
+- **External security audit** — independent cryptographic protocol review and penetration testing (three internal audits have been completed, addressing 47+ findings across all severity levels and expanding test coverage from 226 to 294 tests with targeted state correctness, validation bypass, and regression tests)
 
 ## License
 
