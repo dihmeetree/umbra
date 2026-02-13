@@ -108,6 +108,8 @@ pub mod constants {
     pub const DANDELION_STEM_HOPS: u8 = 2;
     /// Dandelion++ stem timeout in milliseconds (F6).
     pub const DANDELION_TIMEOUT_MS: u64 = 5_000;
+    /// Maximum entries in the Dandelion++ stem_txs tracking map.
+    pub const MAX_STEM_TXS: usize = 5_000;
 
     /// Initial reputation score for new peers (F7).
     pub const PEER_INITIAL_REPUTATION: i32 = 100;
@@ -132,6 +134,8 @@ pub mod constants {
     pub const UPGRADE_THRESHOLD_NUM: u64 = 75;
     /// Threshold fraction (denominator) for protocol upgrade activation (F16).
     pub const UPGRADE_THRESHOLD_DEN: u64 = 100;
+    /// Maximum distinct protocol versions tracked per epoch (F16).
+    pub const MAX_VERSION_SIGNALS: usize = 64;
 
     /// Minimum transaction fee (in base units).
     ///
@@ -139,6 +143,11 @@ pub mod constants {
     /// genesis funding should add outputs directly to state rather than going
     /// through transaction validation.
     pub const MIN_TX_FEE: u64 = 1;
+
+    /// Maximum transaction fee in base units.
+    ///
+    /// Prevents fee-based overflow/saturation attacks on epoch fee accumulators.
+    pub const MAX_TX_FEE: u64 = 10_000_000_000;
 
     /// Initial block (vertex) reward in base units.
     pub const INITIAL_BLOCK_REWARD: u64 = 50_000;

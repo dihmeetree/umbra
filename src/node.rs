@@ -514,32 +514,41 @@ impl Node {
 
     async fn handle_message(&mut self, from: crate::network::PeerId, message: Message) {
         match message {
-            // Fix 5: For received stem-phase txs, defer mempool insertion until fluff.
+            // Dandelion++: handle received transactions.
+            // Only the originating node uses stem phase. Received txs are
+            // either relayed (if mid-stem) or fluffed (broadcast) to all peers.
             Message::NewTransaction(tx) => {
                 let tx_hash = tx.tx_id().0;
 
-                // Check if this is a continuation of an existing stem phase
+                // If this tx is in our stem relay pipeline, continue stem forwarding
                 if let Some(&(hops, _)) = self.stem_txs.get(&tx_hash) {
                     if hops > 0 {
-                        // Continue stem phase -- do NOT insert into mempool yet
-                        // to preserve Dandelion++ privacy for the originator.
                         self.stem_forward(tx, hops - 1).await;
                         return;
                     }
-                    // hops == 0: fall through to fluff (insert + broadcast)
+                    // hops == 0: stem phase complete, remove and fall through to fluff
+                    self.stem_txs.remove(&tx_hash);
                 }
 
-                // Fluff phase or new transaction: validate and insert into mempool
+                // Skip if we already have this transaction in mempool
+                {
+                    let state = self.state.read().await;
+                    if state.mempool.contains(&crate::transaction::TxId(tx_hash)) {
+                        return;
+                    }
+                }
+
+                // Validate and insert into mempool, then broadcast (fluff)
                 let mut state = self.state.write().await;
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
                         drop(state);
-                        // Start new stem phase for received transactions
-                        self.stem_forward(
-                            tx,
-                            crate::constants::DANDELION_STEM_HOPS.saturating_sub(1),
-                        )
-                        .await;
+                        // Fluff: broadcast to all peers except sender.
+                        // We are a recipient, not the originator — no stem phase.
+                        let _ = self
+                            .p2p
+                            .broadcast(Message::NewTransaction(tx), Some(from))
+                            .await;
                     }
                     Err(e) => {
                         tracing::debug!("Rejected tx: {}", e);
@@ -1140,9 +1149,13 @@ impl Node {
                 // M5: Clear processed evidence to avoid re-processing
                 state.bft.clear_equivocations();
 
-                // Track protocol version signal (F16)
+                // Track protocol version signal (F16), capped to prevent memory exhaustion
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
-                    *state.version_signals.entry(v.protocol_version).or_insert(0) += 1;
+                    if state.version_signals.contains_key(&v.protocol_version)
+                        || state.version_signals.len() < crate::constants::MAX_VERSION_SIGNALS
+                    {
+                        *state.version_signals.entry(v.protocol_version).or_insert(0) += 1;
+                    }
                 }
 
                 // Advance BFT round
@@ -1311,6 +1324,11 @@ impl Node {
             let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
         } else {
             // Stem: forward to one random peer
+            // Cap stem_txs to prevent unbounded memory growth
+            if self.stem_txs.len() >= crate::constants::MAX_STEM_TXS {
+                let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
+                return;
+            }
             self.stem_txs
                 .insert(tx_hash, (hops_remaining, Instant::now()));
             if let Ok(peers) = self.p2p.get_peers().await {

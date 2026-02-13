@@ -707,7 +707,11 @@ impl Wallet {
             if *pos + 4 > data.len() {
                 return Err(WalletError::Recovery("truncated backup".into()));
             }
-            let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .map_err(|_| WalletError::Recovery("truncated backup".into()))?,
+            ) as usize;
             *pos += 4;
             if *pos + len > data.len() {
                 return Err(WalletError::Recovery("truncated backup".into()));

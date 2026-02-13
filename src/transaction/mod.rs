@@ -195,6 +195,10 @@ impl Transaction {
         if self.fee < crate::constants::MIN_TX_FEE {
             return Err(TxValidationError::FeeTooLow);
         }
+        // Enforce maximum fee to prevent fee-saturation attacks
+        if self.fee > crate::constants::MAX_TX_FEE {
+            return Err(TxValidationError::FeeTooHigh);
+        }
 
         // Transaction-type-specific validation
         match &self.tx_type {
@@ -475,6 +479,8 @@ pub enum TxValidationError {
     Expired,
     #[error("fee below minimum ({} required)", crate::constants::MIN_TX_FEE)]
     FeeTooLow,
+    #[error("fee exceeds maximum ({} allowed)", crate::constants::MAX_TX_FEE)]
+    FeeTooHigh,
     #[error("validator registration fee too low (bond + fee required)")]
     InsufficientBond,
     #[error("invalid validator signing key")]

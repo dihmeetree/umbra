@@ -577,7 +577,9 @@ fn run_demo() {
 
     // Add funding tx outputs to state (coinbase — no spend proof to verify)
     for output in &funding_tx.outputs {
-        state.add_commitment(output.commitment);
+        state
+            .add_commitment(output.commitment)
+            .expect("commitment tree overflow");
     }
     println!("    After funding tx:");
     println!("    Commitments in state: {}", state.commitment_count());
@@ -585,7 +587,9 @@ fn run_demo() {
 
     // Add payment tx outputs
     for output in &tx.outputs {
-        state.add_commitment(output.commitment);
+        state
+            .add_commitment(output.commitment)
+            .expect("commitment tree overflow");
     }
     // Record spent nullifiers
     for input in &tx.inputs {

@@ -105,10 +105,13 @@ async fn submit_tx(
 
     // Broadcast to network
     drop(node); // Release write lock before async send
-    let _ = state
+    if let Err(e) = state
         .p2p
         .broadcast(crate::network::Message::NewTransaction(tx), None)
-        .await;
+        .await
+    {
+        tracing::warn!("Failed to broadcast transaction to peers: {}", e);
+    }
 
     Ok(Json(SubmitTxResponse {
         tx_id: hex::encode(tx_id.0),

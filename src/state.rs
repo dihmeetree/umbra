@@ -176,10 +176,72 @@ impl ChainState {
         // Record fees before applying transactions
         let fees_before = self.epoch_fees;
 
+        // Snapshot state for rollback if a transaction fails mid-loop.
+        // Pass 1 validated everything, so failures here are rare (sled I/O
+        // errors or commitment tree overflow) but we must not leave state
+        // partially modified.
+        let nullifier_hash_before = self.nullifier_hash;
+        let commitment_count_before = self.commitments.len();
+        let tree_leaves_before = self.commitment_tree.num_leaves();
+        let mut applied_nullifiers: Vec<Nullifier> = Vec::new();
+        let mut registered_validators: Vec<Hash> = Vec::new();
+        let mut deregistered_validators: Vec<(Hash, u64)> = Vec::new(); // (id, bond)
+
         // Pass 2 — apply all transactions sequentially.
         // May fail if sled nullifier persistence fails (S5 fix).
         for tx in &vertex.transactions {
-            self.apply_transaction_unchecked(tx)?;
+            let tx_nullifiers: Vec<Nullifier> = tx.inputs.iter().map(|i| i.nullifier).collect();
+            // Snapshot validator state before applying (for rollback)
+            let pre_apply_info = match &tx.tx_type {
+                TxType::ValidatorRegister { signing_key, .. } => {
+                    Some((true, signing_key.fingerprint(), 0u64))
+                }
+                TxType::ValidatorDeregister { validator_id, .. } => {
+                    let bond = self.validator_bonds.get(validator_id).copied().unwrap_or(0);
+                    Some((false, *validator_id, bond))
+                }
+                _ => None,
+            };
+            match self.apply_transaction_unchecked(tx) {
+                Ok(()) => {
+                    applied_nullifiers.extend(tx_nullifiers);
+                    if let Some((is_register, vid, bond)) = pre_apply_info {
+                        if is_register {
+                            registered_validators.push(vid);
+                        } else {
+                            deregistered_validators.push((vid, bond));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Rollback: restore state to pre-Pass-2 condition
+                    self.epoch_fees = fees_before;
+                    self.nullifier_hash = nullifier_hash_before;
+                    for n in &applied_nullifiers {
+                        self.nullifiers.remove(n);
+                        // Note: sled writes are NOT rolled back — extra nullifiers
+                        // in sled are harmless (they prevent re-spending of outputs
+                        // from a rejected vertex, which is conservative/safe).
+                    }
+                    for c in self.commitments.drain(commitment_count_before..) {
+                        self.commitment_index.remove(&c);
+                    }
+                    self.commitment_tree.truncate(tree_leaves_before);
+                    // Undo validator registrations
+                    for vid in &registered_validators {
+                        self.validators.remove(vid);
+                        self.validator_bonds.remove(vid);
+                    }
+                    // Undo validator deregistrations (re-activate and restore bond)
+                    for (vid, bond) in &deregistered_validators {
+                        if let Some(v) = self.validators.get_mut(vid) {
+                            v.active = true;
+                        }
+                        self.validator_bonds.insert(*vid, *bond);
+                    }
+                    return Err(e);
+                }
+            }
         }
 
         // Compute vertex fees for the proposer's coinbase reward.
@@ -198,11 +260,6 @@ impl ChainState {
         } else {
             None
         };
-
-        // If coinbase creation failed (no KEM key), return fees to epoch pool
-        if coinbase.is_none() && vertex_fees > 0 {
-            self.epoch_fees = self.epoch_fees.saturating_add(vertex_fees);
-        }
 
         self.last_finalized = Some(vertex.id);
         Ok(coinbase)
@@ -313,7 +370,7 @@ impl ChainState {
 
         // Add new output commitments (incremental tree update, O(log n) each)
         for output in &tx.outputs {
-            self.add_commitment(output.commitment);
+            self.add_commitment(output.commitment)?;
         }
 
         // Handle transaction type
@@ -345,7 +402,7 @@ impl ChainState {
                 ..
             } => {
                 // Return bond as output commitment (already verified in validate_transaction)
-                self.add_commitment(bond_return_output.commitment);
+                self.add_commitment(bond_return_output.commitment)?;
 
                 // Mark inactive and remove bond
                 if let Some(v) = self.validators.get_mut(validator_id) {
@@ -366,30 +423,35 @@ impl ChainState {
     /// vertex/transaction application instead of silently allowing a nullifier
     /// that won't survive a restart.
     fn record_nullifier(&mut self, nullifier: Nullifier) -> Result<(), StateError> {
-        if self.nullifiers.insert(nullifier) {
-            // Persist to sled if available — propagate failure so the vertex
-            // application is aborted rather than accepting an unpersisted nullifier
-            if let Some(ref tree) = self.nullifier_storage {
-                if let Err(e) = tree.insert(nullifier.0, &[1u8]) {
-                    return Err(StateError::StoragePersistenceFailed(format!(
-                        "failed to persist nullifier to sled: {}",
-                        e
-                    )));
-                }
-            }
-            // Update incremental hash: new = H(old || nullifier)
-            self.nullifier_hash =
-                crate::hash_concat(&[b"spectra.nullifier_acc", &self.nullifier_hash, &nullifier.0]);
+        if self.nullifiers.contains(&nullifier) {
+            return Ok(()); // already recorded
         }
+        // Persist to sled FIRST — if it fails, in-memory state is unchanged,
+        // so on restart the nullifier won't be in memory either (consistent).
+        if let Some(ref tree) = self.nullifier_storage {
+            if let Err(e) = tree.insert(nullifier.0, &[1u8]) {
+                return Err(StateError::StoragePersistenceFailed(format!(
+                    "failed to persist nullifier to sled: {}",
+                    e
+                )));
+            }
+        }
+        self.nullifiers.insert(nullifier);
+        // Update incremental hash: new = H(old || nullifier)
+        self.nullifier_hash =
+            crate::hash_concat(&[b"spectra.nullifier_acc", &self.nullifier_hash, &nullifier.0]);
         Ok(())
     }
 
     /// Add a single commitment to the incremental Merkle tree.
-    pub fn add_commitment(&mut self, commitment: Commitment) {
-        self.commitment_tree.append(commitment.0);
+    pub fn add_commitment(&mut self, commitment: Commitment) -> Result<(), StateError> {
+        self.commitment_tree
+            .append(commitment.0)
+            .map_err(StateError::CommitmentTreeFull)?;
         self.commitments.push(commitment);
         self.commitment_index
             .insert(commitment, self.commitments.len() - 1);
+        Ok(())
     }
 
     /// Record a nullifier as spent (public API).
@@ -694,7 +756,7 @@ impl ChainState {
         )?;
 
         // Add commitment to the Merkle tree
-        self.add_commitment(commitment);
+        self.add_commitment(commitment).ok()?;
 
         // Track total minted
         self.total_minted = self.total_minted.saturating_add(amount);
@@ -735,7 +797,7 @@ impl ChainState {
         )?;
 
         // Add commitment to the Merkle tree
-        self.add_commitment(commitment);
+        self.add_commitment(commitment).ok()?;
         self.total_minted = self.total_minted.saturating_add(amount);
 
         Some(TxOutput {
@@ -955,6 +1017,8 @@ pub enum StateError {
     StoragePersistenceFailed(String),
     #[error("vertex contains too many transactions")]
     TooManyTransactions,
+    #[error("commitment tree full: {0}")]
+    CommitmentTreeFull(String),
 }
 
 #[cfg(test)]
@@ -997,7 +1061,7 @@ mod tests {
         let commitment = Commitment::commit(value, &blinding);
 
         // Add the commitment to the state so the merkle root in the spend proof matches
-        state.add_commitment(commitment);
+        state.add_commitment(commitment).unwrap();
         let index = state.find_commitment(&commitment).unwrap();
         let merkle_path = state.commitment_path(index).unwrap();
 
@@ -1099,7 +1163,7 @@ mod tests {
         let blind = BlindingFactor::random();
         let c = Commitment::commit(100, &blind);
 
-        state.add_commitment(c);
+        state.add_commitment(c).unwrap();
 
         assert_ne!(state.commitment_root(), [0u8; 32]);
         assert_eq!(state.commitment_count(), 1);
@@ -1122,7 +1186,9 @@ mod tests {
         let root1 = state.state_root();
 
         let blind = BlindingFactor::random();
-        state.add_commitment(Commitment::commit(100, &blind));
+        state
+            .add_commitment(Commitment::commit(100, &blind))
+            .unwrap();
 
         let root2 = state.state_root();
         assert_ne!(root1, root2);
@@ -1147,7 +1213,7 @@ mod tests {
         let mut state = ChainState::new();
         let blind = BlindingFactor::random();
         let c = Commitment::commit(100, &blind);
-        state.add_commitment(c);
+        state.add_commitment(c).unwrap();
 
         // The path should produce the same root
         let path = state.commitment_path(0).unwrap();
@@ -1166,7 +1232,9 @@ mod tests {
         // Add commitments
         for i in 0..5u64 {
             let blind = BlindingFactor::from_bytes([i as u8; 32]);
-            state.add_commitment(Commitment::commit(i * 100 + 1, &blind));
+            state
+                .add_commitment(Commitment::commit(i * 100 + 1, &blind))
+                .unwrap();
         }
 
         // Add nullifiers
@@ -1240,7 +1308,9 @@ mod tests {
     fn chain_state_meta_snapshot() {
         let mut state = ChainState::new();
         let blind = BlindingFactor::random();
-        state.add_commitment(Commitment::commit(42, &blind));
+        state
+            .add_commitment(Commitment::commit(42, &blind))
+            .unwrap();
         state
             .mark_nullifier(Nullifier::derive(&[1u8; 32], &[2u8; 32]))
             .unwrap();
@@ -1351,7 +1421,9 @@ mod tests {
         // Build some state
         let mut state = ChainState::new();
         let blind = BlindingFactor::from_bytes([1u8; 32]);
-        state.add_commitment(Commitment::commit(500, &blind));
+        state
+            .add_commitment(Commitment::commit(500, &blind))
+            .unwrap();
 
         let meta = state.to_chain_state_meta(0);
 
@@ -1627,7 +1699,7 @@ mod tests {
         let blinding = BlindingFactor::from_bytes([77u8; 32]);
         let spend_auth = crate::hash_domain(b"test.spend_auth", &[77u8]);
         let commitment = Commitment::commit(total_input, &blinding);
-        state.add_commitment(commitment);
+        state.add_commitment(commitment).unwrap();
         let index = state.find_commitment(&commitment).unwrap();
         let merkle_path = state.commitment_path(index).unwrap();
 

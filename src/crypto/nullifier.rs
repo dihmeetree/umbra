@@ -81,6 +81,11 @@ impl NullifierSet {
         self.nullifiers.is_empty()
     }
 
+    /// Remove a nullifier from the set (used for rollback on partial vertex application).
+    pub fn remove(&mut self, nullifier: &Nullifier) -> bool {
+        self.nullifiers.remove(nullifier)
+    }
+
     /// Iterate over all nullifiers in the set.
     pub fn iter(&self) -> impl Iterator<Item = &Nullifier> {
         self.nullifiers.iter()

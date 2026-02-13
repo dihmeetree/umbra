@@ -162,7 +162,9 @@ impl Mempool {
                     });
                 }
                 // Evict the lowest-fee tx
-                let lowest_id = self.fee_index[&lowest_key];
+                let Some(&lowest_id) = self.fee_index.get(&lowest_key) else {
+                    break;
+                };
                 self.remove_entry(&lowest_id);
             } else {
                 break;
