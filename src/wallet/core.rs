@@ -561,7 +561,7 @@ pub fn generate_mnemonic() -> (Vec<String>, [u8; 32]) {
 
 /// Convert 32-byte entropy to a 24-word mnemonic.
 fn entropy_to_words(entropy: &[u8; 32]) -> Vec<String> {
-    use crate::bip39_words::WORDLIST;
+    use super::bip39_words::WORDLIST;
     // 8-bit checksum = first byte of BLAKE3(entropy)
     let checksum = blake3::hash(entropy).as_bytes()[0];
 
@@ -591,7 +591,7 @@ fn entropy_to_words(entropy: &[u8; 32]) -> Vec<String> {
 ///
 /// Validates the checksum and returns an error if invalid.
 pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
-    use crate::bip39_words::WORDLIST;
+    use super::bip39_words::WORDLIST;
 
     if words.len() != 24 {
         return Err(WalletError::Recovery(format!(

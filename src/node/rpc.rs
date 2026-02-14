@@ -37,9 +37,9 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::node::NodeState;
-use crate::p2p::P2pHandle;
-use crate::storage::Storage;
+use super::storage::Storage;
+use super::NodeState;
+use crate::network::p2p::P2pHandle;
 use crate::transaction::TxId;
 
 /// Shared RPC state.
@@ -343,7 +343,7 @@ async fn get_peers(State(state): State<RpcState>) -> Json<Vec<PeerInfoResponse>>
 
 // ── GET /mempool ──
 
-async fn get_mempool(State(state): State<RpcState>) -> Json<crate::mempool::MempoolStats> {
+async fn get_mempool(State(state): State<RpcState>) -> Json<super::mempool::MempoolStats> {
     let node = state.node.read().await;
     Json(node.mempool.stats())
 }
@@ -709,10 +709,10 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::consensus::bft::{BftState, Validator};
-    use crate::mempool::Mempool;
-    use crate::p2p::P2pHandle;
+    use crate::network::p2p::P2pHandle;
+    use crate::node::mempool::Mempool;
+    use crate::node::storage::SledStorage;
     use crate::state::Ledger;
-    use crate::storage::SledStorage;
 
     fn test_rpc_state() -> RpcState {
         let storage = SledStorage::open_temporary().unwrap();

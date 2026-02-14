@@ -22,7 +22,7 @@ use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::SpendPublicInputs;
 use crate::crypto::stealth::StealthAddress;
 use crate::crypto::vrf::EpochSeed;
-use crate::storage::{ChainStateMeta, Storage, ValidatorRecord};
+use crate::node::storage::{ChainStateMeta, Storage, ValidatorRecord};
 use crate::transaction::{deregister_sign_data, Transaction, TxOutput, TxType};
 use crate::Hash;
 
@@ -1240,7 +1240,7 @@ mod tests {
     };
     use crate::crypto::nullifier::Nullifier;
     use crate::crypto::stark::spend_air::MERKLE_DEPTH;
-    use crate::storage::SledStorage;
+    use crate::node::storage::SledStorage;
     use crate::transaction::builder::{InputSpec, TransactionBuilder};
     use crate::transaction::Transaction;
 
@@ -2389,7 +2389,7 @@ mod tests {
 
     #[test]
     fn snapshot_data_export_import_roundtrip() {
-        use crate::storage::SledStorage;
+        use crate::node::storage::SledStorage;
 
         // Build state with some data
         let storage1 = SledStorage::open_temporary().unwrap();

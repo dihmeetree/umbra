@@ -19,9 +19,9 @@ use axum::{Form, Router};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use super::cli as wallet_cli;
+use super::{Wallet, WalletError};
 use crate::crypto::keys::PublicAddress;
-use crate::wallet::{Wallet, WalletError};
-use crate::wallet_cli;
 
 // ── State ──
 
@@ -606,7 +606,7 @@ async fn history_page(State(state): State<WalletWebState>) -> Response {
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
-    use crate::wallet::TxDirection;
+    use super::TxDirection;
     let entries: Vec<HistoryEntryDisplay> = wallet
         .history()
         .iter()

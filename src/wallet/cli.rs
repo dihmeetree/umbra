@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::{TxDirection, Wallet, WalletError};
 use crate::config::WalletTlsConfig;
 use crate::crypto::keys::PublicAddress;
-use crate::wallet::{TxDirection, Wallet, WalletError};
 
 /// Default wallet file name within data_dir.
 const WALLET_FILENAME: &str = "wallet.dat";

@@ -8,21 +8,15 @@
 //! - **Encrypted messaging** — send arbitrary encrypted messages within transactions
 //! - **Scalability** — DAG structure enables parallel transaction processing
 
-pub mod bip39_words;
 pub mod config;
 pub mod consensus;
 pub mod crypto;
-pub mod mempool;
+pub mod demo;
 pub mod network;
 pub mod node;
-pub mod p2p;
-pub mod rpc;
 pub mod state;
-pub mod storage;
 pub mod transaction;
 pub mod wallet;
-pub mod wallet_cli;
-pub mod wallet_web;
 
 /// Protocol constants
 pub mod constants {

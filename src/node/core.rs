@@ -16,16 +16,16 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use super::mempool::Mempool;
+use super::storage::{SledStorage, Storage};
 use crate::consensus::bft::{self, BftState, Validator};
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::keys::{KemKeypair, SigningKeypair};
 use crate::crypto::stark::spend_air::MERKLE_DEPTH;
 use crate::crypto::vrf::VrfOutput;
-use crate::mempool::Mempool;
+use crate::network::p2p::{P2pConfig, P2pEvent, P2pHandle};
 use crate::network::Message;
-use crate::p2p::{P2pConfig, P2pEvent, P2pHandle};
 use crate::state::Ledger;
-use crate::storage::{SledStorage, Storage};
 use crate::transaction::TxId;
 use crate::Hash;
 
@@ -62,7 +62,7 @@ enum SyncState {
         received_chunks: Vec<Option<Vec<u8>>>,
         #[allow(dead_code)]
         snapshot_size: u64,
-        meta: Box<crate::storage::ChainStateMeta>,
+        meta: Box<super::storage::ChainStateMeta>,
         last_activity: Instant,
     },
     /// Actively syncing vertices from a peer.
@@ -108,7 +108,7 @@ pub struct Node {
     sync_rounds: u64,
     /// Cached serialized snapshot for serving to peers:
     /// (bytes, total_chunks, meta, created_at).
-    snapshot_cache: Option<(Vec<u8>, u32, crate::storage::ChainStateMeta, Instant)>,
+    snapshot_cache: Option<(Vec<u8>, u32, super::storage::ChainStateMeta, Instant)>,
 }
 
 /// Node configuration.
@@ -128,9 +128,9 @@ pub struct NodeConfig {
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
     #[error("storage error: {0}")]
-    Storage(#[from] crate::storage::StorageError),
+    Storage(#[from] super::storage::StorageError),
     #[error("P2P error: {0}")]
-    P2p(#[from] crate::p2p::P2pError),
+    P2p(#[from] crate::network::p2p::P2pError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -395,7 +395,7 @@ impl Node {
             our_kem_keypair: config.kem_keypair.clone(),
             our_signing_keypair: config.keypair.clone(),
         };
-        let p2p_result = crate::p2p::start(p2p_config).await?;
+        let p2p_result = crate::network::p2p::start(p2p_config).await?;
         let p2p = p2p_result.handle;
         let event_rx = p2p_result.events;
 

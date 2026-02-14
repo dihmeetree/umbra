@@ -113,7 +113,7 @@ pub enum Message {
 
     /// Response with snapshot manifest describing the available state snapshot.
     SnapshotManifest {
-        meta: crate::storage::ChainStateMeta,
+        meta: crate::node::storage::ChainStateMeta,
         total_chunks: u32,
         snapshot_size: u64,
     },
@@ -325,7 +325,7 @@ mod tests {
         ));
 
         // SnapshotManifest
-        let meta = crate::storage::ChainStateMeta {
+        let meta = crate::node::storage::ChainStateMeta {
             epoch: 5,
             last_finalized: None,
             state_root: [1u8; 32],
