@@ -126,7 +126,7 @@ umbra/
     error.html              Error display
 ```
 
-**~23,000 lines of Rust** across 37 source files with **316 tests**.
+**~23,000 lines of Rust** across 37 source files with **319 tests**.
 
 ## Building
 
@@ -407,7 +407,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 316 tests cover:
+All 319 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -735,13 +735,14 @@ All transaction validity is verified via zk-STARKs:
 - **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation work on KEM decapsulation failure, equalizing timing with the success path
 - **VRF determinism verification** — node startup asserts Dilithium5 signing determinism at runtime, preventing silent VRF correctness failures from non-deterministic implementations
 - **Recovery backup nonce** — wallet recovery backups include a 24-byte random nonce in the keystream derivation, preventing keystream reuse if the same mnemonic entropy is used for multiple backups
+- **Vertex timestamp enforcement** — vertices with timestamps more than 60 seconds in the future are rejected on insertion, preventing timestamp manipulation by malicious proposers while allowing historical vertex sync
 
 ## Production Roadmap
 
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 316 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 319 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

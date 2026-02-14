@@ -38,6 +38,10 @@ pub mod constants {
     pub const MAX_TXS_PER_VERTEX: usize = 10_000;
     /// Target vertex interval in milliseconds
     pub const VERTEX_INTERVAL_MS: u64 = 500;
+    /// Maximum allowed future drift for vertex timestamps (seconds).
+    /// Vertices with timestamps more than this far ahead of the receiver's
+    /// clock are rejected on insertion.
+    pub const MAX_VERTEX_TIMESTAMP_DRIFT_SECS: u64 = 60;
     /// BFT quorum threshold: 2f+1 where f = (COMMITTEE_SIZE-1)/3
     pub const BFT_QUORUM: usize = (COMMITTEE_SIZE * 2) / 3 + 1;
     /// Epoch length in vertices before committee rotation

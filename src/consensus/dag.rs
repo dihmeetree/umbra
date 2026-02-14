@@ -34,7 +34,8 @@ pub struct Vertex {
     pub proposer: SigningPublicKey,
     /// Transactions included in this vertex
     pub transactions: Vec<Transaction>,
-    /// Timestamp (unix millis, advisory only — not used for consensus)
+    /// Timestamp (unix millis). Validated on insert: rejected if more than
+    /// `MAX_VERTEX_TIMESTAMP_DRIFT_SECS` in the future. Not included in vertex ID.
     pub timestamp: u64,
     /// State root after applying this vertex's transactions
     pub state_root: Hash,
@@ -250,6 +251,20 @@ impl Dag {
 
     fn insert_impl(&mut self, vertex: Vertex, skip_signature: bool) -> Result<(), VertexError> {
         vertex.validate_structure(skip_signature)?;
+
+        // Reject vertices with timestamps too far in the future.
+        // Past timestamps are allowed (needed for syncing historical vertices).
+        // Genesis vertex (round 0) is exempt.
+        if vertex.round != 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let max_future_ms = now_ms + crate::constants::MAX_VERTEX_TIMESTAMP_DRIFT_SECS * 1000;
+            if vertex.timestamp > max_future_ms {
+                return Err(VertexError::TimestampTooFarInFuture);
+            }
+        }
 
         // Limit unfinalized vertices to prevent memory exhaustion
         const MAX_UNFINALIZED: usize = 10_000;
@@ -491,6 +506,8 @@ pub enum VertexError {
     NotSelected,
     #[error("too many unfinalized vertices in DAG")]
     TooManyUnfinalized,
+    #[error("vertex timestamp is too far in the future")]
+    TimestampTooFarInFuture,
 }
 
 #[cfg(test)]
@@ -1005,5 +1022,55 @@ mod tests {
         let order = dag.finalized_order();
         assert_eq!(order.len(), 1);
         assert_eq!(order[0], v2.id);
+    }
+
+    #[test]
+    fn reject_far_future_timestamp() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Create a vertex with timestamp 2 hours in the future
+        let future_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 2 * 3600 * 1000;
+        let mut v = make_vertex(vec![gid], 1);
+        v.timestamp = future_ts;
+
+        let result = dag.insert_unchecked(v);
+        assert!(matches!(result, Err(VertexError::TimestampTooFarInFuture)));
+    }
+
+    #[test]
+    fn accept_past_timestamp() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Vertex with timestamp in the past (e.g., epoch 0) should be accepted
+        let mut v = make_vertex(vec![gid], 1);
+        v.timestamp = 1000; // 1 second after epoch — far in the past
+        dag.insert_unchecked(v).unwrap();
+        assert_eq!(dag.len(), 2);
+    }
+
+    #[test]
+    fn accept_near_future_timestamp() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Vertex with timestamp 30 seconds in the future (within 60s drift) should be accepted
+        let near_future_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 30_000;
+        let mut v = make_vertex(vec![gid], 1);
+        v.timestamp = near_future_ts;
+        dag.insert_unchecked(v).unwrap();
+        assert_eq!(dag.len(), 2);
     }
 }

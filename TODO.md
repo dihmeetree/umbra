@@ -6,7 +6,7 @@
 - [ ] **Snapshot/checkpoint sync** — allow new nodes to bootstrap from a recent checkpoint instead of replaying from genesis
 - [ ] **NAT traversal / hole punching** — enable inbound P2P connections for nodes behind NATs
 - [ ] **Persistent peer address book** — save known peers to disk so they survive restarts
-- [ ] **Timestamp enforcement** — reject vertices with far-future timestamps; detect clock skew between peers
+- [x] **Timestamp enforcement** — reject vertices with far-future timestamps; detect clock skew between peers
 
 ## Cryptography & Privacy
 
