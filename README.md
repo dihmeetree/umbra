@@ -6,6 +6,11 @@ A post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust.
 
 Umbra is designed from the ground up to be **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final** — with no trusted setup required.
 
+> [!WARNING]
+> While Umbra implements cryptographic algorithms standardized by NIST, this software has not undergone a formal security audit. A formal audit is planned once the design and APIs have stabilized.
+> This project is under active development and is considered experimental. Features may change, and not all functionality is production-ready.
+> If you discover bugs, security vulnerabilities, or have feature requests, please open an issue on [GitHub](https://github.com/dihmeetree/umbra/issues).
+
 ## Key Features
 
 ### Full Zero-Knowledge Privacy
