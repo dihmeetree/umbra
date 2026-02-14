@@ -41,6 +41,14 @@ const NULLIFIER_DOMAIN: u64 = 0x6E756C6C00000000; // "null\0\0\0\0"
 /// without revealing the commitment).
 pub const PROOF_LINK_DOMAIN: u64 = 0x6C696E6B00000000; // "link\0\0\0\0"
 
+/// Domain separator for Merkle tree merge hashing.
+///
+/// Ensures the merge sponge cannot collide with any other hash function,
+/// even though commitment/nullifier/proof_link already have distinct nonzero
+/// domain tags. Defensive: prevents accidental collisions if new untagged
+/// hash functions are added in the future.
+pub const MERGE_DOMAIN: u64 = 0x6D65726765000000; // "merge\0\0\0"
+
 /// Apply the full Rescue Prime permutation to a state (all 7 rounds).
 pub fn apply_permutation(state: &mut [Felt; STATE_WIDTH]) {
     Rp64_256::apply_permutation(state);
@@ -111,12 +119,14 @@ pub fn nullifier_init_state(spend_auth: &[Felt; 4], commitment: &[Felt; 4]) -> [
 
 /// Compute the initial Rescue state for merging two digests (Merkle tree node).
 ///
-/// Layout: capacity[0..4] = [0, 0, 0, 0]
+/// Layout: capacity[0..4] = [MERGE_DOMAIN, 0, 0, 0]
 ///         rate[4..12] = [left[0..4], right[0..4]]
 ///
-/// This matches winterfell's `Rp64_256::merge()` behavior.
+/// Uses an explicit domain tag (unlike raw winterfell merge) for defensive
+/// domain separation — prevents accidental collisions with other hash functions.
 pub fn merge_init_state(left: &[Felt; 4], right: &[Felt; 4]) -> [Felt; STATE_WIDTH] {
     let mut state = [Felt::ZERO; STATE_WIDTH];
+    state[0] = Felt::new(MERGE_DOMAIN);
     state[4] = left[0];
     state[5] = left[1];
     state[6] = left[2];

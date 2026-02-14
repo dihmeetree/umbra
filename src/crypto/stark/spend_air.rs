@@ -31,7 +31,7 @@
 //! 26:    path_bit boolean at first rows (degree 2)
 //! 27:    chain_flag boolean at first rows (degree 2)
 //! 28-31: Merkle chain: digest from prev block enters next block's rate (degree 3)
-//! 32-35: Capacity zero at chained blocks (degree 2)
+//! 32-35: Capacity at chained Merkle blocks: [MERGE_DOMAIN, 0, 0, 0] (degree 2)
 //! 36-39: Commitment register constancy (degree 1, no periodic)
 //! 40-43: Nullifier binding: state[8..12] = reg at block 0 (degree 1, period=trace_len)
 //! 44-47: Merkle leaf binding: state[4/8..] = reg at block 1 (degree 2, period=trace_len)
@@ -61,6 +61,9 @@ pub const MERKLE_DEPTH: usize = 20;
 
 /// Domain separator for nullifier hashing.
 const NULLIFIER_DOMAIN: u64 = 0x6E756C6C00000000;
+
+/// Domain separator for Merkle merge hashing.
+const MERGE_DOMAIN: u64 = rescue::MERGE_DOMAIN;
 
 /// Block index of the proof_link hash.
 const PROOF_LINK_BLOCK: usize = 1 + MERKLE_DEPTH; // = 21
@@ -104,7 +107,7 @@ impl Air for SpendAir {
         for _ in 0..4 {
             degrees.push(TransitionConstraintDegree::with_cycles(3, vec![8]));
         }
-        // Capacity zero at chained blocks: (1-hash_flag) × degree 2
+        // Capacity at chained Merkle blocks: (1-hash_flag) × degree 2
         for _ in 0..4 {
             degrees.push(TransitionConstraintDegree::with_cycles(2, vec![8]));
         }
@@ -140,6 +143,7 @@ impl Air for SpendAir {
         // Assertions:
         // - 4 nullifier domain capacity at row 0
         // - 4 nullifier digest at row 7
+        // - 4 first Merkle block capacity (MERGE_DOMAIN) at block 1
         // - 4 Merkle root at last Merkle block's final row
         // - 4 proof_link domain capacity at proof_link block first row
         // - 4 proof_link digest at proof_link block final row
@@ -151,7 +155,7 @@ impl Air for SpendAir {
         // - num_padding chain_flag = 0 at padding blocks
         // - num_padding path_bit = 1 at padding blocks
         let num_assertions =
-            4 + 4 + 4 + 4 + 4 + 2 + (MERKLE_DEPTH - 1) + 2 + num_padding_blocks * 2;
+            4 + 4 + 4 + 4 + 4 + 4 + 2 + (MERKLE_DEPTH - 1) + 2 + num_padding_blocks * 2;
 
         let context = AirContext::new(trace_info, degrees, num_assertions, options);
 
@@ -227,8 +231,10 @@ impl Air for SpendAir {
             result[28 + j] = boundary_flag * next[25] * digest_target;
         }
 
-        // Constraints 32-35: Capacity must be zero at chained block starts
-        for j in 0..4 {
+        // Constraints 32-35: Capacity at chained Merkle block starts
+        // state[0] must equal MERGE_DOMAIN; state[1..4] must be zero.
+        result[32] = boundary_flag * next[25] * (next[0] - E::from(Felt::new(MERGE_DOMAIN)));
+        for j in 1..4 {
             result[32 + j] = boundary_flag * next[25] * next[j];
         }
 
@@ -276,6 +282,18 @@ impl Air for SpendAir {
                 self.pub_inputs.nullifier[j],
             ));
         }
+
+        // First Merkle block (block 1): capacity = [MERGE_DOMAIN, 0, 0, 0]
+        // (Blocks 2..MERKLE_DEPTH are enforced by constraint 32 via chain_flag.)
+        let merkle1_first_row = HASH_CYCLE;
+        assertions.push(Assertion::single(
+            0,
+            merkle1_first_row,
+            Felt::new(MERGE_DOMAIN),
+        ));
+        assertions.push(Assertion::single(1, merkle1_first_row, Felt::ZERO));
+        assertions.push(Assertion::single(2, merkle1_first_row, Felt::ZERO));
+        assertions.push(Assertion::single(3, merkle1_first_row, Felt::ZERO));
 
         // Merkle root at the last Merkle block's final row
         let last_merkle_row = (1 + MERKLE_DEPTH) * HASH_CYCLE - 1;

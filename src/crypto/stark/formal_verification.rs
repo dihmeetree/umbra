@@ -1099,6 +1099,40 @@ fn spend_proof_link_domain_wrong() {
     );
 }
 
+#[test]
+fn spend_merkle_domain_wrong() {
+    let (mut trace, air, _) = build_simple_spend();
+    // Change state[0] at first Merkle block (block 1) from MERGE_DOMAIN to 0.
+    // Block 1 has chain_flag=0 so the domain is enforced only by boundary assertion.
+    let merkle1_start = HASH_CYCLE;
+    trace.set(0, merkle1_start, Felt::ZERO);
+    let assertions = air.get_assertions();
+    let violations = check_boundary_violations(&assertions, &trace);
+    assert!(
+        !violations.is_empty(),
+        "wrong merge domain at first Merkle block must violate boundary assertion"
+    );
+}
+
+#[test]
+fn spend_merkle_chained_domain_wrong() {
+    let (mut trace, air, _) = build_simple_spend();
+    // Change state[0] at a chained Merkle block (block 3, chain_flag=1) from
+    // MERGE_DOMAIN to 0. Constraint 32 enforces state[0] = MERGE_DOMAIN at
+    // chained block boundaries.
+    let block3_start = 3 * HASH_CYCLE;
+    trace.set(0, block3_start, Felt::ZERO);
+    // Constraint 32 fires at the row 7→8 boundary (block 2 last row → block 3 first row)
+    let all_constraints: Vec<usize> = (0..52).collect();
+    let c_violated = any_spend_constraint_violated(&air, &trace, &all_constraints);
+    let assertions = air.get_assertions();
+    let b_violated = !check_boundary_violations(&assertions, &trace).is_empty();
+    assert!(
+        c_violated || b_violated,
+        "wrong merge domain at chained Merkle block must be caught"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // CROSS-PROOF PROPERTIES
 // ═══════════════════════════════════════════════════════════════════════
