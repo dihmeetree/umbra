@@ -1409,7 +1409,7 @@ impl Node {
                 .insert(tx_hash, (hops_remaining, Instant::now()));
             // Random delay to prevent timing-based sender deanonymization
             let delay_ms = {
-                use rand::Rng;
+                use rand::RngExt;
                 rand::rng().random_range(
                     crate::constants::DANDELION_STEM_DELAY_MIN_MS
                         ..=crate::constants::DANDELION_STEM_DELAY_MAX_MS,

@@ -9,7 +9,7 @@
 //! - **No trusted setup**: Pure hash-based, transparent
 //! - **STARK-friendly**: Same hash function used inside zk-STARK circuits
 
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

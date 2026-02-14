@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 

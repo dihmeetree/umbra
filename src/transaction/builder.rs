@@ -10,7 +10,7 @@
 //!     .build()?;
 //! ```
 
-use rand::Rng;
+use rand::RngExt;
 use winterfell::math::FieldElement;
 
 use crate::crypto::commitment::{BlindingFactor, Commitment};

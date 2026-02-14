@@ -47,7 +47,7 @@
 //!   analysis or third-party audit. The security argument relies on BLAKE3's
 //!   PRF properties and the standard encrypt-then-MAC composition theorem.
 
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use super::keys::{KemCiphertext, KemKeypair, KemPublicKey, SharedSecret};
