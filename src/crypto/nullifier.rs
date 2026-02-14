@@ -129,4 +129,79 @@ mod tests {
         assert!(n.verify(&auth, &commitment));
         assert!(!n.verify(&[0u8; 32], &commitment));
     }
+
+    #[test]
+    fn nullifier_to_felts_roundtrip() {
+        let auth = [42u8; 32];
+        let commitment = [7u8; 32];
+        let n = Nullifier::derive(&auth, &commitment);
+        let felts = n.to_felts();
+        // Should produce 4 field elements
+        assert_eq!(felts.len(), 4);
+        // Converting back should give the same hash (for field-native values)
+        let back = crate::crypto::stark::convert::felts_to_hash(&felts);
+        assert_eq!(back, n.0);
+    }
+
+    #[test]
+    fn nullifier_as_bytes() {
+        let auth = [42u8; 32];
+        let commitment = [7u8; 32];
+        let n = Nullifier::derive(&auth, &commitment);
+        assert_eq!(n.as_bytes().len(), 32);
+        assert_eq!(n.as_bytes(), &n.0);
+    }
+
+    #[test]
+    fn nullifier_set_len_and_is_empty() {
+        let mut set = NullifierSet::new();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+
+        let n1 = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        set.insert(n1);
+        assert!(!set.is_empty());
+        assert_eq!(set.len(), 1);
+
+        let n2 = Nullifier::derive(&[3u8; 32], &[4u8; 32]);
+        set.insert(n2);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn nullifier_set_contains() {
+        let mut set = NullifierSet::new();
+        let n = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        assert!(!set.contains(&n));
+        set.insert(n);
+        assert!(set.contains(&n));
+    }
+
+    #[test]
+    fn nullifier_set_remove() {
+        let mut set = NullifierSet::new();
+        let n = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        set.insert(n);
+        assert!(set.contains(&n));
+
+        assert!(set.remove(&n)); // returns true when removed
+        assert!(!set.contains(&n));
+        assert!(set.is_empty());
+
+        assert!(!set.remove(&n)); // returns false when not present
+    }
+
+    #[test]
+    fn nullifier_set_iter() {
+        let mut set = NullifierSet::new();
+        let n1 = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        let n2 = Nullifier::derive(&[3u8; 32], &[4u8; 32]);
+        set.insert(n1);
+        set.insert(n2);
+
+        let collected: std::collections::HashSet<Nullifier> = set.iter().copied().collect();
+        assert_eq!(collected.len(), 2);
+        assert!(collected.contains(&n1));
+        assert!(collected.contains(&n2));
+    }
 }

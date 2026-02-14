@@ -1073,4 +1073,122 @@ mod tests {
         dag.insert_unchecked(v).unwrap();
         assert_eq!(dag.len(), 2);
     }
+
+    #[test]
+    fn ancestors_basic() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex(vec![gid], 1);
+        let v2 = make_vertex(vec![v1.id], 2);
+        dag.insert_unchecked(v1.clone()).unwrap();
+        dag.insert_unchecked(v2.clone()).unwrap();
+
+        // Ancestors of v2 should include v1 and genesis
+        let anc = dag.ancestors(&v2.id);
+        assert!(anc.contains(&v1.id));
+        assert!(anc.contains(&gid));
+    }
+
+    #[test]
+    fn ancestors_diamond() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex_with_nonce(vec![gid], 1, 0);
+        let v2 = make_vertex_with_nonce(vec![gid], 1, 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+        dag.insert_unchecked(v2.clone()).unwrap();
+
+        let v3 = make_vertex(vec![v1.id, v2.id], 2);
+        dag.insert_unchecked(v3.clone()).unwrap();
+
+        let anc = dag.ancestors(&v3.id);
+        assert!(anc.contains(&v1.id));
+        assert!(anc.contains(&v2.id));
+        assert!(anc.contains(&gid));
+        assert_eq!(anc.len(), 3);
+    }
+
+    #[test]
+    fn ancestors_bounded_respects_limit() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Build a chain of 10 vertices
+        let mut prev_id = gid;
+        for round in 1..=10u64 {
+            let v = make_vertex_with_nonce(vec![prev_id], round, round as u8);
+            prev_id = v.id;
+            dag.insert_unchecked(v).unwrap();
+        }
+
+        // With max_visited=3, should only get 3 ancestors
+        let anc = dag.ancestors_bounded(&prev_id, 3);
+        assert_eq!(anc.len(), 3);
+    }
+
+    #[test]
+    fn ancestors_genesis_has_none() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let dag = Dag::new(genesis);
+
+        let anc = dag.ancestors(&gid);
+        assert!(anc.is_empty());
+    }
+
+    #[test]
+    fn advance_round_and_epoch() {
+        let genesis = Dag::genesis_vertex();
+        let mut dag = Dag::new(genesis);
+
+        assert_eq!(dag.epoch(), 0);
+
+        // Advance through EPOCH_LENGTH rounds to trigger epoch advancement
+        let epoch_len = crate::constants::EPOCH_LENGTH;
+        for _ in 0..epoch_len {
+            dag.advance_round();
+        }
+        assert_eq!(dag.epoch(), 1);
+
+        // Partial rounds don't advance epoch
+        for _ in 0..(epoch_len - 1) {
+            dag.advance_round();
+        }
+        assert_eq!(dag.epoch(), 1);
+
+        // One more to reach 2*EPOCH_LENGTH
+        dag.advance_round();
+        assert_eq!(dag.epoch(), 2);
+    }
+
+    #[test]
+    fn genesis_vertex_is_well_formed() {
+        let genesis = Dag::genesis_vertex();
+        assert!(genesis.parents.is_empty());
+        assert_eq!(genesis.epoch, 0);
+        assert_eq!(genesis.round, 0);
+        assert!(genesis.transactions.is_empty());
+        assert_eq!(genesis.timestamp, 0);
+        assert!(genesis.vrf_proof.is_none());
+        assert!(genesis.signature.as_bytes().is_empty());
+        assert_eq!(genesis.proposer.0.len(), 2592); // Dilithium5 key size
+    }
+
+    #[test]
+    fn tx_root_empty_transactions() {
+        let genesis = Dag::genesis_vertex();
+        assert_eq!(genesis.tx_root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn get_returns_none_for_unknown() {
+        let genesis = Dag::genesis_vertex();
+        let dag = Dag::new(genesis);
+        assert!(dag.get(&VertexId([0xFF; 32])).is_none());
+    }
 }

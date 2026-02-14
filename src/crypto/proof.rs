@@ -558,4 +558,119 @@ mod tests {
             assert_eq!(stark_node.1, merkle_node.is_left);
         }
     }
+
+    #[test]
+    fn incremental_tree_truncate_to_zero() {
+        let mut tree = IncrementalMerkleTree::new();
+        let empty_root = tree.root();
+
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        assert_eq!(tree.num_leaves(), 1);
+        assert_ne!(tree.root(), empty_root);
+
+        tree.truncate(0);
+        assert_eq!(tree.num_leaves(), 0);
+        assert_eq!(tree.root(), empty_root);
+    }
+
+    #[test]
+    fn incremental_tree_truncate_partial() {
+        let leaves: Vec<Hash> = (0..5u64)
+            .map(|i| Commitment::commit(i * 100 + 1, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+
+        // Build tree with 5 leaves, capture root at 3
+        let mut tree3 = IncrementalMerkleTree::new();
+        for leaf in &leaves[..3] {
+            tree3.append(*leaf).unwrap();
+        }
+        let root_at_3 = tree3.root();
+
+        // Build tree with 5 leaves
+        let mut tree5 = IncrementalMerkleTree::new();
+        for leaf in &leaves {
+            tree5.append(*leaf).unwrap();
+        }
+        assert_eq!(tree5.num_leaves(), 5);
+
+        // Truncate back to 3
+        tree5.truncate(3);
+        assert_eq!(tree5.num_leaves(), 3);
+        assert_eq!(tree5.root(), root_at_3);
+
+        // Paths should still work
+        for (i, leaf) in leaves[..3].iter().enumerate() {
+            let path = tree5.path(i).unwrap();
+            assert_eq!(compute_merkle_root(leaf, &path), tree5.root());
+        }
+    }
+
+    #[test]
+    fn incremental_tree_truncate_noop_when_larger() {
+        let mut tree = IncrementalMerkleTree::new();
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        let root_before = tree.root();
+
+        // Truncate to a larger count should be a no-op
+        tree.truncate(5);
+        assert_eq!(tree.num_leaves(), 1);
+        assert_eq!(tree.root(), root_before);
+    }
+
+    #[test]
+    fn incremental_tree_truncate_then_reappend() {
+        let leaves: Vec<Hash> = (0..4u64)
+            .map(|i| Commitment::commit(i * 100, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+
+        let mut tree = IncrementalMerkleTree::new();
+        for leaf in &leaves {
+            tree.append(*leaf).unwrap();
+        }
+
+        // Truncate to 2 then re-append same leaves
+        tree.truncate(2);
+        tree.append(leaves[2]).unwrap();
+        tree.append(leaves[3]).unwrap();
+
+        // Should match a fresh tree with same 4 leaves
+        let mut fresh = IncrementalMerkleTree::new();
+        for leaf in &leaves {
+            fresh.append(*leaf).unwrap();
+        }
+        assert_eq!(tree.root(), fresh.root());
+    }
+
+    #[test]
+    fn build_merkle_tree_empty() {
+        let (root, paths) = build_merkle_tree(&[]);
+        assert_eq!(root, [0u8; 32]);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn incremental_tree_level_len() {
+        let mut tree = IncrementalMerkleTree::new();
+        assert_eq!(tree.level_len(0), 0);
+
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        assert_eq!(tree.level_len(0), 1); // 1 leaf
+        assert!(tree.level_len(MERKLE_DEPTH) > 0); // root level populated
+
+        // Out-of-range level returns 0
+        assert_eq!(tree.level_len(MERKLE_DEPTH + 5), 0);
+    }
+
+    #[test]
+    fn incremental_tree_path_out_of_bounds() {
+        let mut tree = IncrementalMerkleTree::new();
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        assert!(tree.path(0).is_some());
+        assert!(tree.path(1).is_none());
+        assert!(tree.path(100).is_none());
+    }
 }

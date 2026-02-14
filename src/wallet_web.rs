@@ -691,3 +691,249 @@ async fn scan_action(State(state): State<WalletWebState>) -> Response {
     }
     .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state(dir: &std::path::Path) -> WalletWebState {
+        WalletWebState::new(dir.to_path_buf(), "127.0.0.1:18080".parse().unwrap(), None)
+    }
+
+    async fn send_request(
+        app: Router,
+        req: Request<Body>,
+    ) -> axum::http::Response<axum::body::Body> {
+        app.oneshot(req).await.unwrap()
+    }
+
+    #[test]
+    fn wallet_web_state_new_has_empty_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        assert_eq!(state.data_dir, dir.path());
+        assert!(state.wallet_tls.is_none());
+    }
+
+    #[test]
+    fn wallet_exists_returns_false_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        assert!(!state.wallet_exists());
+    }
+
+    #[test]
+    fn wallet_exists_returns_true_when_file_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = Wallet::new();
+        let path = wallet_cli::wallet_path(dir.path());
+        wallet.save_to_file(&path, 0).unwrap();
+        let state = test_state(dir.path());
+        assert!(state.wallet_exists());
+    }
+
+    #[test]
+    fn rpc_client_without_tls() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // Should succeed and create a plain HTTP client
+        let _client = state.rpc_client().unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalidate_cache_clears_loaded_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // Manually populate cache
+        {
+            let mut cache = state.wallet.write().await;
+            *cache = Some((Wallet::new(), 42));
+        }
+        // Verify cache is populated
+        {
+            let cache = state.wallet.read().await;
+            assert!(cache.is_some());
+        }
+        state.invalidate_cache().await;
+        let cache = state.wallet.read().await;
+        assert!(cache.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_wallet_returns_none_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let result = state.load_wallet().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_wallet_caches_on_first_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = Wallet::new();
+        let path = wallet_cli::wallet_path(dir.path());
+        wallet.save_to_file(&path, 7).unwrap();
+
+        let state = test_state(dir.path());
+        let result = state.load_wallet().await.unwrap();
+        assert!(result.is_some());
+        let (w, seq) = result.unwrap();
+        assert_eq!(seq, 7);
+        assert_eq!(w.balance(), 0);
+
+        // Second call should return cached value
+        let result2 = state.load_wallet().await.unwrap();
+        assert!(result2.is_some());
+    }
+
+    #[tokio::test]
+    async fn save_wallet_updates_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let state = test_state(dir.path());
+        let wallet = Wallet::new();
+        state.save_wallet(&wallet, 99).await.unwrap();
+
+        let cache = state.wallet.read().await;
+        let (_, seq) = cache.as_ref().unwrap();
+        assert_eq!(*seq, 99);
+    }
+
+    #[test]
+    fn error_page_sets_message() {
+        let tpl = error_page("something broke");
+        assert_eq!(tpl.message, "something broke");
+        assert_eq!(tpl.active_tab, "");
+    }
+
+    #[tokio::test]
+    async fn dashboard_redirects_to_init_when_no_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 303); // See Other redirect
+        assert_eq!(resp.headers().get("location").unwrap(), "/init");
+    }
+
+    #[tokio::test]
+    async fn init_page_returns_200_when_no_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/init").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn init_page_redirects_when_wallet_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = Wallet::new();
+        let path = wallet_cli::wallet_path(dir.path());
+        wallet.save_to_file(&path, 0).unwrap();
+
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/init").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 303);
+        assert_eq!(resp.headers().get("location").unwrap(), "/");
+    }
+
+    #[tokio::test]
+    async fn init_action_creates_wallet_and_redirects() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(
+            app,
+            Request::post("/init")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), 303);
+        assert_eq!(resp.headers().get("location").unwrap(), "/");
+        // Wallet file should now exist
+        assert!(wallet_cli::wallet_path(dir.path()).exists());
+        // Address file should also exist
+        assert!(wallet_cli::address_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn security_headers_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/init").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.headers().get("X-Frame-Options").unwrap(), "DENY");
+        assert_eq!(
+            resp.headers().get("X-Content-Type-Options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(resp.headers().get("Cache-Control").unwrap(), "no-store");
+        assert!(resp
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("default-src 'self'"));
+    }
+
+    #[tokio::test]
+    async fn send_page_redirects_without_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/send").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 303);
+        assert_eq!(resp.headers().get("location").unwrap(), "/init");
+    }
+
+    #[tokio::test]
+    async fn messages_page_redirects_without_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/messages").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 303);
+        assert_eq!(resp.headers().get("location").unwrap(), "/init");
+    }
+
+    #[tokio::test]
+    async fn history_page_redirects_without_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/history").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 303);
+        assert_eq!(resp.headers().get("location").unwrap(), "/init");
+    }
+
+    #[tokio::test]
+    async fn address_page_redirects_without_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(app, Request::get("/address").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), 303);
+        assert_eq!(resp.headers().get("location").unwrap(), "/init");
+    }
+
+    #[tokio::test]
+    async fn nonexistent_route_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let resp = send_request(
+            app,
+            Request::get("/nonexistent").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), 404);
+    }
+}

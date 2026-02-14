@@ -311,4 +311,72 @@ mod tests {
         let huge = vec![0u8; crate::constants::MAX_ENCRYPT_PLAINTEXT + 1];
         assert!(EncryptedPayload::encrypt(&kp.public, &huge).is_none());
     }
+
+    #[test]
+    fn encrypt_exactly_32_bytes() {
+        // Exactly one keystream block
+        let kp = KemKeypair::generate();
+        let msg = vec![0xABu8; 32];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_33_bytes_crosses_block_boundary() {
+        // Crosses keystream block boundary (32 → 33 bytes)
+        let kp = KemKeypair::generate();
+        let msg = vec![0xCDu8; 33];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_with_shared_secret_oversized_rejected() {
+        let kp = KemKeypair::generate();
+        let (ss, ct) = kp.public.encapsulate().unwrap();
+        let huge = vec![0u8; crate::constants::MAX_ENCRYPT_PLAINTEXT + 1];
+        assert!(EncryptedPayload::encrypt_with_shared_secret(&ss, ct, &huge).is_none());
+    }
+
+    #[test]
+    fn tampered_mac_directly_fails() {
+        let kp = KemKeypair::generate();
+        let msg = b"mac tamper test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        encrypted.mac[0] ^= 0xff;
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn decrypt_with_shared_secret_roundtrip() {
+        let kp = KemKeypair::generate();
+        let (ss, ct) = kp.public.encapsulate().unwrap();
+        let msg = b"shared secret roundtrip";
+        let encrypted = EncryptedPayload::encrypt_with_shared_secret(&ss, ct, msg).unwrap();
+        let decrypted = encrypted.decrypt_with_shared_secret(&ss).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn decrypt_with_wrong_shared_secret_fails() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        let (ss1, ct1) = kp1.public.encapsulate().unwrap();
+        let (ss2, _) = kp2.public.encapsulate().unwrap();
+
+        let msg = b"wrong secret test";
+        let encrypted = EncryptedPayload::encrypt_with_shared_secret(&ss1, ct1, msg).unwrap();
+        assert!(encrypted.decrypt_with_shared_secret(&ss2).is_none());
+    }
+
+    #[test]
+    fn encrypt_exactly_at_max_limit() {
+        let kp = KemKeypair::generate();
+        let msg = vec![0xFFu8; crate::constants::MAX_ENCRYPT_PLAINTEXT];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
 }

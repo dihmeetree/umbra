@@ -2353,6 +2353,41 @@ mod tests {
     }
 
     #[test]
+    fn create_genesis_coinbase() {
+        let mut state = ChainState::new();
+        let kem_kp = KemKeypair::generate();
+
+        let minted_before = state.total_minted();
+        let commitments_before = state.commitment_count();
+
+        let result = state.create_genesis_coinbase(&kem_kp.public);
+        assert!(result.is_some());
+
+        let output = result.unwrap();
+        assert_eq!(
+            state.total_minted(),
+            minted_before + crate::constants::GENESIS_MINT
+        );
+        assert_eq!(state.commitment_count(), commitments_before + 1);
+
+        // The commitment should be findable in the tree
+        assert!(state.find_commitment(&output.commitment).is_some());
+    }
+
+    #[test]
+    fn create_genesis_coinbase_deterministic_blinding() {
+        let mut state1 = ChainState::new();
+        let mut state2 = ChainState::new();
+        let kem_kp = KemKeypair::generate();
+
+        let out1 = state1.create_genesis_coinbase(&kem_kp.public).unwrap();
+        let out2 = state2.create_genesis_coinbase(&kem_kp.public).unwrap();
+
+        // Same KEM key should produce the same commitment (deterministic blinding)
+        assert_eq!(out1.commitment, out2.commitment);
+    }
+
+    #[test]
     fn snapshot_data_export_import_roundtrip() {
         use crate::storage::SledStorage;
 

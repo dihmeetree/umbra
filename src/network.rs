@@ -448,4 +448,126 @@ mod tests {
             _ => panic!("wrong message type"),
         }
     }
+
+    #[test]
+    fn bft_vote_roundtrip() {
+        use crate::consensus::bft::{vote_sign_data, VoteType};
+        use crate::consensus::dag::VertexId;
+
+        let kp = SigningKeypair::generate();
+        let chain_id = crate::hash_domain(b"test", b"chain");
+        let vertex_id = VertexId([42u8; 32]);
+        let msg_data = vote_sign_data(&vertex_id, 3, 7, &VoteType::Accept, &chain_id);
+        let sig = kp.sign(&msg_data);
+        let vote = Vote {
+            vertex_id,
+            voter_id: kp.public.fingerprint(),
+            epoch: 3,
+            round: 7,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+        let msg = Message::BftVote(vote);
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::BftVote(v) => {
+                assert_eq!(v.epoch, 3);
+                assert_eq!(v.round, 7);
+                assert_eq!(v.vertex_id, vertex_id);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn key_exchange_roundtrip() {
+        let kem_kp = KemKeypair::generate();
+        let (_, ct) = kem_kp.public.encapsulate().unwrap();
+        let msg = Message::KeyExchange {
+            kem_ciphertext: ct.clone(),
+        };
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::KeyExchange { kem_ciphertext } => {
+                assert_eq!(kem_ciphertext.as_bytes(), ct.as_bytes());
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn auth_response_roundtrip() {
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"transcript");
+        let msg = Message::AuthResponse {
+            signature: sig.clone(),
+        };
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::AuthResponse { signature } => {
+                assert_eq!(signature.as_bytes(), sig.as_bytes());
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn get_vertex_and_get_tips_roundtrip() {
+        let vid = VertexId([99u8; 32]);
+        let msg = Message::GetVertex(vid);
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::GetVertex(id) => assert_eq!(id, vid),
+            _ => panic!("wrong message type"),
+        }
+
+        let msg = Message::GetTips;
+        let bytes = encode_message(&msg).unwrap();
+        assert!(matches!(decode_message(&bytes).unwrap(), Message::GetTips));
+    }
+
+    #[test]
+    fn get_transaction_roundtrip() {
+        let tx_hash = [0xABu8; 32];
+        let msg = Message::GetTransaction(tx_hash);
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::GetTransaction(h) => assert_eq!(h, tx_hash),
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn decode_empty_buffer_returns_none() {
+        assert!(decode_message(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_short_buffer_returns_none() {
+        assert!(decode_message(&[1, 2]).is_none());
+    }
+
+    #[test]
+    fn decode_truncated_payload_returns_none() {
+        // Length says 100 bytes but only 10 bytes of payload
+        let len_bytes = 100u32.to_le_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&len_bytes);
+        data.extend_from_slice(&[0u8; 10]);
+        assert!(decode_message(&data).is_none());
+    }
+
+    #[test]
+    fn decode_corrupted_payload_returns_none() {
+        // Valid length but garbage payload
+        let len_bytes = 8u32.to_le_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&len_bytes);
+        data.extend_from_slice(&[0xFF; 8]);
+        assert!(decode_message(&data).is_none());
+    }
 }

@@ -418,4 +418,118 @@ mod tests {
         assert!(SigningKeypair::from_bytes(vec![0; 10], vec![0; 10]).is_none());
         assert!(KemKeypair::from_bytes(vec![0; 10], vec![0; 10]).is_none());
     }
+
+    #[test]
+    fn signing_fingerprint_deterministic_and_unique() {
+        let kp1 = SigningKeypair::generate();
+        let kp2 = SigningKeypair::generate();
+        // Same key produces same fingerprint
+        assert_eq!(kp1.public.fingerprint(), kp1.public.fingerprint());
+        // Different keys produce different fingerprints
+        assert_ne!(kp1.public.fingerprint(), kp2.public.fingerprint());
+        // Fingerprint is non-zero
+        assert_ne!(kp1.public.fingerprint(), [0u8; 32]);
+    }
+
+    #[test]
+    fn kem_fingerprint_deterministic_and_unique() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        assert_eq!(kp1.public.fingerprint(), kp1.public.fingerprint());
+        assert_ne!(kp1.public.fingerprint(), kp2.public.fingerprint());
+        assert_ne!(kp1.public.fingerprint(), [0u8; 32]);
+    }
+
+    #[test]
+    fn signature_empty_and_as_bytes() {
+        let empty = Signature::empty();
+        assert!(empty.as_bytes().is_empty());
+
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"test");
+        assert_eq!(sig.as_bytes().len(), DILITHIUM5_SIG_BYTES);
+    }
+
+    #[test]
+    fn kem_ciphertext_as_bytes() {
+        let kp = KemKeypair::generate();
+        let (_, ct) = kp.public.encapsulate().unwrap();
+        assert_eq!(ct.as_bytes().len(), KYBER1024_CT_BYTES);
+    }
+
+    #[test]
+    fn signature_deserialize_rejects_wrong_size() {
+        let bad_bytes: Vec<u8> = vec![0u8; 100]; // wrong size, not 0 and not 4627
+        let encoded = crate::serialize(&bad_bytes).unwrap();
+        let result: Result<Signature, _> = crate::deserialize(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn signature_deserialize_accepts_empty() {
+        let empty_sig = Signature::empty();
+        let encoded = crate::serialize(&empty_sig).unwrap();
+        let result: Result<Signature, _> = crate::deserialize(&encoded);
+        assert!(result.is_ok());
+        assert!(result.unwrap().as_bytes().is_empty());
+    }
+
+    #[test]
+    fn signing_public_key_deserialize_rejects_wrong_size() {
+        let bad_bytes: Vec<u8> = vec![0u8; 100];
+        let encoded = crate::serialize(&bad_bytes).unwrap();
+        let result: Result<SigningPublicKey, _> = crate::deserialize(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn kem_public_key_deserialize_rejects_wrong_size() {
+        let bad_bytes: Vec<u8> = vec![0u8; 100];
+        let encoded = crate::serialize(&bad_bytes).unwrap();
+        let result: Result<KemPublicKey, _> = crate::deserialize(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn kem_ciphertext_deserialize_rejects_wrong_size() {
+        let bad_bytes: Vec<u8> = vec![0u8; 100];
+        let encoded = crate::serialize(&bad_bytes).unwrap();
+        let result: Result<KemCiphertext, _> = crate::deserialize(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn public_address_address_id_deterministic() {
+        let kp = FullKeypair::generate();
+        let addr = kp.public_address();
+        let id1 = addr.address_id();
+        let id2 = addr.address_id();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn public_address_id_differs_for_different_keys() {
+        let kp1 = FullKeypair::generate();
+        let kp2 = FullKeypair::generate();
+        assert_ne!(
+            kp1.public_address().address_id(),
+            kp2.public_address().address_id()
+        );
+    }
+
+    #[test]
+    fn invalid_size_public_key_reports_false() {
+        let bad_signing = SigningPublicKey(vec![0u8; 10]);
+        assert!(!bad_signing.is_valid_size());
+
+        let bad_kem = KemPublicKey(vec![0u8; 10]);
+        assert!(!bad_kem.is_valid_size());
+    }
+
+    #[test]
+    fn verify_with_empty_signature_fails() {
+        let kp = SigningKeypair::generate();
+        let empty_sig = Signature::empty();
+        assert!(!kp.public.verify(b"test message", &empty_sig));
+    }
 }

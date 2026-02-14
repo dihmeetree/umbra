@@ -97,4 +97,54 @@ mod tests {
         let f = u64_to_felt(1_000_000);
         assert_eq!(f.as_int(), 1_000_000);
     }
+
+    #[test]
+    fn state_digest_to_hash_extracts_elements_4_to_7() {
+        let mut state = [Felt::ZERO; 12];
+        // Set elements 4..8 to known values
+        state[4] = Felt::new(10);
+        state[5] = Felt::new(20);
+        state[6] = Felt::new(30);
+        state[7] = Felt::new(40);
+        let hash = state_digest_to_hash(&state);
+        let felts = hash_to_felts(&hash);
+        assert_eq!(felts[0].as_int(), 10);
+        assert_eq!(felts[1].as_int(), 20);
+        assert_eq!(felts[2].as_int(), 30);
+        assert_eq!(felts[3].as_int(), 40);
+    }
+
+    #[test]
+    fn hash_to_felts_reduces_large_values() {
+        // The Goldilocks prime is p = 2^64 - 2^32 + 1
+        // A u64 value >= p should be reduced mod p
+        // p = 18446744069414584321
+        let p = 18446744069414584321u64;
+        // Set first 8 bytes to p (which should reduce to 0)
+        let mut hash = [0u8; 32];
+        hash[..8].copy_from_slice(&p.to_le_bytes());
+        let felts = hash_to_felts(&hash);
+        assert_eq!(felts[0].as_int(), 0); // p mod p == 0
+    }
+
+    #[test]
+    fn felts_to_hash_preserves_field_native() {
+        let felts = [
+            Felt::new(100),
+            Felt::new(200),
+            Felt::new(300),
+            Felt::new(400),
+        ];
+        let hash = felts_to_hash(&felts);
+        let back = hash_to_felts(&hash);
+        for i in 0..4 {
+            assert_eq!(felts[i].as_int(), back[i].as_int());
+        }
+    }
+
+    #[test]
+    fn exp7_zero_and_one() {
+        assert_eq!(exp7(Felt::ZERO).as_int(), 0); // 0^7 = 0
+        assert_eq!(exp7(Felt::ONE).as_int(), 1); // 1^7 = 1
+    }
 }

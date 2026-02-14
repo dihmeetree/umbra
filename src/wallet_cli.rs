@@ -694,4 +694,53 @@ mod tests {
         // history on a fresh wallet should succeed
         cmd_history(dir.path()).unwrap();
     }
+
+    #[test]
+    fn rpc_client_new_uses_http() {
+        let addr: SocketAddr = "127.0.0.1:9733".parse().unwrap();
+        let client = RpcClient::new(addr);
+        assert_eq!(client.base_url, "http://127.0.0.1:9733");
+    }
+
+    #[test]
+    fn rpc_client_new_maybe_tls_none_uses_http() {
+        let addr: SocketAddr = "127.0.0.1:9733".parse().unwrap();
+        let client = RpcClient::new_maybe_tls(addr, None).unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:9733");
+    }
+
+    #[test]
+    fn rpc_client_new_mtls_missing_files() {
+        let addr: SocketAddr = "127.0.0.1:9733".parse().unwrap();
+        let tls_config = WalletTlsConfig {
+            client_cert_file: "/nonexistent/client.crt".into(),
+            client_key_file: "/nonexistent/client.key".into(),
+            ca_cert_file: "/nonexistent/ca.crt".into(),
+        };
+        let result = RpcClient::new_mtls(addr, &tls_config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn wallet_path_and_address_path() {
+        let dir = std::path::Path::new("/tmp/test-wallet");
+        assert_eq!(wallet_path(dir), dir.join(WALLET_FILENAME));
+        assert_eq!(address_path(dir), dir.join(ADDRESS_FILENAME));
+    }
+
+    #[test]
+    fn load_wallet_from_nonexistent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // Without init, load should fail
+        let result = Wallet::load_from_file(&wallet_path(dir.path()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_export_fails_without_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let export_path = dir.path().join("exported.umbra-address");
+        let result = cmd_export(dir.path(), &export_path);
+        assert!(result.is_err());
+    }
 }

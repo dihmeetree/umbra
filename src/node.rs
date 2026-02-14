@@ -2077,4 +2077,118 @@ mod tests {
         assert_eq!(signing1.public.fingerprint(), signing2.public.fingerprint());
         assert_eq!(kem1.public.0, kem2.public.0);
     }
+
+    #[test]
+    fn keypair_creates_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("sub").join("dir");
+        assert!(!nested.exists());
+        let (kp, _) = load_or_generate_keypair(&nested).unwrap();
+        assert!(nested.exists());
+        assert!(nested.join("validator.key").exists());
+        // Verify the key is usable
+        let msg = b"test message";
+        let sig = kp.sign(msg);
+        assert!(kp.public.verify(msg, &sig));
+    }
+
+    #[test]
+    fn keypair_rejects_too_short_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("validator.key");
+        std::fs::write(&key_path, [0u8; 3]).unwrap();
+        let result = load_or_generate_keypair(dir.path());
+        match result {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+            Ok(_) => panic!("expected error for too-short key file"),
+        }
+    }
+
+    #[test]
+    fn keypair_rejects_truncated_pk() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("validator.key");
+        // Write a valid pk_len (e.g. 2592 for Dilithium5) but only 10 bytes of pk data
+        let pk_len: u32 = 2592;
+        let mut bytes = pk_len.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; 10]);
+        std::fs::write(&key_path, &bytes).unwrap();
+        let result = load_or_generate_keypair(dir.path());
+        match result {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+            Ok(_) => panic!("expected error for truncated key file"),
+        }
+    }
+
+    #[test]
+    fn keypair_legacy_upgrade_adds_kem() {
+        let dir = tempfile::tempdir().unwrap();
+        // Generate a key pair normally first to get valid signing bytes
+        let (kp, _) = load_or_generate_keypair(dir.path()).unwrap();
+        let original_fingerprint = kp.public.fingerprint();
+        let key_path = dir.path().join("validator.key");
+
+        // Read the full file, then truncate to just signing key (remove KEM section)
+        let full_bytes = std::fs::read(&key_path).unwrap();
+        let pk_len = u32::from_le_bytes(full_bytes[..4].try_into().unwrap()) as usize;
+        let signing_end = 4 + pk_len + 4896; // pk header + pk + sk
+        let legacy_bytes = &full_bytes[..signing_end];
+        std::fs::write(&key_path, legacy_bytes).unwrap();
+
+        // Now load again — should upgrade with a new KEM section
+        let (kp2, kem2) = load_or_generate_keypair(dir.path()).unwrap();
+        assert_eq!(kp2.public.fingerprint(), original_fingerprint);
+
+        // Verify the file was upgraded (now larger)
+        let upgraded_bytes = std::fs::read(&key_path).unwrap();
+        assert!(upgraded_bytes.len() > signing_end);
+
+        // And the KEM keypair works (encapsulate + decapsulate)
+        let (shared1, ct) = kem2.public.encapsulate().unwrap();
+        let shared2 = kem2.decapsulate(&ct).unwrap();
+        assert_eq!(shared1.0, shared2.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keypair_file_permissions_are_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let _ = load_or_generate_keypair(dir.path()).unwrap();
+        let key_path = dir.path().join("validator.key");
+        let perms = std::fs::metadata(&key_path).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn node_config_struct_fields() {
+        let kp = SigningKeypair::generate();
+        let kem = KemKeypair::generate();
+        let config = NodeConfig {
+            listen_addr: "127.0.0.1:9000".parse().unwrap(),
+            bootstrap_peers: vec!["127.0.0.1:9001".parse().unwrap()],
+            data_dir: PathBuf::from("/tmp/test"),
+            rpc_addr: "127.0.0.1:8080".parse().unwrap(),
+            keypair: kp,
+            kem_keypair: kem,
+            genesis_validator: true,
+        };
+        assert!(config.genesis_validator);
+        assert_eq!(config.bootstrap_peers.len(), 1);
+        let config2 = config.clone();
+        assert_eq!(config2.listen_addr, config.listen_addr);
+    }
+
+    // Compile-time sanity checks on module constants
+    const _: () = assert!(SEEN_MESSAGES_CAPACITY >= 1000);
+    const _: () = assert!(SEEN_MESSAGES_CAPACITY <= 1_000_000);
+    const _: () = assert!(MAX_SYNC_ROUNDS >= 100);
+    const _: () = assert!(MAX_SYNC_ROUNDS <= 100_000);
+
+    #[test]
+    fn node_error_display() {
+        let io_err = NodeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test"));
+        let msg = format!("{}", io_err);
+        assert!(msg.contains("I/O error"));
+    }
 }

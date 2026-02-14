@@ -1489,4 +1489,122 @@ mod tests {
         assert_eq!(restored.first_vote_type, VoteType::Accept);
         assert_eq!(restored.second_vote_type, VoteType::Accept);
     }
+
+    #[test]
+    fn create_vote_standalone() {
+        let kp = SigningKeypair::generate();
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([42u8; 32]);
+
+        let vote = create_vote(vertex_id, &kp, 5, 3, true, &chain_id, None);
+        assert_eq!(vote.vertex_id, vertex_id);
+        assert_eq!(vote.voter_id, kp.public.fingerprint());
+        assert_eq!(vote.epoch, 5);
+        assert_eq!(vote.round, 3);
+        assert!(matches!(vote.vote_type, VoteType::Accept));
+        assert!(vote.vrf_proof.is_none());
+
+        // Verify the signature is valid
+        let msg = vote_sign_data(&vertex_id, 5, 3, &VoteType::Accept, &chain_id);
+        assert!(kp.public.verify(&msg, &vote.signature));
+    }
+
+    #[test]
+    fn create_vote_reject() {
+        let kp = SigningKeypair::generate();
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([42u8; 32]);
+
+        let vote = create_vote(vertex_id, &kp, 0, 0, false, &chain_id, None);
+        assert!(matches!(vote.vote_type, VoteType::Reject));
+
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Reject, &chain_id);
+        assert!(kp.public.verify(&msg, &vote.signature));
+    }
+
+    #[test]
+    fn is_vote_accepted_tracks_received_votes() {
+        let (keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = keypairs[0].sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+
+        assert!(!bft.is_vote_accepted(&vote));
+        bft.receive_vote(vote.clone());
+        assert!(bft.is_vote_accepted(&vote));
+    }
+
+    #[test]
+    fn leader_none_for_empty_committee() {
+        let bft = BftState::new(0, vec![], test_chain_id());
+        assert!(bft.leader().is_none());
+    }
+
+    #[test]
+    fn is_committee_member_false_without_keypair() {
+        let (_keypairs, validators) = make_committee(3);
+        let bft = BftState::new(0, validators, test_chain_id());
+        assert!(!bft.is_committee_member());
+    }
+
+    #[test]
+    fn vote_returns_none_without_keypair() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+        let vertex_id = VertexId([1u8; 32]);
+        assert!(bft.vote(vertex_id, true).is_none());
+    }
+
+    #[test]
+    fn dynamic_quorum_values() {
+        assert_eq!(dynamic_quorum(1), 1);
+        assert_eq!(dynamic_quorum(3), 3); // (3*2)/3+1 = 3
+        assert_eq!(dynamic_quorum(4), 3); // (4*2)/3+1 = 3
+        assert_eq!(dynamic_quorum(7), 5); // (7*2)/3+1 = 5
+        assert_eq!(dynamic_quorum(10), 7); // (10*2)/3+1 = 7
+        assert_eq!(dynamic_quorum(21), 15); // (21*2)/3+1 = 15
+    }
+
+    #[test]
+    fn validator_with_activation_epoch() {
+        let kp = SigningKeypair::generate();
+        let kem_kp = crate::crypto::keys::KemKeypair::generate();
+        let v = Validator::with_activation(kp.public.clone(), kem_kp.public.clone(), 5);
+        assert_eq!(v.activation_epoch, 5);
+        assert!(v.active);
+        assert!(v.kem_public_key.is_some());
+        assert_eq!(v.id, kp.public.fingerprint());
+    }
+
+    #[test]
+    fn inactive_validators_excluded_from_committee() {
+        let mut validators = Vec::new();
+        for i in 0..5 {
+            let kp = SigningKeypair::generate();
+            let mut v = Validator::new(kp.public.clone());
+            if i == 2 {
+                v.active = false; // Mark one inactive
+            }
+            validators.push((kp, v));
+        }
+
+        let seed = EpochSeed::genesis();
+        let committee = select_committee(&seed, &validators, 100);
+
+        // Inactive validator should not be in the committee
+        let inactive_id = validators[2].1.id;
+        assert!(!committee.iter().any(|(v, _)| v.id == inactive_id));
+    }
 }

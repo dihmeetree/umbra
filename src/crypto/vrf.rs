@@ -318,4 +318,79 @@ mod tests {
             selected
         );
     }
+
+    #[test]
+    fn sort_key_deterministic() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"sort-test");
+        let key1 = output.sort_key();
+        let key2 = output.sort_key();
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn sort_key_matches_first_8_bytes() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"sort-test");
+        let mut expected_bytes = [0u8; 8];
+        expected_bytes.copy_from_slice(&output.value[..8]);
+        assert_eq!(output.sort_key(), u64::from_le_bytes(expected_bytes));
+    }
+
+    #[test]
+    fn epoch_seed_vrf_input_deterministic() {
+        let seed = EpochSeed::genesis();
+        let validator_id = [42u8; 32];
+        let input1 = seed.vrf_input(&validator_id);
+        let input2 = seed.vrf_input(&validator_id);
+        assert_eq!(input1, input2);
+    }
+
+    #[test]
+    fn epoch_seed_vrf_input_differs_by_validator() {
+        let seed = EpochSeed::genesis();
+        let v1 = [1u8; 32];
+        let v2 = [2u8; 32];
+        assert_ne!(seed.vrf_input(&v1), seed.vrf_input(&v2));
+    }
+
+    #[test]
+    fn epoch_seed_vrf_input_differs_by_epoch() {
+        let genesis = EpochSeed::genesis();
+        let next = genesis.next(&[0u8; 32]);
+        let validator_id = [42u8; 32];
+        assert_ne!(
+            genesis.vrf_input(&validator_id),
+            next.vrf_input(&validator_id)
+        );
+    }
+
+    #[test]
+    fn is_selected_edge_cases() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"edge");
+
+        // total_validators == 0 → always selected
+        assert!(output.is_selected(5, 0));
+        // committee >= total → always selected
+        assert!(output.is_selected(10, 5));
+        assert!(output.is_selected(10, 10));
+    }
+
+    #[test]
+    fn vrf_tampered_value_fails_verify() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"tamper");
+        output.value[0] ^= 0xff;
+        assert!(!output.verify(&kp.public, b"tamper", &output.proof_commitment));
+        assert!(!output.verify_proof_only(&kp.public, b"tamper"));
+    }
+
+    #[test]
+    fn vrf_tampered_proof_commitment_fails_verify() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"tamper2");
+        output.proof_commitment[0] ^= 0xff;
+        assert!(!output.verify_proof_only(&kp.public, b"tamper2"));
+    }
 }
