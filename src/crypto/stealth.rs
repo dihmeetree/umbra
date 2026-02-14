@@ -72,7 +72,19 @@ impl StealthAddress {
     /// Always iterates all candidate indices to avoid leaking which index
     /// matched via timing side-channels.
     pub fn try_detect(&self, our_kem_kp: &KemKeypair) -> Option<StealthSpendInfo> {
-        let shared_secret = our_kem_kp.decapsulate(&self.kem_ciphertext)?;
+        let shared_secret = match our_kem_kp.decapsulate(&self.kem_ciphertext) {
+            Some(ss) => ss,
+            None => {
+                // Perform dummy iteration to equalize timing with the success
+                // path (defense-in-depth against malformed ciphertexts that
+                // bypass Kyber's implicit rejection).
+                let dummy = [0u8; 32];
+                for idx in 0..crate::constants::MAX_TX_IO as u32 {
+                    let _ = derive_one_time_key(&dummy, idx);
+                }
+                return None;
+            }
+        };
         let mut result: Option<StealthSpendInfo> = None;
         // Try output indices 0..MAX_TX_IO; do NOT return early to prevent
         // timing leaks that reveal which output index matched.
@@ -94,7 +106,16 @@ impl StealthAddress {
         our_kem_kp: &KemKeypair,
         output_index: u32,
     ) -> Option<StealthSpendInfo> {
-        let shared_secret = our_kem_kp.decapsulate(&self.kem_ciphertext)?;
+        let shared_secret = match our_kem_kp.decapsulate(&self.kem_ciphertext) {
+            Some(ss) => ss,
+            None => {
+                // Dummy derivation + comparison to equalize timing
+                let dummy = [0u8; 32];
+                let derived = derive_one_time_key(&dummy, output_index);
+                let _ = crate::constant_time_eq(&derived, &self.one_time_key);
+                return None;
+            }
+        };
         let derived = derive_one_time_key(&shared_secret.0, output_index);
         if crate::constant_time_eq(&derived, &self.one_time_key) {
             Some(StealthSpendInfo {

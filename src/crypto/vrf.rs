@@ -116,11 +116,21 @@ impl VrfOutput {
         true
     }
 
-    /// Verify the VRF proof cryptographically without checking against a
-    /// pre-registered commitment. Use ONLY for local self-checks (e.g., after
-    /// `evaluate()`). For on-chain verification, always use `verify()` with
-    /// the pre-registered commitment.
-    pub fn verify_locally(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
+    /// Verify the VRF proof cryptographically **without** checking against a
+    /// pre-registered commitment.
+    ///
+    /// # Safety
+    ///
+    /// **DO NOT use for consensus-critical verification.** Without commitment
+    /// checking, a validator could grind VRF evaluations to bias committee
+    /// selection. This method is intended ONLY for:
+    /// - Local self-checks after `evaluate()`
+    /// - First-seen VRF observations before a commitment is registered
+    ///   (the commitment MUST be registered immediately after)
+    ///
+    /// For on-chain verification, always use `verify()` with the pre-registered
+    /// commitment.
+    pub fn verify_proof_only(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
         let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
         let sig = super::keys::Signature(self.proof.clone());
@@ -166,6 +176,22 @@ impl VrfOutput {
         bytes.copy_from_slice(&self.value[..8]);
         u64::from_le_bytes(bytes)
     }
+}
+
+/// Assert that the underlying Dilithium5 implementation produces deterministic
+/// signatures. Call once at node startup to catch non-deterministic implementations
+/// that would break VRF correctness.
+///
+/// Panics if signing the same message twice produces different signatures.
+pub fn assert_deterministic_signing(keypair: &SigningKeypair) {
+    let test_msg = crate::hash_domain(b"umbra.vrf.determinism_check", b"test");
+    let sig1 = keypair.sign(&test_msg);
+    let sig2 = keypair.sign(&test_msg);
+    assert_eq!(
+        sig1.0, sig2.0,
+        "FATAL: Dilithium5 signing is not deterministic. \
+         The VRF construction requires deterministic signatures."
+    );
 }
 
 /// Seed for VRF evaluation, derived from the previous epoch's state.
@@ -221,7 +247,13 @@ mod tests {
         // Full verify with the pre-registered commitment
         assert!(output.verify(&kp.public, input, &output.proof_commitment));
         // Local verify (no commitment check)
-        assert!(output.verify_locally(&kp.public, input));
+        assert!(output.verify_proof_only(&kp.public, input));
+    }
+
+    #[test]
+    fn dilithium5_signing_is_deterministic() {
+        let kp = SigningKeypair::generate();
+        assert_deterministic_signing(&kp); // Should not panic
     }
 
     #[test]

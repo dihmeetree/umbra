@@ -104,12 +104,20 @@ pub mod constants {
     /// Maximum new peers to connect per discovery round (F5).
     pub const PEER_DISCOVERY_MAX: usize = 5;
 
+    /// Padding bucket size (bytes) for encrypted P2P frames. Messages are padded
+    /// to the next multiple of this value to resist traffic analysis.
+    pub const P2P_PADDING_BUCKET: usize = 512;
+
     /// Number of Dandelion++ stem hops before fluffing (F6).
     pub const DANDELION_STEM_HOPS: u8 = 2;
     /// Dandelion++ stem timeout in milliseconds (F6).
     pub const DANDELION_TIMEOUT_MS: u64 = 5_000;
     /// Maximum entries in the Dandelion++ stem_txs tracking map.
     pub const MAX_STEM_TXS: usize = 5_000;
+    /// Minimum random delay (ms) before Dandelion++ stem forwarding (anti-timing).
+    pub const DANDELION_STEM_DELAY_MIN_MS: u64 = 100;
+    /// Maximum random delay (ms) before Dandelion++ stem forwarding (anti-timing).
+    pub const DANDELION_STEM_DELAY_MAX_MS: u64 = 500;
 
     /// Initial reputation score for new peers (F7).
     pub const PEER_INITIAL_REPUTATION: i32 = 100;

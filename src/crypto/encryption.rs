@@ -20,6 +20,32 @@
 //! A random 24-byte nonce is included in every payload, ensuring that even if
 //! the same shared secret is reused (via encrypt_with_shared_secret), the
 //! keystream and MAC are unique.
+//!
+//! # Security analysis
+//!
+//! - **IND-CPA**: The keystream is derived via BLAKE3 in key-derivation mode
+//!   with a fresh random 24-byte nonce per encryption. Each (key, nonce, counter)
+//!   triple produces a unique keystream block. Nonce collision probability is
+//!   ~2^{-96} per encryption under the same shared secret (birthday bound on
+//!   192-bit nonces).
+//!
+//! - **INT-CTXT**: Encrypt-then-MAC with keyed BLAKE3. The MAC covers nonce,
+//!   length-prefixed ciphertext, and length-prefixed KEM ciphertext. Length
+//!   prefixing prevents boundary-ambiguity attacks.
+//!
+//! - **Key separation**: Encryption and MAC keys are derived from the shared
+//!   secret using distinct BLAKE3 domain strings (`"umbra.encrypt.key"` and
+//!   `"umbra.encrypt.mac"`), preventing related-key attacks.
+//!
+//! - **Why not standard AEAD**: AES-256-GCM and ChaCha20-Poly1305 provide at
+//!   most 128-bit classical key-recovery security. BLAKE3 targets a 256-bit
+//!   security margin, matching the post-quantum security level of Kyber1024
+//!   (NIST Level 5). Using a standard AEAD would create a security level
+//!   mismatch where the symmetric cipher is the weakest link.
+//!
+//! - **Limitations**: This construction has not undergone formal cryptographic
+//!   analysis or third-party audit. The security argument relies on BLAKE3's
+//!   PRF properties and the standard encrypt-then-MAC composition theorem.
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};

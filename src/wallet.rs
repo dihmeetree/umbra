@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -666,14 +667,25 @@ impl Wallet {
         material.extend_from_slice(&(ksk.len() as u32).to_le_bytes());
         material.extend_from_slice(ksk);
 
-        // Encrypt with BLAKE3 keystream XOR
-        let encrypted = xor_keystream(&key, &material);
+        // Generate random nonce to ensure unique keystream per backup
+        let mut nonce = [0u8; RECOVERY_NONCE_SIZE];
+        rand::rng().fill_bytes(&mut nonce);
+
+        // Encrypt with BLAKE3 keystream XOR (nonce prevents keystream reuse)
+        let encrypted = xor_keystream(&key, &nonce, &material);
         // material is auto-zeroized on drop via Zeroizing wrapper
 
-        // Prepend a MAC for integrity
-        let mac = blake3::keyed_hash(&key, &encrypted);
+        // MAC covers nonce + ciphertext (encrypt-then-MAC)
+        let mut mac_input = Vec::with_capacity(RECOVERY_NONCE_SIZE + encrypted.len());
+        mac_input.extend_from_slice(&nonce);
+        mac_input.extend_from_slice(&encrypted);
+        let mac = blake3::keyed_hash(&key, &mac_input);
         key.zeroize();
-        let mut backup = mac.as_bytes().to_vec();
+
+        // Format: [24-byte nonce][32-byte MAC][ciphertext]
+        let mut backup = Vec::with_capacity(RECOVERY_NONCE_SIZE + 32 + encrypted.len());
+        backup.extend_from_slice(&nonce);
+        backup.extend_from_slice(mac.as_bytes());
         backup.extend_from_slice(&encrypted);
 
         (words, backup)
@@ -688,15 +700,26 @@ impl Wallet {
         let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
 
-        if encrypted_backup.len() < 32 {
+        // Format: [24-byte nonce][32-byte MAC][ciphertext]
+        let min_len = RECOVERY_NONCE_SIZE + 32;
+        if encrypted_backup.len() < min_len {
             key.zeroize();
             return Err(WalletError::Recovery("backup too short".into()));
         }
 
-        // Verify MAC
-        let stored_mac = &encrypted_backup[..32];
-        let ciphertext = &encrypted_backup[32..];
-        let expected_mac = blake3::keyed_hash(&key, ciphertext);
+        // Extract nonce, MAC, and ciphertext
+        let nonce: [u8; RECOVERY_NONCE_SIZE] =
+            encrypted_backup[..RECOVERY_NONCE_SIZE]
+                .try_into()
+                .map_err(|_| WalletError::Recovery("truncated backup".into()))?;
+        let stored_mac = &encrypted_backup[RECOVERY_NONCE_SIZE..min_len];
+        let ciphertext = &encrypted_backup[min_len..];
+
+        // Verify MAC (covers nonce + ciphertext)
+        let mut mac_input = Vec::with_capacity(RECOVERY_NONCE_SIZE + ciphertext.len());
+        mac_input.extend_from_slice(&nonce);
+        mac_input.extend_from_slice(ciphertext);
+        let expected_mac = blake3::keyed_hash(&key, &mac_input);
         if !crate::constant_time_eq(stored_mac, expected_mac.as_bytes()) {
             key.zeroize();
             return Err(WalletError::Recovery(
@@ -705,7 +728,7 @@ impl Wallet {
         }
 
         // Decrypt
-        let material = zeroize::Zeroizing::new(xor_keystream(&key, ciphertext));
+        let material = zeroize::Zeroizing::new(xor_keystream(&key, &nonce, ciphertext));
         key.zeroize();
 
         // Parse key material
@@ -749,19 +772,23 @@ impl Wallet {
     }
 }
 
-/// XOR data with a BLAKE3 keystream.
+/// Size of the random nonce prepended to recovery backups.
+const RECOVERY_NONCE_SIZE: usize = 24;
+
+/// XOR data with a BLAKE3 keystream, incorporating a nonce for uniqueness.
 ///
-/// Each 32-byte block derives a unique key by incorporating both the master
-/// key and the block index into `blake3::derive_key`, ensuring every block
-/// produces a distinct keystream.
-fn xor_keystream(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
+/// Each 32-byte block derives a unique key by incorporating the master key,
+/// nonce, and block index into `blake3::derive_key`, ensuring every block
+/// produces a distinct keystream even if the same key is reused.
+fn xor_keystream(key: &[u8; 32], nonce: &[u8; RECOVERY_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut offset = 0;
     let mut block_idx: u64 = 0;
     while offset < data.len() {
-        // Incorporate block_idx into the key derivation input
-        let mut block_input = Vec::with_capacity(40);
+        // Incorporate nonce + block_idx into the key derivation input
+        let mut block_input = Vec::with_capacity(32 + RECOVERY_NONCE_SIZE + 8);
         block_input.extend_from_slice(key);
+        block_input.extend_from_slice(nonce);
         block_input.extend_from_slice(&block_idx.to_le_bytes());
         let block = blake3::derive_key("umbra.recovery.stream", &block_input);
         let end = std::cmp::min(offset + 32, data.len());
@@ -1476,6 +1503,17 @@ mod tests {
 
         let recovered = Wallet::recover_from_backup(&words, &backup).unwrap();
         assert_eq!(recovered.address().address_id(), original_addr);
+    }
+
+    #[test]
+    fn recovery_backup_different_nonces() {
+        let wallet = Wallet::new();
+        let (_, backup1) = wallet.create_recovery_backup();
+        let (_, backup2) = wallet.create_recovery_backup();
+        // Different nonces produce different ciphertext (with overwhelming probability)
+        assert_ne!(backup1, backup2);
+        // Nonces (first 24 bytes) should differ
+        assert_ne!(&backup1[..24], &backup2[..24]);
     }
 
     #[test]

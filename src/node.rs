@@ -262,6 +262,9 @@ impl Node {
 
         let our_validator_id = config.keypair.public.fingerprint();
 
+        // Verify Dilithium5 determinism (required for VRF correctness)
+        crate::crypto::vrf::assert_deterministic_signing(&config.keypair);
+
         // Initialize BFT state
         let chain_id = *ledger.state.chain_id();
         let mut bft = BftState::new(0, vec![], chain_id);
@@ -1404,6 +1407,15 @@ impl Node {
             }
             self.stem_txs
                 .insert(tx_hash, (hops_remaining, Instant::now()));
+            // Random delay to prevent timing-based sender deanonymization
+            let delay_ms = {
+                use rand::Rng;
+                rand::rng().random_range(
+                    crate::constants::DANDELION_STEM_DELAY_MIN_MS
+                        ..=crate::constants::DANDELION_STEM_DELAY_MAX_MS,
+                )
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             if let Ok(peers) = self.p2p.get_peers().await {
                 if let Some(peer) = peers.choose(&mut rand::rng()) {
                     let _ = self

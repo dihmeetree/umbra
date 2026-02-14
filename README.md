@@ -126,7 +126,7 @@ umbra/
     error.html              Error display
 ```
 
-**~23,000 lines of Rust** across 37 source files with **314 tests**.
+**~23,000 lines of Rust** across 37 source files with **316 tests**.
 
 ## Building
 
@@ -407,7 +407,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 314 tests cover:
+All 316 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -416,14 +416,14 @@ All 314 tests cover:
 - **Nullifiers** — determinism, double-spend detection
 - **Merkle tree** — construction, path verification, depth-20 canonical padding, restore from stored level data, last-appended path coverage
 - **Encryption** — message roundtrips, authentication, tamper detection
-- **VRF** — evaluation, verification, committee selection statistics
+- **VRF** — evaluation, verification, committee selection statistics, Dilithium5 signing determinism
 - **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices; validation of too many parents, too many transactions, duplicate parents, no parents on non-genesis, too many unfinalized (DoS limit); finalized order excludes non-finalized vertices; finalize unknown vertex returns false; safe indexing after pruning (regression)
 - **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state
 - **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses
 - **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
 - **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
 - **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found, not-found, invalid hex, wrong length), /vertices/finalized, /peers; POST /tx (valid submission, invalid hex, valid hex with invalid bincode, duplicate submission, oversized payload); full submit-and-retrieve roundtrip
-- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt; UTXO consolidation (success path with history, fee exceeds total); pending output expiry (basic, not-yet-expired, exact boundary epoch); insufficient funds and arithmetic overflow; saturating balance addition; history cap enforcement; coinbase output scanning
+- **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt, nonce uniqueness; UTXO consolidation (success path with history, fee exceeds total); pending output expiry (basic, not-yet-expired, exact boundary epoch); insufficient funds and arithmetic overflow; saturating balance addition; history cap enforcement; coinbase output scanning
 - **Wallet CLI** — init with recovery phrase (creates wallet + backup files), recover from mnemonic + backup, history display, address display, export creates valid address file, messages on empty wallet
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
 - **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty, single-tx edge case, populated pools); byte-limit eviction with total_bytes tracking, fee boundary rejection (equal fee rejected), drain cleans nullifier index, epoch-based expiry on insert, total_bytes accuracy across insert/remove/drain
@@ -718,7 +718,7 @@ All transaction validity is verified via zk-STARKs:
 - **Wallet web security headers** — the wallet web UI sets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and `Content-Security-Policy` on all responses
 - **Atomic wallet file writes** — wallet data is written to a temporary file then atomically renamed, preventing data loss from interrupted writes
 - **Non-blocking wallet I/O** — synchronous wallet file operations are wrapped in `spawn_blocking()` to avoid blocking the async runtime
-- **XOR keystream per-block derivation** — the BLAKE3 keystream incorporates the block index into each `derive_key` call, ensuring unique keystream blocks for wallet recovery encryption
+- **XOR keystream per-block derivation** — the BLAKE3 keystream incorporates a random nonce and block index into each `derive_key` call, ensuring unique keystream blocks for wallet recovery encryption even if the same mnemonic is reused
 - **Error message sanitization** — wallet CLI error messages do not expose internal file paths to users; details are logged server-side via `tracing::error!`
 - **Mnemonic zeroization** — recovery phrase words are zeroized from memory immediately after display to minimize secret exposure window
 - **Multi-transaction mempool eviction** — when the mempool is full, lowest-fee transactions are evicted in a loop until space is available, rather than evicting only one
@@ -730,13 +730,18 @@ All transaction validity is verified via zk-STARKs:
 - **Web message size validation** — the wallet web UI validates message size against `MAX_MESSAGE_SIZE` before building transactions, preventing unnecessary proof generation for oversized messages
 - **Concurrent wallet mutation lock** — the wallet web UI serializes send and scan operations via a tokio Mutex, preventing race conditions that could cause double-spending from concurrent requests
 - **DAG safe indexing** — `finalized_order()` uses fallible `.get()` lookups instead of panicking `[]` indexing, gracefully handling edge cases where finalized vertices may be missing from the in-memory map after pruning
+- **P2P frame padding** — encrypted P2P frames are padded to 512-byte bucket boundaries, preventing traffic analysis from distinguishing message types by size
+- **Dandelion++ timing jitter** — stem-phase forwarding adds a random 100–500ms delay before relaying to the next hop, preventing timing-based sender deanonymization
+- **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation work on KEM decapsulation failure, equalizing timing with the success path
+- **VRF determinism verification** — node startup asserts Dilithium5 signing determinism at runtime, preventing silent VRF correctness failures from non-deterministic implementations
+- **Recovery backup nonce** — wallet recovery backups include a 24-byte random nonce in the keystream derivation, preventing keystream reuse if the same mnemonic entropy is used for multiple backups
 
 ## Production Roadmap
 
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (three internal audits have been completed, addressing 47+ findings across all severity levels and expanding test coverage from 226 to 314 tests with targeted state correctness, validation bypass, and regression tests; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 316 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

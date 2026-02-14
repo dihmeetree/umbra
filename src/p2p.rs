@@ -139,9 +139,20 @@ fn compute_transcript_hash(initiator_id: &Hash, responder_id: &Hash, kem_ct: &[u
     crate::hash_domain(b"umbra.p2p.transcript", &buf)
 }
 
-/// Write an encrypted + authenticated message frame.
+/// Round up to the next multiple of `P2P_PADDING_BUCKET`.
+fn pad_to_bucket(len: usize) -> usize {
+    let bucket = crate::constants::P2P_PADDING_BUCKET;
+    len.div_ceil(bucket) * bucket
+}
+
+/// Write an encrypted + authenticated message frame with padding.
+///
+/// The plaintext region embeds the real payload length (4-byte LE) followed by
+/// the payload and zero-padding to the next bucket boundary. This hides the
+/// actual message size from network observers.
 ///
 /// Frame format: `[4-byte LE frame_len][8-byte LE counter][ciphertext][32-byte MAC]`
+/// Plaintext of ciphertext: `[4-byte LE real_len][payload][zero_padding]`
 async fn write_encrypted(
     writer: &mut OwnedWriteHalf,
     msg: &Message,
@@ -150,8 +161,17 @@ async fn write_encrypted(
     counter: &mut u64,
 ) -> Result<(), P2pError> {
     let payload = network::encode_message(msg).map_err(|e| P2pError::SendFailed(e.to_string()))?;
+
+    // Embed real length inside the encrypted region, then pad to bucket boundary
+    let real_len = payload.len() as u32;
+    let padded_len = pad_to_bucket(4 + payload.len());
+    let mut padded = Vec::with_capacity(padded_len);
+    padded.extend_from_slice(&real_len.to_le_bytes());
+    padded.extend_from_slice(&payload);
+    padded.resize(padded_len, 0u8);
+
     let nonce = counter_to_nonce(*counter);
-    let ciphertext = xor_keystream(send_key, &nonce, &payload);
+    let ciphertext = xor_keystream(send_key, &nonce, &padded);
     let mac = transport_mac(send_mac_key, *counter, &ciphertext);
 
     let frame_len = (8 + ciphertext.len() + 32) as u32;
@@ -182,13 +202,16 @@ async fn read_encrypted(
         .await
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
     let frame_len = u32::from_le_bytes(len_buf) as usize;
-    // Minimum: 8 (counter) + 0 (empty ciphertext) + 32 (MAC)
-    if frame_len < 40 {
+    // Minimum: 8 (counter) + P2P_PADDING_BUCKET (min padded ciphertext) + 32 (MAC)
+    let min_frame = 8 + crate::constants::P2P_PADDING_BUCKET + 32;
+    if frame_len < min_frame {
         return Err(P2pError::ConnectionFailed(
             "encrypted frame too short".into(),
         ));
     }
-    if frame_len > crate::constants::MAX_NETWORK_MESSAGE_BYTES + 44 {
+    // Max: account for padding overhead (up to one extra bucket)
+    let max_frame = 8 + pad_to_bucket(4 + crate::constants::MAX_NETWORK_MESSAGE_BYTES) + 32;
+    if frame_len > max_frame {
         return Err(P2pError::ConnectionFailed(
             "encrypted frame too large".into(),
         ));
@@ -220,7 +243,20 @@ async fn read_encrypted(
     let nonce = counter_to_nonce(counter);
     let plaintext = xor_keystream(recv_key, &nonce, ciphertext);
 
-    network::decode_message(&plaintext)
+    // Extract real payload length from the padded plaintext
+    if plaintext.len() < 4 {
+        return Err(P2pError::ConnectionFailed(
+            "decrypted frame too short for length prefix".into(),
+        ));
+    }
+    let real_len = u32::from_le_bytes(plaintext[..4].try_into().unwrap()) as usize;
+    if 4 + real_len > plaintext.len() {
+        return Err(P2pError::ConnectionFailed(
+            "decrypted payload length exceeds frame".into(),
+        ));
+    }
+
+    network::decode_message(&plaintext[4..4 + real_len])
         .ok_or_else(|| P2pError::ConnectionFailed("decode failed after decryption".into()))
 }
 
@@ -1259,11 +1295,18 @@ mod tests {
             let stream = TcpStream::connect(addr).await.unwrap();
             let (_, mut raw_writer) = stream.into_split();
 
-            // Build a valid encrypted frame first
+            // Build a valid padded encrypted frame first
             let payload = network::encode_message(&Message::GetPeers).unwrap();
+            let real_len = payload.len() as u32;
+            let padded_len = pad_to_bucket(4 + payload.len());
+            let mut padded = Vec::with_capacity(padded_len);
+            padded.extend_from_slice(&real_len.to_le_bytes());
+            padded.extend_from_slice(&payload);
+            padded.resize(padded_len, 0u8);
+
             let counter: u64 = 0;
             let nonce = counter_to_nonce(counter);
-            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &payload);
+            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &padded);
             // Compute MAC on the original (uncorrupted) ciphertext
             let mac = transport_mac(&send_keys.send_mac_key, counter, &ciphertext);
 
@@ -1325,11 +1368,18 @@ mod tests {
             let stream = TcpStream::connect(addr).await.unwrap();
             let (_, mut raw_writer) = stream.into_split();
 
-            // Build frame with counter=1 (skipping counter=0)
+            // Build padded frame with counter=1 (skipping counter=0)
             let payload = network::encode_message(&Message::GetPeers).unwrap();
+            let real_len = payload.len() as u32;
+            let padded_len = pad_to_bucket(4 + payload.len());
+            let mut padded = Vec::with_capacity(padded_len);
+            padded.extend_from_slice(&real_len.to_le_bytes());
+            padded.extend_from_slice(&payload);
+            padded.resize(padded_len, 0u8);
+
             let counter: u64 = 1;
             let nonce = counter_to_nonce(counter);
-            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &payload);
+            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &padded);
             let mac = transport_mac(&send_keys.send_mac_key, counter, &ciphertext);
 
             let frame_len = (8 + ciphertext.len() + 32) as u32;

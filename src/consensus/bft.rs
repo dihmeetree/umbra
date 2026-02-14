@@ -373,7 +373,7 @@ impl BftState {
                     }
                     None => {
                         // First-seen: verify cryptographically, then lock commitment
-                        if !vrf.verify_locally(&voter.public_key, &vrf_input) {
+                        if !vrf.verify_proof_only(&voter.public_key, &vrf_input) {
                             return None;
                         }
                         self.vrf_commitments
@@ -394,7 +394,7 @@ impl BftState {
                         }
                     }
                     None => {
-                        if !vrf.verify_locally(&voter.public_key, &vrf_input) {
+                        if !vrf.verify_proof_only(&voter.public_key, &vrf_input) {
                             return None;
                         }
                         self.vrf_commitments

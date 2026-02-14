@@ -9,6 +9,20 @@
 //! localhost only (M3). Production deployments exposed to a network should
 //! add an authentication layer (e.g., bearer token, mTLS) before the RPC
 //! router, and rate-limiting middleware.
+//!
+//! # Privacy considerations
+//!
+//! Some RPC endpoints reveal aggregate chain state information:
+//! - `/state` and `/state-summary` expose commitment and nullifier counts,
+//!   which reveal overall chain activity. This is inherent to public blockchains.
+//! - `/commitment-proof/{index}` returns Merkle proofs for arbitrary indices,
+//!   enabling tree enumeration. Wallets querying this endpoint from a public
+//!   node reveal which commitment indices they hold.
+//!
+//! For production deployments exposed beyond localhost:
+//! - Add rate-limiting middleware (e.g., `tower::limit`) to sensitive endpoints.
+//! - Consider requiring authentication for `/commitment-proof` queries.
+//! - Run wallet scanning against a local trusted node, not a remote RPC.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -544,6 +558,8 @@ async fn get_vertex_by_id(
 }
 
 // ── GET /commitment-proof/:index (F15) ──
+// Privacy note: this endpoint allows querying proofs for arbitrary indices.
+// In production, rate-limit or require authentication to prevent tree enumeration.
 
 #[derive(Serialize)]
 struct CommitmentProofResponse {

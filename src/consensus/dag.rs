@@ -138,7 +138,7 @@ impl Vertex {
     ///
     /// If `expected_commitment` is provided (from the BFT commitment registry),
     /// uses full `verify()` with anti-grinding commitment check. Otherwise
-    /// falls back to `verify_locally()` for the first observation from this
+    /// falls back to `verify_proof_only()` for the first observation from this
     /// proposer in the epoch.
     pub fn validate_vrf(
         &self,
@@ -159,7 +159,7 @@ impl Vertex {
                 }
             }
             None => {
-                if !vrf.verify_locally(&self.proposer, &vrf_input) {
+                if !vrf.verify_proof_only(&self.proposer, &vrf_input) {
                     return Err(VertexError::InvalidVrf);
                 }
             }
