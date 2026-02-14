@@ -127,6 +127,26 @@ pub enum Message {
         total_chunks: u32,
         data: Vec<u8>,
     },
+
+    // ── NAT Traversal (v3) ──
+    /// Post-handshake NAT info exchange (sent over encrypted channel).
+    /// Contains our claimed external address and what we observe as the peer's address.
+    NatInfo {
+        external_addr: Option<String>,
+        observed_addr: String,
+    },
+
+    /// Request a rendezvous peer to help us connect to a NATted target.
+    NatPunchRequest {
+        target_peer_id: PeerId,
+        requester_external_addr: String,
+    },
+
+    /// Notification from a rendezvous peer that someone wants to connect to us.
+    NatPunchNotify {
+        requester_peer_id: PeerId,
+        requester_external_addr: String,
+    },
 }
 
 /// Information about a known peer.
@@ -138,8 +158,8 @@ pub struct PeerInfo {
     pub last_seen: u64,
 }
 
-/// Protocol version (v2: encrypted transport with KEM + auth).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Protocol version (v3: encrypted transport + NAT traversal).
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Network errors.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -537,6 +557,82 @@ mod tests {
         let bytes = encode_message(&msg).unwrap();
         match decode_message(&bytes).unwrap() {
             Message::GetTransaction(h) => assert_eq!(h, tx_hash),
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn nat_info_roundtrip() {
+        let msg = Message::NatInfo {
+            external_addr: Some("203.0.113.5:9732".to_string()),
+            observed_addr: "198.51.100.1:54321".to_string(),
+        };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::NatInfo {
+                external_addr,
+                observed_addr,
+            } => {
+                assert_eq!(external_addr.as_deref(), Some("203.0.113.5:9732"));
+                assert_eq!(observed_addr, "198.51.100.1:54321");
+            }
+            _ => panic!("wrong message type"),
+        }
+
+        // Also test with no external addr
+        let msg = Message::NatInfo {
+            external_addr: None,
+            observed_addr: "10.0.0.1:9732".to_string(),
+        };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::NatInfo {
+                external_addr,
+                observed_addr,
+            } => {
+                assert!(external_addr.is_none());
+                assert_eq!(observed_addr, "10.0.0.1:9732");
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn nat_punch_request_roundtrip() {
+        let peer_id = [42u8; 32];
+        let msg = Message::NatPunchRequest {
+            target_peer_id: peer_id,
+            requester_external_addr: "203.0.113.5:9732".to_string(),
+        };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::NatPunchRequest {
+                target_peer_id,
+                requester_external_addr,
+            } => {
+                assert_eq!(target_peer_id, peer_id);
+                assert_eq!(requester_external_addr, "203.0.113.5:9732");
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn nat_punch_notify_roundtrip() {
+        let peer_id = [99u8; 32];
+        let msg = Message::NatPunchNotify {
+            requester_peer_id: peer_id,
+            requester_external_addr: "198.51.100.1:9732".to_string(),
+        };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::NatPunchNotify {
+                requester_peer_id,
+                requester_external_addr,
+            } => {
+                assert_eq!(requester_peer_id, peer_id);
+                assert_eq!(requester_external_addr, "198.51.100.1:9732");
+            }
             _ => panic!("wrong message type"),
         }
     }

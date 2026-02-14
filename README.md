@@ -113,6 +113,7 @@ umbra/
       mod.rs                Network module root
       protocol.rs           P2P wire protocol (message types, KEM handshake, auth messages)
       p2p.rs                Encrypted P2P networking with peer reputation and connection diversity
+      nat.rs                NAT traversal: UPnP mapping, observed address voting, hole punching
     wallet/
       mod.rs                Wallet module root
       core.rs               Key management, scanning, tx building, history, recovery, consolidation
@@ -133,7 +134,7 @@ umbra/
     error.html              Error display
 ```
 
-**~26,700 lines of Rust** across 41 source files with **440 tests**.
+**~27,300 lines of Rust** across 42 source files with **454 tests**.
 
 ## Building
 
@@ -168,6 +169,11 @@ max_peers = 64
 web_host = "127.0.0.1"
 web_port = 9734
 
+# Optional: NAT traversal configuration
+# [node.nat]
+# external_addr = "203.0.113.5:9732"  # Manual external address (for nodes behind NAT)
+# upnp = true                          # Enable UPnP port mapping (default: true)
+
 # Optional: mTLS for non-localhost RPC (see TLS section below)
 # [node.tls]
 # cert_file = "./tls/server.crt"
@@ -197,6 +203,8 @@ The binary uses subcommands (`node`, `wallet`). Running without a subcommand def
 | `--tls-ca-cert` | *(none)* | CA certificate for client verification (PEM) |
 | `--tls-client-cert` | *(none)* | Wallet client TLS certificate (PEM) |
 | `--tls-client-key` | *(none)* | Wallet client TLS private key (PEM) |
+| `--external-addr` | *(none)* | Manually specify external address (IP:port) for nodes behind NAT |
+| `--no-upnp` | *(off)* | Disable UPnP port mapping |
 
 **Node flags** (`umbra node`):
 
@@ -466,6 +474,12 @@ Async TCP transport built on tokio with post-quantum encrypted channels:
   6. Domain-separated session key derivation — initiator and responder derive mirrored send/recv keys from the shared secret
 - **Per-peer rate limiting** — token-bucket rate limiter (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 violations
 - Configurable max peers (default 64) and connection timeout (5 seconds)
+- **NAT traversal** — three-layer external address detection:
+  1. Manual configuration via `--external-addr` or config file
+  2. UPnP port mapping via the local router (automatic lease renewal)
+  3. Observed address voting — peers report the IP they see; after 3 unique peers agree, the address is adopted
+- **TCP hole punching** — rendezvous-based coordination: requester asks a mutual peer to notify the target, which then connects back through the NAT with retries
+- **NatInfo exchange** — peers exchange external addresses and observed IPs over the encrypted channel after handshake (backward-compatible with v2 peers)
 
 ### Node Orchestrator
 
@@ -486,6 +500,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 - **Snapshot sync** — nodes far behind (or joining for the first time) download a compact state snapshot instead of replaying every vertex from genesis. The snapshot includes validators, commitment tree, and nullifiers, transferred in 4 MiB chunks. After import, the node verifies the state root and catches up remaining vertices via incremental sync
 - **Fork resolution** — if no vertex is finalized for `VIEW_CHANGE_TIMEOUT_INTERVALS` proposal ticks or peers report rounds more than `MAX_ROUND_LAG` ahead, the node broadcasts `GetTips` and `GetEpochState` to discover and fetch missing vertices
 - **Mempool expiry eviction** — expired transactions are periodically evicted from the mempool (every ~50 seconds and on epoch transitions)
+- **NAT traversal** — on startup, the node resolves its external address via manual configuration, UPnP port mapping (with automatic lease renewal every ~50 minutes), or peer-observed address voting. External addresses are advertised to peers via `NatInfo` exchange and used in peer discovery responses. On shutdown, UPnP mappings are cleaned up
 - Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
 - Genesis bootstrap via `--genesis-validator` flag (registers the node with bond escrowed and KEM key for coinbase, no funding tx required)
 
@@ -495,9 +510,9 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 440 tests cover:
+All 454 tests cover:
 
-- **Configuration** — default config validation, TOML parsing (with and without TLS sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet)
+- **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips, fingerprint determinism and uniqueness (signing + KEM), Signature/KemCiphertext byte access, deserialization validation (wrong-size rejection for Signature, SigningPublicKey, KemPublicKey, KemCiphertext), PublicAddress address_id determinism and uniqueness, verify with empty signature
 - **Stealth addresses** — generation, detection, multi-index scanning, spend auth derivation determinism, index-dependent key uniqueness
@@ -508,7 +523,8 @@ All 440 tests cover:
 - **VRF** — evaluation, verification, committee selection statistics, Dilithium5 signing determinism, sort_key determinism, sort_key matches first 8 bytes, epoch_seed vrf_input determinism/differs by validator/differs by epoch, is_selected edge cases (total_validators=0, committee>=total), tampered value/commitment fails verify
 - **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices; validation of too many parents, too many transactions, duplicate parents, no parents on non-genesis, too many unfinalized (DoS limit); finalized order excludes non-finalized vertices; finalize unknown vertex returns false; safe indexing after pruning (regression); ancestors_basic/diamond/bounded/genesis, advance_round_and_epoch, genesis_vertex_is_well_formed, tx_root_empty_transactions, get_returns_none_for_unknown
 - **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, equivocation evidence verification (valid, wrong epoch, non-committee, same vertex, bad signature) and serialization roundtrip, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state; create_vote standalone with signature verification, create_vote reject, is_vote_accepted tracking, leader_none_for_empty_committee, committee_member/vote without keypair, dynamic quorum values, validator activation epoch, inactive validators excluded from committee
-- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses, snapshot sync messages (manifest, chunks), equivocation evidence; BFT vote/key exchange/auth response roundtrips, get_vertex/get_tips/get_transaction roundtrips, decode empty/short/truncated/corrupted buffer returns None
+- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses, snapshot sync messages (manifest, chunks), equivocation evidence; BFT vote/key exchange/auth response roundtrips, get_vertex/get_tips/get_transaction roundtrips, decode empty/short/truncated/corrupted buffer returns None, NatInfo/NatPunchRequest/NatPunchNotify serialization roundtrips
+- **NAT traversal** — external addr with no info returns None, manual addr has highest priority, UPnP overrides observed, observed quorum required (3 peers), minority IP ignored, same peer not double-counted, record_observed returns true on quorum change, is_reachable reflects external addr
 - **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
 - **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
 - **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found, not-found, invalid hex, wrong length), /vertices/finalized, /peers; POST /tx (valid submission, invalid hex, valid hex with invalid bincode, duplicate submission, oversized payload); full submit-and-retrieve roundtrip
@@ -686,6 +702,13 @@ Proves in zero knowledge:
 | `PRUNING_RETAIN_EPOCHS` | 100 | Epochs of finalized vertices retained in memory |
 | `PROTOCOL_VERSION_ID` | 1 | Current protocol version for vertex signaling |
 | `UPGRADE_THRESHOLD` | 75% | Signal threshold for protocol upgrade activation |
+| `UPNP_TIMEOUT_MS` | 5,000 | UPnP gateway discovery timeout |
+| `UPNP_LEASE_DURATION_SECS` | 3,600 | UPnP port mapping lease duration (1 hour) |
+| `UPNP_RENEWAL_INTERVAL_SECS` | 3,000 | UPnP lease renewal interval (~50 minutes) |
+| `NAT_OBSERVED_ADDR_QUORUM` | 3 | Unique peers required to trust an observed IP |
+| `HOLE_PUNCH_TIMEOUT_MS` | 5,000 | TCP hole punch connection timeout |
+| `HOLE_PUNCH_RETRY_DELAY_MS` | 500 | Delay between hole punch retry attempts |
+| `HOLE_PUNCH_MAX_ATTEMPTS` | 3 | Maximum hole punch retry attempts |
 
 ## Dependencies
 
@@ -717,6 +740,7 @@ Proves in zero knowledge:
 | `rayon` | Parallel proof verification for vertex validation |
 | `tempfile` | Temporary directories for simulator and testing |
 | `colored` | Terminal color output for simulator results |
+| `igd-next` | UPnP port mapping for NAT traversal |
 
 ## Security Model
 
@@ -834,13 +858,16 @@ All transaction validity is verified via zk-STARKs:
 - **Snapshot state root verification** — after importing a snapshot from a peer, the node recomputes the state root from the restored state and rejects snapshots where the computed root does not match the claimed root, preventing state corruption from malicious peers
 - **Slashing evidence propagation** — when a node detects equivocation (a validator voting for two different vertices in the same round), it broadcasts cryptographic proof (both conflicting signatures) to all peers. Receiving nodes independently verify both signatures, apply slashing locally, and re-gossip, ensuring all nodes converge on the same slashed validator state
 - **RPC mutual TLS (mTLS)** — the RPC server supports mutual TLS authentication for non-localhost deployments. The server requires client certificates signed by a trusted CA, and refuses to start on non-loopback addresses without TLS configured. Both server and client authenticate via X.509 certificates, preventing unauthorized access to the RPC API
+- **Observed address quorum** — external address detection via peer observation requires 3 independent peers agreeing on the same IP, preventing single-peer address poisoning
+- **NAT info over encrypted channel** — external address claims and observed addresses are exchanged via `NatInfo` messages over the encrypted post-handshake channel, not in the plaintext `Hello`
+- **Hole punch via authenticated peers** — `NatPunchRequest` is only forwarded to already-authenticated peers; the target initiates a full KEM + auth handshake on connect-back, preventing reflection attacks
 
 ## Production Roadmap
 
-Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
+Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 440 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, and comprehensive unit test coverage across all modules; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 454 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, and comprehensive unit test coverage across all modules; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

@@ -29,6 +29,17 @@ pub struct NodeConfig {
     pub genesis_validator: bool,
     pub max_peers: usize,
     pub tls: Option<TlsConfig>,
+    pub nat: NatConfig,
+}
+
+/// NAT traversal configuration.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct NatConfig {
+    /// Manually specified external address (IP:port) for nodes behind NAT.
+    pub external_addr: Option<String>,
+    /// Enable UPnP port mapping (default: true).
+    pub upnp: bool,
 }
 
 /// Server-side TLS configuration for mTLS on the RPC endpoint.
@@ -64,6 +75,15 @@ impl TlsConfig {
     }
 }
 
+impl Default for NatConfig {
+    fn default() -> Self {
+        NatConfig {
+            external_addr: None,
+            upnp: true,
+        }
+    }
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         NodeConfig {
@@ -76,6 +96,7 @@ impl Default for NodeConfig {
             genesis_validator: false,
             max_peers: crate::constants::MAX_PEERS,
             tls: None,
+            nat: NatConfig::default(),
         }
     }
 }
@@ -292,6 +313,42 @@ rpc_host = "127.0.0.1"
         };
         let err = tls.validate().unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn parse_toml_with_nat() {
+        let toml_str = r#"
+[node]
+p2p_port = 9732
+
+[node.nat]
+external_addr = "203.0.113.5:9732"
+upnp = false
+"#;
+        let config: UmbraConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.node.nat.external_addr.as_deref(),
+            Some("203.0.113.5:9732")
+        );
+        assert!(!config.node.nat.upnp);
+    }
+
+    #[test]
+    fn parse_toml_without_nat() {
+        let toml_str = r#"
+[node]
+p2p_port = 9732
+"#;
+        let config: UmbraConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.node.nat.external_addr.is_none());
+        assert!(config.node.nat.upnp); // default true
+    }
+
+    #[test]
+    fn default_nat_config() {
+        let nat = NatConfig::default();
+        assert!(nat.external_addr.is_none());
+        assert!(nat.upnp);
     }
 
     #[test]

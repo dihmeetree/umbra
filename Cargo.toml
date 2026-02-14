@@ -67,6 +67,7 @@ subtle = "2.6.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 toml = "1.0.1"
 rayon = "1.11.0"
+igd-next = { version = "0.16", features = ["aio_tokio"] }
 tempfile = "3"
 colored = "3"
 

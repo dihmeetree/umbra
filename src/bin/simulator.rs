@@ -289,6 +289,7 @@ async fn bootstrap_network(
             keypair: signing_kp.clone(),
             kem_keypair: kem_kp.clone(),
             genesis_validator: true,
+            nat_config: umbra::config::NatConfig::default(),
         };
 
         let mut node = Node::new(config)

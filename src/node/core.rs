@@ -109,6 +109,8 @@ pub struct Node {
     /// Cached serialized snapshot for serving to peers:
     /// (bytes, total_chunks, meta, created_at).
     snapshot_cache: Option<(Vec<u8>, u32, super::storage::ChainStateMeta, Instant)>,
+    /// UPnP gateway handle for lease renewal and cleanup (None if UPnP is not active).
+    upnp_gateway: Option<(crate::network::nat::UpnpGateway, SocketAddr)>,
 }
 
 /// Node configuration.
@@ -122,6 +124,8 @@ pub struct NodeConfig {
     pub kem_keypair: KemKeypair,
     /// If true, register this node as a genesis validator.
     pub genesis_validator: bool,
+    /// NAT traversal configuration.
+    pub nat_config: crate::config::NatConfig,
 }
 
 /// Node errors.
@@ -385,6 +389,28 @@ impl Node {
         // Record our finalized count before storage is moved into NodeState
         let our_finalized = storage.finalized_vertex_count().unwrap_or(0);
 
+        // NAT: resolve external address from config
+        let external_addr = config
+            .nat_config
+            .external_addr
+            .as_ref()
+            .and_then(|s| s.parse::<SocketAddr>().ok());
+
+        // NAT: attempt UPnP port mapping if enabled and no manual address
+        let upnp_gateway = if config.nat_config.upnp && external_addr.is_none() {
+            match crate::network::nat::try_upnp_mapping(config.listen_addr).await {
+                Some((addr, gw)) => {
+                    tracing::info!("UPnP external address: {}", addr);
+                    Some((addr, gw))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let resolved_external = external_addr.or(upnp_gateway.as_ref().map(|(a, _)| *a));
+
         // Start P2P
         let p2p_config = P2pConfig {
             listen_addr: config.listen_addr,
@@ -394,6 +420,7 @@ impl Node {
             listen_port: config.listen_addr.port(),
             our_kem_keypair: config.kem_keypair.clone(),
             our_signing_keypair: config.keypair.clone(),
+            external_addr: resolved_external,
         };
         let p2p_result = crate::network::p2p::start(p2p_config).await?;
         let p2p = p2p_result.handle;
@@ -433,6 +460,7 @@ impl Node {
             seen_messages_prev: HashSet::new(),
             sync_rounds: 0,
             snapshot_cache: None,
+            upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
         })
     }
 
@@ -476,6 +504,9 @@ impl Node {
         ));
         let mut dandelion_flush_interval =
             tokio::time::interval(std::time::Duration::from_millis(1000));
+        let mut upnp_renewal_interval = tokio::time::interval(std::time::Duration::from_secs(
+            crate::constants::UPNP_RENEWAL_INTERVAL_SECS,
+        ));
 
         loop {
             tokio::select! {
@@ -508,12 +539,20 @@ impl Node {
                 _ = dandelion_flush_interval.tick() => {
                     self.flush_dandelion_stems().await;
                 }
+                _ = upnp_renewal_interval.tick() => {
+                    self.renew_upnp_lease().await;
+                }
             }
         }
     }
 
-    /// Gracefully shut down the node: flush storage and stop P2P.
+    /// Gracefully shut down the node: flush storage, remove UPnP mapping, stop P2P.
     async fn shutdown(&self) {
+        // Remove UPnP mapping if active
+        if let Some((ref gw, ref local_addr)) = self.upnp_gateway {
+            crate::network::nat::remove_upnp_mapping(gw, local_addr.port()).await;
+        }
+
         let state = self.state.read().await;
         if let Err(e) = state.storage.flush() {
             tracing::error!("Failed to flush storage on shutdown: {}", e);
@@ -522,6 +561,13 @@ impl Node {
         drop(state);
         let _ = self.p2p.shutdown().await;
         tracing::info!("Node shutdown complete");
+    }
+
+    /// Renew UPnP port mapping lease (called periodically).
+    async fn renew_upnp_lease(&self) {
+        if let Some((ref gw, ref local_addr)) = self.upnp_gateway {
+            crate::network::nat::renew_upnp_mapping(gw, *local_addr).await;
+        }
     }
 
     async fn handle_p2p_event(&mut self, event: P2pEvent) {
@@ -1365,6 +1411,11 @@ impl Node {
             | Message::Hello { .. }
             | Message::KeyExchange { .. }
             | Message::AuthResponse { .. } => {}
+
+            // NAT messages are handled internally by the P2P layer and never forwarded
+            Message::NatInfo { .. }
+            | Message::NatPunchRequest { .. }
+            | Message::NatPunchNotify { .. } => {}
         }
     }
 
@@ -2172,6 +2223,7 @@ mod tests {
             keypair: kp,
             kem_keypair: kem,
             genesis_validator: true,
+            nat_config: crate::config::NatConfig::default(),
         };
         assert!(config.genesis_validator);
         assert_eq!(config.bootstrap_peers.len(), 1);

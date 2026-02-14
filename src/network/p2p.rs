@@ -15,6 +15,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::crypto::keys::{KemKeypair, SigningKeypair, SigningPublicKey};
+use crate::network::nat::NatState;
 use crate::network::{self, Message, PeerId, PeerInfo, PROTOCOL_VERSION};
 use crate::Hash;
 
@@ -290,6 +291,8 @@ pub enum P2pCommand {
     },
     /// Request the current peer list.
     GetPeers(oneshot::Sender<Vec<PeerInfo>>),
+    /// Request hole-punch coordination via a rendezvous peer.
+    HolePunch { target: PeerId, rendezvous: PeerId },
     /// Shutdown the P2P system.
     Shutdown,
 }
@@ -323,6 +326,8 @@ pub struct P2pConfig {
     pub our_kem_keypair: KemKeypair,
     /// Signing keypair for handshake authentication (Dilithium5).
     pub our_signing_keypair: SigningKeypair,
+    /// Pre-determined external address (from UPnP or manual config).
+    pub external_addr: Option<SocketAddr>,
 }
 
 /// Peer reputation tracking (F7).
@@ -373,6 +378,8 @@ struct PeerConnection {
     addr: SocketAddr,
     msg_tx: mpsc::Sender<Message>,
     is_outbound: bool,
+    /// Peer's claimed or discovered external address (from NatInfo exchange).
+    external_addr: Option<SocketAddr>,
 }
 
 use std::time::Instant;
@@ -441,6 +448,14 @@ impl P2pHandle {
         rx.await.map_err(|_| P2pError::Shutdown)
     }
 
+    /// Request hole-punch coordination: ask a rendezvous peer to notify the target.
+    pub async fn hole_punch(&self, target: PeerId, rendezvous: PeerId) -> Result<(), P2pError> {
+        self.command_tx
+            .send(P2pCommand::HolePunch { target, rendezvous })
+            .await
+            .map_err(|_| P2pError::Shutdown)
+    }
+
     /// Shut down the P2P layer.
     pub async fn shutdown(&self) -> Result<(), P2pError> {
         self.command_tx
@@ -496,6 +511,9 @@ async fn p2p_loop(
     let max_outbound = config.max_peers - max_inbound;
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalEvent>(256);
     let handshake_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
+
+    // NAT state: tracks our external address via manual config, UPnP, or peer observation.
+    let mut nat_state = NatState::new(config.listen_port, config.external_addr);
 
     loop {
         tokio::select! {
@@ -557,10 +575,23 @@ async fn p2p_loop(
                         let infos: Vec<PeerInfo> = peers.values().map(|p| PeerInfo {
                             peer_id: p.peer_id,
                             public_key: p.public_key.clone(),
-                            address: p.addr.to_string(),
+                            address: p.external_addr.unwrap_or(p.addr).to_string(),
                             last_seen: 0,
                         }).collect();
                         let _ = reply.send(infos);
+                    }
+                    P2pCommand::HolePunch { target, rendezvous } => {
+                        // Ask the rendezvous peer to notify the target
+                        if let Some(rendezvous_peer) = peers.get(&rendezvous) {
+                            let our_ext = nat_state
+                                .external_addr()
+                                .map(|a| a.to_string())
+                                .unwrap_or_else(|| config.listen_addr.to_string());
+                            let _ = rendezvous_peer.msg_tx.try_send(Message::NatPunchRequest {
+                                target_peer_id: target,
+                                requester_external_addr: our_ext,
+                            });
+                        }
                     }
                     P2pCommand::Shutdown => {
                         break;
@@ -590,12 +621,21 @@ async fn p2p_loop(
                             } else {
                                 inbound_count += 1;
                             }
+
+                            // Send NatInfo to the new peer (over encrypted channel)
+                            let our_ext = nat_state.external_addr().map(|a| a.to_string());
+                            let _ = msg_tx.try_send(Message::NatInfo {
+                                external_addr: our_ext,
+                                observed_addr: addr.to_string(),
+                            });
+
                             peers.insert(peer_id, PeerConnection {
                                 peer_id,
                                 public_key,
                                 addr,
                                 msg_tx,
                                 is_outbound,
+                                external_addr: None,
                             });
                             reputations.entry(peer_id).or_insert_with(PeerReputation::new);
                             let _ = event_tx.send(P2pEvent::PeerConnected(peer_id)).await;
@@ -606,6 +646,89 @@ async fn p2p_loop(
                         if let Some(rep) = reputations.get_mut(&from) {
                             rep.reward(1);
                         }
+
+                        // Intercept NAT-related messages — handle internally, don't forward
+                        match message.as_ref() {
+                            Message::NatInfo { external_addr, observed_addr } => {
+                                // Update the peer's external address in our records
+                                if let Some(ext_str) = external_addr {
+                                    if let Ok(ext_addr) = ext_str.parse::<SocketAddr>() {
+                                        if let Some(peer) = peers.get_mut(&from) {
+                                            peer.external_addr = Some(ext_addr);
+                                        }
+                                    }
+                                }
+                                // Record what the peer observes our address as
+                                if let Ok(observed) = observed_addr.parse::<SocketAddr>() {
+                                    let changed = nat_state.record_observed_addr(from, observed.ip());
+                                    if changed {
+                                        tracing::info!(
+                                            "NAT: observed external addr established via peer quorum: {}",
+                                            nat_state.external_addr().map(|a| a.to_string()).unwrap_or_default()
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+                            Message::NatPunchRequest { target_peer_id, requester_external_addr } => {
+                                // We are the rendezvous: forward a NatPunchNotify to the target
+                                if let Some(target_peer) = peers.get(target_peer_id) {
+                                    let _ = target_peer.msg_tx.try_send(Message::NatPunchNotify {
+                                        requester_peer_id: from,
+                                        requester_external_addr: requester_external_addr.clone(),
+                                    });
+                                    tracing::debug!(
+                                        "NAT: relayed punch request from {} to {}",
+                                        hex::encode(&from[..8]),
+                                        hex::encode(&target_peer_id[..8])
+                                    );
+                                }
+                                continue;
+                            }
+                            Message::NatPunchNotify { requester_external_addr, requester_peer_id } => {
+                                // Someone wants to connect to us — try connecting back to them
+                                if let Ok(addr) = requester_external_addr.parse::<SocketAddr>() {
+                                    let config_clone = config.clone();
+                                    let internal_tx_clone = internal_tx.clone();
+                                    let hs_permit = handshake_semaphore.clone();
+                                    let req_id = *requester_peer_id;
+                                    tokio::spawn(async move {
+                                        for attempt in 1..=crate::constants::HOLE_PUNCH_MAX_ATTEMPTS {
+                                            let _permit = match hs_permit.acquire().await {
+                                                Ok(p) => p,
+                                                Err(_) => return,
+                                            };
+                                            match handle_outbound(addr, &config_clone, internal_tx_clone.clone()).await {
+                                                Ok(()) => {
+                                                    tracing::debug!(
+                                                        "NAT: hole punch to {} succeeded on attempt {}",
+                                                        hex::encode(&req_id[..8]),
+                                                        attempt
+                                                    );
+                                                    return;
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!(
+                                                        "NAT: hole punch attempt {}/{} to {} failed: {}",
+                                                        attempt,
+                                                        crate::constants::HOLE_PUNCH_MAX_ATTEMPTS,
+                                                        addr,
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                crate::constants::HOLE_PUNCH_RETRY_DELAY_MS,
+                                            ))
+                                            .await;
+                                        }
+                                    });
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+
                         let _ = event_tx.send(P2pEvent::MessageReceived { from, message }).await;
                     }
                     InternalEvent::Disconnected(peer_id) => {
@@ -703,7 +826,8 @@ async fn handle_inbound_inner(
             public_key,
             ..
         } => {
-            if version != PROTOCOL_VERSION {
+            // Accept v2 (pre-NAT) and v3+ peers
+            if !(2..=PROTOCOL_VERSION).contains(&version) {
                 return Err(P2pError::InvalidHandshake);
             }
             (peer_id, public_key)
@@ -792,7 +916,8 @@ async fn handle_outbound(
             kem_public_key,
             ..
         } => {
-            if version != PROTOCOL_VERSION {
+            // Accept v2 (pre-NAT) and v3+ peers
+            if !(2..=PROTOCOL_VERSION).contains(&version) {
                 return Err(P2pError::InvalidHandshake);
             }
             (peer_id, public_key, kem_public_key)
@@ -1027,6 +1152,7 @@ mod tests {
             listen_port: port,
             our_kem_keypair: kem_kp,
             our_signing_keypair: kp,
+            external_addr: None,
         }
     }
 

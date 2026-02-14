@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
-use umbra::config::{TlsConfig, WalletTlsConfig};
+use umbra::config::{NatConfig, TlsConfig, WalletTlsConfig};
 
 /// Umbra post-quantum cryptocurrency node and wallet.
 #[derive(Parser, Debug)]
@@ -64,6 +64,15 @@ struct Cli {
     /// Wallet client TLS private key file (PEM).
     #[arg(long, global = true)]
     tls_client_key: Option<PathBuf>,
+
+    // ── NAT flags ──
+    /// Manually specify external address (IP:port) for nodes behind NAT.
+    #[arg(long, global = true)]
+    external_addr: Option<String>,
+
+    /// Disable UPnP port mapping.
+    #[arg(long, global = true)]
+    no_upnp: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -224,6 +233,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.wallet.tls.clone()
     };
 
+    // Build NAT config: CLI flags override config file
+    let nat_config = NatConfig {
+        external_addr: cli.external_addr.or(config.node.nat.external_addr.clone()),
+        upnp: if cli.no_upnp {
+            false
+        } else {
+            config.node.nat.upnp
+        },
+    };
+
     match cli.command {
         // Default (no subcommand) → run node with config file defaults
         None => {
@@ -241,6 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 peers,
                 config.node.genesis_validator,
                 server_tls,
+                nat_config,
             )
             .await
         }
@@ -265,6 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 all_peers,
                 genesis_validator,
                 server_tls,
+                nat_config,
             )
             .await
         }
@@ -282,6 +303,7 @@ async fn run_node(
     peers: Vec<SocketAddr>,
     genesis_validator: bool,
     tls_config: Option<TlsConfig>,
+    nat_config: NatConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Umbra node...");
     tracing::info!("P2P: {}", listen_addr);
@@ -325,6 +347,7 @@ async fn run_node(
         keypair,
         kem_keypair,
         genesis_validator,
+        nat_config,
     };
 
     let rpc_addr = config.rpc_addr;

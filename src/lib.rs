@@ -151,6 +151,23 @@ pub mod constants {
     /// Maximum distinct protocol versions tracked per epoch (F16).
     pub const MAX_VERSION_SIGNALS: usize = 64;
 
+    // ── NAT Traversal ──
+
+    /// Timeout for UPnP gateway discovery in milliseconds.
+    pub const UPNP_TIMEOUT_MS: u64 = 5_000;
+    /// UPnP port mapping lease duration in seconds (1 hour).
+    pub const UPNP_LEASE_DURATION_SECS: u32 = 3_600;
+    /// UPnP lease renewal interval in seconds (~50 min, before 1hr lease expires).
+    pub const UPNP_RENEWAL_INTERVAL_SECS: u64 = 3_000;
+    /// Number of unique peers that must report the same external IP before we trust it.
+    pub const NAT_OBSERVED_ADDR_QUORUM: usize = 3;
+    /// Timeout for a hole punch attempt in milliseconds.
+    pub const HOLE_PUNCH_TIMEOUT_MS: u64 = 5_000;
+    /// Delay between hole punch retry attempts in milliseconds.
+    pub const HOLE_PUNCH_RETRY_DELAY_MS: u64 = 500;
+    /// Maximum number of hole punch connection attempts.
+    pub const HOLE_PUNCH_MAX_ATTEMPTS: u32 = 3;
+
     /// Minimum transaction fee (in base units).
     ///
     /// Enforced by `validate_structure()` to prevent zero-fee spam. Coinbase or

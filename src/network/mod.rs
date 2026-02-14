@@ -1,3 +1,4 @@
+pub mod nat;
 pub mod p2p;
 mod protocol;
 
