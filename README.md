@@ -75,7 +75,9 @@ umbra/
   src/
     lib.rs                  Protocol constants, hashing utilities
     config.rs               TOML config file support (umbra.toml)
-    bip39_words.rs          BIP39 English wordlist (2048 words) for wallet recovery
+    demo.rs                 Interactive protocol demonstration
+    state.rs                Chain state (bonds, slashing, sled-backed nullifiers), Ledger, parallel verification
+    main.rs                 Node + wallet binary with clap subcommands and config file loading
     crypto/
       keys.rs               Dilithium5 signing + Kyber1024 KEM keypairs
       stealth.rs            Stealth address generation and detection
@@ -101,17 +103,22 @@ umbra/
       mod.rs                PoVP design documentation
       dag.rs                DAG data structure (vertices with VRF proofs, protocol version, pruning)
       bft.rs                BFT voting with VRF proofs, certification, committee selection
-    mempool.rs              Fee-priority transaction pool with nullifier conflict detection + fee estimation
-    storage.rs              Persistent storage trait + sled backend (vertices, txs, validators)
-    p2p.rs                  Encrypted P2P networking with peer reputation and connection diversity
-    node.rs                 Node orchestrator: consensus, Dandelion++, peer discovery, protocol signaling
-    rpc.rs                  JSON HTTP API: tx, state, health, metrics, fee-estimate, light client endpoints
-    state.rs                Chain state (bonds, slashing, sled-backed nullifiers), Ledger, parallel verification
-    network.rs              P2P wire protocol (message types, KEM handshake, auth messages)
-    wallet.rs               Key management, scanning, tx building, history, recovery, consolidation
-    wallet_cli.rs           Wallet CLI commands (init, send, balance, history, consolidate, recover)
-    wallet_web.rs           Wallet web UI (askama templates, axum server)
-    main.rs                 Node + wallet binary with clap subcommands and config file loading
+    node/
+      mod.rs                Node module root
+      core.rs               Node orchestrator: consensus, Dandelion++, peer discovery, protocol signaling
+      rpc.rs                JSON HTTP API: tx, state, health, metrics, fee-estimate, light client endpoints
+      mempool.rs            Fee-priority transaction pool with nullifier conflict detection + fee estimation
+      storage.rs            Persistent storage trait + sled backend (vertices, txs, validators)
+    network/
+      mod.rs                Network module root
+      protocol.rs           P2P wire protocol (message types, KEM handshake, auth messages)
+      p2p.rs                Encrypted P2P networking with peer reputation and connection diversity
+    wallet/
+      mod.rs                Wallet module root
+      core.rs               Key management, scanning, tx building, history, recovery, consolidation
+      cli.rs                Wallet CLI commands (init, send, balance, history, consolidate, recover)
+      web.rs                Wallet web UI (askama templates, axum server)
+      bip39_words.rs        BIP39 English wordlist (2048 words) for wallet recovery
     bin/
       simulator.rs          Network simulator: multi-node BFT consensus, traffic, attack scenarios
   templates/
@@ -126,7 +133,7 @@ umbra/
     error.html              Error display
 ```
 
-**~26,500 lines of Rust** across 37 source files with **440 tests**.
+**~26,700 lines of Rust** across 41 source files with **440 tests**.
 
 ## Building
 
