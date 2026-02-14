@@ -30,6 +30,8 @@ use crate::wallet_cli;
 pub struct WalletWebState {
     pub data_dir: PathBuf,
     pub rpc_addr: SocketAddr,
+    /// Optional mTLS configuration for RPC connections.
+    pub wallet_tls: Option<crate::config::WalletTlsConfig>,
     /// Cached wallet + last scanned sequence. None if not yet loaded.
     wallet: Arc<RwLock<Option<(Wallet, u64)>>>,
     /// Serializes mutating wallet operations (send, consolidate) to prevent
@@ -38,13 +40,23 @@ pub struct WalletWebState {
 }
 
 impl WalletWebState {
-    fn new(data_dir: PathBuf, rpc_addr: SocketAddr) -> Self {
+    fn new(
+        data_dir: PathBuf,
+        rpc_addr: SocketAddr,
+        wallet_tls: Option<crate::config::WalletTlsConfig>,
+    ) -> Self {
         WalletWebState {
             data_dir,
             rpc_addr,
+            wallet_tls,
             wallet: Arc::new(RwLock::new(None)),
             wallet_op_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Create an RPC client, using mTLS if configured.
+    fn rpc_client(&self) -> Result<wallet_cli::RpcClient, WalletError> {
+        wallet_cli::RpcClient::new_maybe_tls(self.rpc_addr, self.wallet_tls.as_ref())
     }
 
     /// Check if a wallet file exists on disk.
@@ -235,8 +247,9 @@ pub async fn serve(
     addr: SocketAddr,
     data_dir: PathBuf,
     rpc_addr: SocketAddr,
+    wallet_tls: Option<crate::config::WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = WalletWebState::new(data_dir.clone(), rpc_addr);
+    let state = WalletWebState::new(data_dir.clone(), rpc_addr, wallet_tls);
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Wallet web UI listening on http://{}", addr);
@@ -260,16 +273,18 @@ async fn dashboard(State(state): State<WalletWebState>) -> Response {
     };
 
     // Try to get chain state from node
-    let client = wallet_cli::RpcClient::new(state.rpc_addr);
     let (chain_epoch, chain_commitments, chain_nullifiers, chain_state_root) =
-        match client.get_state().await {
-            Ok(info) => (
-                info.epoch,
-                info.commitment_count,
-                info.nullifier_count,
-                info.state_root,
-            ),
-            Err(_) => (0, 0, 0, "node unreachable".to_string()),
+        match state.rpc_client() {
+            Ok(client) => match client.get_state().await {
+                Ok(info) => (
+                    info.epoch,
+                    info.commitment_count,
+                    info.nullifier_count,
+                    info.state_root,
+                ),
+                Err(_) => (0, 0, 0, "node unreachable".to_string()),
+            },
+            Err(_) => (0, 0, 0, "TLS config error".to_string()),
         };
 
     DashboardTemplate {
@@ -432,7 +447,14 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
     };
 
     // Scan chain first
-    let scanned_to = match wallet_cli::scan_chain(&mut wallet, last_seq, state.rpc_addr).await {
+    let scanned_to = match wallet_cli::scan_chain(
+        &mut wallet,
+        last_seq,
+        state.rpc_addr,
+        state.wallet_tls.as_ref(),
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             return SendTemplate {
@@ -509,7 +531,10 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
     };
     let tx_hex = hex::encode(&tx_bytes);
 
-    let client = wallet_cli::RpcClient::new(state.rpc_addr);
+    let client = match state.rpc_client() {
+        Ok(c) => c,
+        Err(e) => return error_page(format!("TLS config error: {}", e)).into_response(),
+    };
     let result = match client.submit_tx(&tx_hex).await {
         Ok(r) => r,
         Err(e) => {
@@ -622,7 +647,14 @@ async fn scan_action(State(state): State<WalletWebState>) -> Response {
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
-    let scanned_to = match wallet_cli::scan_chain(&mut wallet, last_seq, state.rpc_addr).await {
+    let scanned_to = match wallet_cli::scan_chain(
+        &mut wallet,
+        last_seq,
+        state.rpc_addr,
+        state.wallet_tls.as_ref(),
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => return error_page(format!("Scan failed: {}", e)).into_response(),
     };
@@ -630,16 +662,18 @@ async fn scan_action(State(state): State<WalletWebState>) -> Response {
     let _ = state.save_wallet(&wallet, scanned_to).await;
 
     // Render dashboard with success flash
-    let client = wallet_cli::RpcClient::new(state.rpc_addr);
     let (chain_epoch, chain_commitments, chain_nullifiers, chain_state_root) =
-        match client.get_state().await {
-            Ok(info) => (
-                info.epoch,
-                info.commitment_count,
-                info.nullifier_count,
-                info.state_root,
-            ),
-            Err(_) => (0, 0, 0, "node unreachable".to_string()),
+        match state.rpc_client() {
+            Ok(client) => match client.get_state().await {
+                Ok(info) => (
+                    info.epoch,
+                    info.commitment_count,
+                    info.nullifier_count,
+                    info.state_root,
+                ),
+                Err(_) => (0, 0, 0, "node unreachable".to_string()),
+            },
+            Err(_) => (0, 0, 0, "TLS config error".to_string()),
         };
 
     DashboardTemplate {

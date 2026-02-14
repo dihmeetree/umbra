@@ -126,7 +126,7 @@ umbra/
     error.html              Error display
 ```
 
-**~23,000 lines of Rust** across 37 source files with **330 tests**.
+**~23,000 lines of Rust** across 37 source files with **335 tests**.
 
 ## Building
 
@@ -160,6 +160,17 @@ max_peers = 64
 [wallet]
 web_host = "127.0.0.1"
 web_port = 9734
+
+# Optional: mTLS for non-localhost RPC (see TLS section below)
+# [node.tls]
+# cert_file = "./tls/server.crt"
+# key_file = "./tls/server.key"
+# ca_cert_file = "./tls/ca.crt"
+#
+# [wallet.tls]
+# client_cert_file = "./tls/client.crt"
+# client_key_file = "./tls/client.key"
+# ca_cert_file = "./tls/ca.crt"
 ```
 
 ### CLI Options
@@ -174,6 +185,11 @@ The binary uses subcommands (`node`, `wallet`). Running without a subcommand def
 | `--rpc-host` | `127.0.0.1` | RPC listen host (localhost by default for safety) |
 | `--rpc-port` | `9733` | RPC listen port |
 | `--demo` | *(off)* | Run the protocol demo walkthrough instead |
+| `--tls-cert` | *(none)* | Server TLS certificate file (PEM) |
+| `--tls-key` | *(none)* | Server TLS private key file (PEM) |
+| `--tls-ca-cert` | *(none)* | CA certificate for client verification (PEM) |
+| `--tls-client-cert` | *(none)* | Wallet client TLS certificate (PEM) |
+| `--tls-client-key` | *(none)* | Wallet client TLS private key (PEM) |
 
 **Node flags** (`umbra node`):
 
@@ -282,9 +298,73 @@ Open `http://127.0.0.1:9734` in your browser. If no wallet exists, you'll be pro
 - **History** (`/history`) — transaction history (sends, receives, coinbase rewards)
 - **Address** (`/address`) — view and export wallet address for sharing
 
+## TLS / mTLS Configuration
+
+The RPC server binds to `127.0.0.1` by default (localhost-only). For non-localhost deployments, mutual TLS (mTLS) is **required** — the node refuses to start on a non-loopback address without TLS configured.
+
+### Generating Certificates
+
+```bash
+# Create a CA
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout tls/ca.key -out tls/ca.crt -days 3650 -nodes -subj "/CN=Umbra CA"
+
+# Server certificate (use node's hostname or IP as CN/SAN)
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout tls/server.key -out tls/server.csr -nodes -subj "/CN=umbra-node"
+openssl x509 -req -in tls/server.csr -CA tls/ca.crt -CAkey tls/ca.key \
+  -CAcreateserial -out tls/server.crt -days 365
+
+# Client certificate (for wallet)
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout tls/client.key -out tls/client.csr -nodes -subj "/CN=umbra-wallet"
+openssl x509 -req -in tls/client.csr -CA tls/ca.crt -CAkey tls/ca.key \
+  -CAcreateserial -out tls/client.crt -days 365
+```
+
+### Starting the Node with mTLS
+
+```bash
+# Via CLI flags
+cargo run --release -- --rpc-host 0.0.0.0 \
+  --tls-cert tls/server.crt --tls-key tls/server.key --tls-ca-cert tls/ca.crt \
+  node --genesis-validator
+
+# Via config file (umbra.toml)
+# [node]
+# rpc_host = "0.0.0.0"
+# [node.tls]
+# cert_file = "./tls/server.crt"
+# key_file = "./tls/server.key"
+# ca_cert_file = "./tls/ca.crt"
+```
+
+### Wallet Commands with mTLS
+
+```bash
+cargo run --release -- \
+  --tls-client-cert tls/client.crt --tls-client-key tls/client.key --tls-ca-cert tls/ca.crt \
+  wallet balance
+
+# Or via config file:
+# [wallet.tls]
+# client_cert_file = "./tls/client.crt"
+# client_key_file = "./tls/client.key"
+# ca_cert_file = "./tls/ca.crt"
+```
+
+### Testing with curl
+
+```bash
+curl --cacert tls/ca.crt --cert tls/client.crt --key tls/client.key \
+  https://your-node:9733/health
+```
+
+Without a valid client certificate, the connection is rejected at the TLS layer.
+
 ## RPC API
 
-The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for safety).
+The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for safety). For non-localhost deployments, mTLS is required (see [TLS section](#tls--mtls-configuration) above).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -408,8 +488,9 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 330 tests cover:
+All 335 tests cover:
 
+- **Configuration** — default config validation, TOML parsing (with and without TLS sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet)
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
 - **Stealth addresses** — generation, detection, multi-index scanning, spend auth derivation determinism, index-dependent key uniqueness
@@ -615,6 +696,8 @@ Proves in zero knowledge:
 | `tokio` | Async runtime (P2P networking, node event loop) |
 | `sled` | Embedded database for persistent storage |
 | `axum` | JSON HTTP API framework |
+| `axum-server` | TLS server support (mTLS for RPC) |
+| `rustls` + `rustls-pemfile` | Pure-Rust TLS with PEM parsing |
 | `clap` | CLI argument parsing |
 | `serde_json` | JSON serialization for RPC |
 | `tracing` + `tracing-subscriber` | Structured logging |
@@ -742,10 +825,11 @@ All transaction validity is verified via zk-STARKs:
 - **Vertex timestamp enforcement** — vertices with timestamps more than 60 seconds in the future are rejected on insertion, preventing timestamp manipulation by malicious proposers while allowing historical vertex sync
 - **Snapshot state root verification** — after importing a snapshot from a peer, the node recomputes the state root from the restored state and rejects snapshots where the computed root does not match the claimed root, preventing state corruption from malicious peers
 - **Slashing evidence propagation** — when a node detects equivocation (a validator voting for two different vertices in the same round), it broadcasts cryptographic proof (both conflicting signatures) to all peers. Receiving nodes independently verify both signatures, apply slashing locally, and re-gossip, ensuring all nodes converge on the same slashed validator state
+- **RPC mutual TLS (mTLS)** — the RPC server supports mutual TLS authentication for non-localhost deployments. The server requires client certificates signed by a trusted CA, and refuses to start on non-loopback addresses without TLS configured. Both server and client authenticate via X.509 certificates, preventing unauthorized access to the RPC API
 
 ## Production Roadmap
 
-Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
+Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
 - **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 330 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)

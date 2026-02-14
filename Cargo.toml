@@ -35,6 +35,12 @@ sled = "0.34"
 
 # HTTP RPC server
 axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+
+# TLS (mTLS for RPC authentication)
+rustls = "0.23"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }

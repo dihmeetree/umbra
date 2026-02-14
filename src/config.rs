@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Top-level configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -27,6 +28,40 @@ pub struct NodeConfig {
     pub bootstrap_peers: Vec<String>,
     pub genesis_validator: bool,
     pub max_peers: usize,
+    pub tls: Option<TlsConfig>,
+}
+
+/// Server-side TLS configuration for mTLS on the RPC endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TlsConfig {
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+    pub ca_cert_file: PathBuf,
+}
+
+impl TlsConfig {
+    /// Check that all referenced files exist.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.cert_file.exists() {
+            return Err(format!(
+                "TLS cert file not found: {}",
+                self.cert_file.display()
+            ));
+        }
+        if !self.key_file.exists() {
+            return Err(format!(
+                "TLS key file not found: {}",
+                self.key_file.display()
+            ));
+        }
+        if !self.ca_cert_file.exists() {
+            return Err(format!(
+                "TLS CA cert file not found: {}",
+                self.ca_cert_file.display()
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for NodeConfig {
@@ -40,7 +75,15 @@ impl Default for NodeConfig {
             bootstrap_peers: vec![],
             genesis_validator: false,
             max_peers: crate::constants::MAX_PEERS,
+            tls: None,
         }
+    }
+}
+
+impl NodeConfig {
+    /// Returns true if the RPC host is a loopback address.
+    pub fn rpc_is_loopback(&self) -> bool {
+        matches!(self.rpc_host.as_str(), "127.0.0.1" | "::1" | "localhost")
     }
 }
 
@@ -50,6 +93,40 @@ impl Default for NodeConfig {
 pub struct WalletConfig {
     pub web_host: String,
     pub web_port: u16,
+    pub tls: Option<WalletTlsConfig>,
+}
+
+/// Client-side TLS configuration for mTLS wallet connections to the RPC.
+#[derive(Clone, Debug, Deserialize)]
+pub struct WalletTlsConfig {
+    pub client_cert_file: PathBuf,
+    pub client_key_file: PathBuf,
+    pub ca_cert_file: PathBuf,
+}
+
+impl WalletTlsConfig {
+    /// Check that all referenced files exist.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.client_cert_file.exists() {
+            return Err(format!(
+                "TLS client cert not found: {}",
+                self.client_cert_file.display()
+            ));
+        }
+        if !self.client_key_file.exists() {
+            return Err(format!(
+                "TLS client key not found: {}",
+                self.client_key_file.display()
+            ));
+        }
+        if !self.ca_cert_file.exists() {
+            return Err(format!(
+                "TLS CA cert not found: {}",
+                self.ca_cert_file.display()
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for WalletConfig {
@@ -57,6 +134,7 @@ impl Default for WalletConfig {
         WalletConfig {
             web_host: "127.0.0.1".into(),
             web_port: 9734,
+            tls: None,
         }
     }
 }
@@ -144,5 +222,86 @@ web_port = 8080
         config.node.bootstrap_peers = vec!["1.2.3.4:9732".into(), "bad-addr".into()];
         let peers = config.parse_bootstrap_peers();
         assert_eq!(peers.len(), 1);
+    }
+
+    #[test]
+    fn rpc_is_loopback() {
+        let mut config = NodeConfig::default();
+        assert!(config.rpc_is_loopback()); // 127.0.0.1
+
+        config.rpc_host = "::1".into();
+        assert!(config.rpc_is_loopback());
+
+        config.rpc_host = "localhost".into();
+        assert!(config.rpc_is_loopback());
+
+        config.rpc_host = "0.0.0.0".into();
+        assert!(!config.rpc_is_loopback());
+
+        config.rpc_host = "192.168.1.1".into();
+        assert!(!config.rpc_is_loopback());
+    }
+
+    #[test]
+    fn parse_toml_with_tls() {
+        let toml_str = r#"
+[node]
+rpc_host = "0.0.0.0"
+
+[node.tls]
+cert_file = "./tls/server.crt"
+key_file = "./tls/server.key"
+ca_cert_file = "./tls/ca.crt"
+
+[wallet.tls]
+client_cert_file = "./tls/client.crt"
+client_key_file = "./tls/client.key"
+ca_cert_file = "./tls/ca.crt"
+"#;
+        let config: UmbraConfig = toml::from_str(toml_str).unwrap();
+        let tls = config.node.tls.unwrap();
+        assert_eq!(tls.cert_file.to_str().unwrap(), "./tls/server.crt");
+        assert_eq!(tls.key_file.to_str().unwrap(), "./tls/server.key");
+        assert_eq!(tls.ca_cert_file.to_str().unwrap(), "./tls/ca.crt");
+
+        let wallet_tls = config.wallet.tls.unwrap();
+        assert_eq!(
+            wallet_tls.client_cert_file.to_str().unwrap(),
+            "./tls/client.crt"
+        );
+        assert_eq!(wallet_tls.ca_cert_file.to_str().unwrap(), "./tls/ca.crt");
+    }
+
+    #[test]
+    fn parse_toml_without_tls() {
+        let toml_str = r#"
+[node]
+rpc_host = "127.0.0.1"
+"#;
+        let config: UmbraConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.node.tls.is_none());
+        assert!(config.wallet.tls.is_none());
+    }
+
+    #[test]
+    fn tls_config_validate_missing_files() {
+        let tls = TlsConfig {
+            cert_file: PathBuf::from("/nonexistent/cert.pem"),
+            key_file: PathBuf::from("/nonexistent/key.pem"),
+            ca_cert_file: PathBuf::from("/nonexistent/ca.pem"),
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn wallet_tls_config_validate_missing_files() {
+        let tls = WalletTlsConfig {
+            client_cert_file: PathBuf::from("/nonexistent/client.pem"),
+            client_key_file: PathBuf::from("/nonexistent/client-key.pem"),
+            ca_cert_file: PathBuf::from("/nonexistent/ca.pem"),
+        };
+        let err = tls.validate().unwrap_err();
+        assert!(err.contains("not found"));
     }
 }

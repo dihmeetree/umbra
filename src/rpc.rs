@@ -3,12 +3,12 @@
 //! Provides endpoints for submitting transactions, querying state,
 //! and inspecting the mempool and peer list.
 //!
-//! # Authentication (M2)
+//! # Authentication (mTLS)
 //!
-//! The RPC server currently has no authentication. By default it binds to
-//! localhost only (M3). Production deployments exposed to a network should
-//! add an authentication layer (e.g., bearer token, mTLS) before the RPC
-//! router, and rate-limiting middleware.
+//! The RPC server supports mutual TLS (mTLS) for non-localhost deployments.
+//! When TLS is configured, both the server and client authenticate via
+//! certificates signed by a trusted CA. The server refuses to start on
+//! non-loopback addresses without TLS configured.
 //!
 //! # Privacy considerations
 //!
@@ -26,6 +26,8 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use crate::config::TlsConfig;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
@@ -68,15 +70,92 @@ pub fn router(rpc_state: RpcState) -> Router {
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB max body
 }
 
-/// Start the RPC server.
+/// Loaded TLS configuration ready for use with `axum-server`.
+pub struct LoadedTlsConfig {
+    pub config: axum_server::tls_rustls::RustlsConfig,
+}
+
+/// Load and validate TLS configuration for mTLS.
+///
+/// Builds a `rustls::ServerConfig` that:
+/// 1. Requires client certificates signed by the configured CA
+/// 2. Presents the server certificate to clients
+/// 3. Supports HTTP/1.1 and HTTP/2 via ALPN
+pub fn load_tls(
+    tls_config: &TlsConfig,
+) -> Result<LoadedTlsConfig, Box<dyn std::error::Error + Send + Sync>> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::RootCertStore;
+
+    // Load CA certificate for client verification
+    let ca_pem = std::fs::read(&tls_config.ca_cert_file)?;
+    let mut ca_reader = std::io::BufReader::new(ca_pem.as_slice());
+    let ca_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut ca_reader).collect::<Result<Vec<_>, _>>()?;
+    if ca_certs.is_empty() {
+        return Err("no certificates found in CA cert file".into());
+    }
+
+    let mut root_store = RootCertStore::empty();
+    for cert in ca_certs {
+        root_store.add(cert)?;
+    }
+
+    let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| format!("failed to build client verifier: {}", e))?;
+
+    // Load server certificate chain
+    let cert_pem = std::fs::read(&tls_config.cert_file)?;
+    let mut cert_reader = std::io::BufReader::new(cert_pem.as_slice());
+    let server_certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+    if server_certs.is_empty() {
+        return Err("no certificates found in server cert file".into());
+    }
+
+    // Load server private key
+    let key_pem = std::fs::read(&tls_config.key_file)?;
+    let mut key_reader = std::io::BufReader::new(key_pem.as_slice());
+    let server_key: PrivateKeyDer<'static> =
+        rustls_pemfile::private_key(&mut key_reader)?.ok_or("no private key found in key file")?;
+
+    // Build rustls ServerConfig with client authentication
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(server_certs, server_key)
+        .map_err(|e| format!("TLS server config error: {}", e))?;
+
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+
+    Ok(LoadedTlsConfig {
+        config: rustls_config,
+    })
+}
+
+/// Start the RPC server, optionally with mTLS.
 pub async fn serve(
     addr: SocketAddr,
     rpc_state: RpcState,
+    tls: Option<LoadedTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = router(rpc_state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("RPC server listening on {}", addr);
-    axum::serve(listener, app).await?;
+    match tls {
+        Some(loaded) => {
+            tracing::info!("RPC server listening on {} (mTLS enabled)", addr);
+            axum_server::bind_rustls(addr, loaded.config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!("RPC server listening on {} (plain HTTP)", addr);
+            axum::serve(listener, app).await?;
+        }
+    }
     Ok(())
 }
 

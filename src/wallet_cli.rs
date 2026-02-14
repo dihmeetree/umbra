@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::config::WalletTlsConfig;
 use crate::crypto::keys::PublicAddress;
 use crate::wallet::{TxDirection, Wallet, WalletError};
 
@@ -28,6 +29,50 @@ impl RpcClient {
         RpcClient {
             base_url: format!("http://{}", rpc_addr),
             client: reqwest::Client::new(),
+        }
+    }
+
+    /// Create an mTLS-enabled RPC client.
+    pub fn new_mtls(
+        rpc_addr: SocketAddr,
+        tls_config: &WalletTlsConfig,
+    ) -> Result<Self, WalletError> {
+        // Load CA certificate
+        let ca_pem = std::fs::read(&tls_config.ca_cert_file)
+            .map_err(|e| WalletError::Rpc(format!("failed to read CA cert: {}", e)))?;
+        let ca_cert = reqwest::tls::Certificate::from_pem(&ca_pem)
+            .map_err(|e| WalletError::Rpc(format!("invalid CA cert: {}", e)))?;
+
+        // Load client identity (cert + key concatenated)
+        let client_cert = std::fs::read(&tls_config.client_cert_file)
+            .map_err(|e| WalletError::Rpc(format!("failed to read client cert: {}", e)))?;
+        let client_key = std::fs::read(&tls_config.client_key_file)
+            .map_err(|e| WalletError::Rpc(format!("failed to read client key: {}", e)))?;
+        let mut identity_pem = client_cert;
+        identity_pem.extend_from_slice(&client_key);
+        let identity = reqwest::tls::Identity::from_pem(&identity_pem)
+            .map_err(|e| WalletError::Rpc(format!("invalid client identity: {}", e)))?;
+
+        let client = reqwest::Client::builder()
+            .add_root_certificate(ca_cert)
+            .identity(identity)
+            .build()
+            .map_err(|e| WalletError::Rpc(format!("failed to build TLS client: {}", e)))?;
+
+        Ok(RpcClient {
+            base_url: format!("https://{}", rpc_addr),
+            client,
+        })
+    }
+
+    /// Create a client, using mTLS if TLS config is provided.
+    pub fn new_maybe_tls(
+        rpc_addr: SocketAddr,
+        tls: Option<&WalletTlsConfig>,
+    ) -> Result<Self, WalletError> {
+        match tls {
+            Some(tls_config) => Self::new_mtls(rpc_addr, tls_config),
+            None => Ok(Self::new(rpc_addr)),
         }
     }
 
@@ -164,12 +209,13 @@ pub fn cmd_address(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 pub async fn cmd_balance(
     data_dir: &Path,
     rpc_addr: SocketAddr,
+    wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
 
     // Scan for new vertices
-    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr).await?;
+    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
     // Save updated wallet
     wallet.save_to_file(&path, scanned_to)?;
@@ -188,11 +234,12 @@ pub async fn cmd_balance(
 pub async fn cmd_scan(
     data_dir: &Path,
     rpc_addr: SocketAddr,
+    wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
 
-    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr).await?;
+    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
     wallet.save_to_file(&path, scanned_to)?;
 
@@ -214,12 +261,13 @@ pub async fn cmd_send(
     amount: u64,
     fee: u64,
     message: Option<String>,
+    wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
 
     // Scan chain first to have latest balance
-    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr).await?;
+    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
     // Load recipient address
     let addr_hex = std::fs::read_to_string(to_file).map_err(|e| {
@@ -240,7 +288,7 @@ pub async fn cmd_send(
     let tx_bytes = crate::serialize(&tx)?;
     let tx_hex = hex::encode(&tx_bytes);
 
-    let client = RpcClient::new(rpc_addr);
+    let client = RpcClient::new_maybe_tls(rpc_addr, wallet_tls)?;
     let result = client.submit_tx(&tx_hex).await?;
 
     // Save wallet (outputs now pending)
@@ -317,12 +365,13 @@ pub async fn cmd_consolidate(
     data_dir: &Path,
     rpc_addr: SocketAddr,
     fee: u64,
+    wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
 
     // Scan chain first
-    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr).await?;
+    let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
     let unspent_count = wallet.unspent_outputs().len();
     if unspent_count < 2 {
@@ -340,7 +389,7 @@ pub async fn cmd_consolidate(
     // Submit
     let tx_bytes = crate::serialize(&tx)?;
     let tx_hex = hex::encode(&tx_bytes);
-    let client = RpcClient::new(rpc_addr);
+    let client = RpcClient::new_maybe_tls(rpc_addr, wallet_tls)?;
     let result = client.submit_tx(&tx_hex).await?;
 
     wallet.save_to_file(&path, scanned_to)?;
@@ -464,8 +513,9 @@ pub async fn scan_chain(
     wallet: &mut Wallet,
     last_seq: u64,
     rpc_addr: SocketAddr,
+    wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<u64, WalletError> {
-    let client = RpcClient::new(rpc_addr);
+    let client = RpcClient::new_maybe_tls(rpc_addr, wallet_tls)?;
 
     // Get chain state to know if we need to scan
     let state = client.get_state().await?;

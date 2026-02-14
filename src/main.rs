@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
+use umbra::config::{TlsConfig, WalletTlsConfig};
 
 /// Umbra post-quantum cryptocurrency node and wallet.
 #[derive(Parser, Debug)]
@@ -41,6 +42,28 @@ struct Cli {
     /// Run the demo walkthrough instead of starting a node.
     #[arg(long)]
     demo: bool,
+
+    // ── TLS flags (server-side mTLS for RPC) ──
+    /// Server TLS certificate file (PEM).
+    #[arg(long, global = true)]
+    tls_cert: Option<PathBuf>,
+
+    /// Server TLS private key file (PEM).
+    #[arg(long, global = true)]
+    tls_key: Option<PathBuf>,
+
+    /// CA certificate file for client verification (PEM).
+    #[arg(long, global = true)]
+    tls_ca_cert: Option<PathBuf>,
+
+    // ── TLS flags (client-side mTLS for wallet) ──
+    /// Wallet client TLS certificate file (PEM).
+    #[arg(long, global = true)]
+    tls_client_cert: Option<PathBuf>,
+
+    /// Wallet client TLS private key file (PEM).
+    #[arg(long, global = true)]
+    tls_client_key: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -162,6 +185,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rpc_addr: SocketAddr = format!("{}:{}", cli.rpc_host, cli.rpc_port).parse()?;
 
+    // Build server TLS config: CLI flags override config file
+    let cli_ca_cert = cli.tls_ca_cert; // take ownership once
+    let server_tls = if cli.tls_cert.is_some() || cli.tls_key.is_some() || cli_ca_cert.is_some() {
+        let cert = cli.tls_cert.ok_or("--tls-cert required when using TLS")?;
+        let key = cli.tls_key.ok_or("--tls-key required when using TLS")?;
+        let ca = cli_ca_cert
+            .clone()
+            .ok_or("--tls-ca-cert required when using TLS")?;
+        Some(TlsConfig {
+            cert_file: cert,
+            key_file: key,
+            ca_cert_file: ca,
+        })
+    } else {
+        config.node.tls.clone()
+    };
+
+    // Build wallet TLS config: CLI flags override config file
+    let wallet_tls = if cli.tls_client_cert.is_some() || cli.tls_client_key.is_some() {
+        let cert = cli
+            .tls_client_cert
+            .ok_or("--tls-client-cert required when using client TLS")?;
+        let key = cli
+            .tls_client_key
+            .ok_or("--tls-client-key required when using client TLS")?;
+        // CA cert: try CLI flag, then wallet config, then server TLS config
+        let ca = cli_ca_cert
+            .or_else(|| config.wallet.tls.as_ref().map(|t| t.ca_cert_file.clone()))
+            .or_else(|| server_tls.as_ref().map(|t| t.ca_cert_file.clone()))
+            .ok_or("--tls-ca-cert required for wallet TLS")?;
+        Some(WalletTlsConfig {
+            client_cert_file: cert,
+            client_key_file: key,
+            ca_cert_file: ca,
+        })
+    } else {
+        config.wallet.tls.clone()
+    };
+
     match cli.command {
         // Default (no subcommand) → run node with config file defaults
         None => {
@@ -178,6 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 listen_addr,
                 peers,
                 config.node.genesis_validator,
+                server_tls,
             )
             .await
         }
@@ -201,12 +264,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 listen_addr,
                 all_peers,
                 genesis_validator,
+                server_tls,
             )
             .await
         }
 
         Some(Command::Wallet { action }) => {
-            run_wallet_command(action, &cli.data_dir, rpc_addr).await
+            run_wallet_command(action, &cli.data_dir, rpc_addr, wallet_tls).await
         }
     }
 }
@@ -217,11 +281,39 @@ async fn run_node(
     listen_addr: SocketAddr,
     peers: Vec<SocketAddr>,
     genesis_validator: bool,
+    tls_config: Option<TlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Umbra node...");
     tracing::info!("P2P: {}", listen_addr);
     tracing::info!("RPC: {}", rpc_addr);
     tracing::info!("Data: {}", data_dir.display());
+
+    // Safety check: refuse to expose RPC on non-loopback without TLS
+    let is_loopback = matches!(rpc_addr.ip(),
+        std::net::IpAddr::V4(ip) if ip.is_loopback())
+        || matches!(rpc_addr.ip(),
+        std::net::IpAddr::V6(ip) if ip.is_loopback());
+    if !is_loopback && tls_config.is_none() {
+        return Err(
+            "Refusing to start: RPC is bound to a non-loopback address without TLS. \
+             Use --tls-cert, --tls-key, and --tls-ca-cert to enable mTLS, \
+             or bind RPC to 127.0.0.1."
+                .into(),
+        );
+    }
+
+    // Load TLS if configured
+    let loaded_tls = match &tls_config {
+        Some(tls) => {
+            tls.validate()
+                .map_err(|e| format!("TLS config error: {}", e))?;
+            let loaded =
+                umbra::rpc::load_tls(tls).map_err(|e| -> Box<dyn std::error::Error> { e })?;
+            tracing::info!("mTLS enabled for RPC (cert: {})", tls.cert_file.display());
+            Some(loaded)
+        }
+        None => None,
+    };
 
     let (keypair, kem_keypair) = umbra::node::load_or_generate_keypair(&data_dir)?;
 
@@ -242,7 +334,7 @@ async fn run_node(
         node: node.state(),
         p2p: node.p2p_handle(),
     };
-    tokio::spawn(umbra::rpc::serve(rpc_addr, rpc_state));
+    tokio::spawn(umbra::rpc::serve(rpc_addr, rpc_state, loaded_tls));
 
     let shutdown = CancellationToken::new();
     let shutdown_signal = shutdown.clone();
@@ -259,30 +351,33 @@ async fn run_wallet_command(
     action: WalletAction,
     data_dir: &std::path::Path,
     rpc_addr: SocketAddr,
+    wallet_tls: Option<WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use umbra::wallet_cli;
+
+    let tls_ref = wallet_tls.as_ref();
 
     match action {
         WalletAction::Init => wallet_cli::cmd_init_with_recovery(data_dir),
         WalletAction::Address => wallet_cli::cmd_address(data_dir),
-        WalletAction::Balance => wallet_cli::cmd_balance(data_dir, rpc_addr).await,
-        WalletAction::Scan => wallet_cli::cmd_scan(data_dir, rpc_addr).await,
+        WalletAction::Balance => wallet_cli::cmd_balance(data_dir, rpc_addr, tls_ref).await,
+        WalletAction::Scan => wallet_cli::cmd_scan(data_dir, rpc_addr, tls_ref).await,
         WalletAction::Send {
             to,
             amount,
             fee,
             message,
-        } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, fee, message).await,
+        } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, fee, message, tls_ref).await,
         WalletAction::Messages => wallet_cli::cmd_messages(data_dir),
         WalletAction::History => wallet_cli::cmd_history(data_dir),
         WalletAction::Consolidate { fee } => {
-            wallet_cli::cmd_consolidate(data_dir, rpc_addr, fee).await
+            wallet_cli::cmd_consolidate(data_dir, rpc_addr, fee, tls_ref).await
         }
         WalletAction::Recover { phrase } => wallet_cli::cmd_recover(data_dir, &phrase),
         WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
         WalletAction::Web { host, port } => {
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
-            umbra::wallet_web::serve(addr, data_dir.to_path_buf(), rpc_addr).await
+            umbra::wallet_web::serve(addr, data_dir.to_path_buf(), rpc_addr, wallet_tls).await
         }
     }
 }

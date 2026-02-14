@@ -304,7 +304,7 @@ async fn bootstrap_network(
             p2p: p2p_handle,
         };
         tokio::spawn(async move {
-            let _ = rpc_serve(rpc_addr, rpc_state).await;
+            let _ = rpc_serve(rpc_addr, rpc_state, None).await;
         });
 
         // Start node event loop (spawn_local because Node contains !Send ThreadRng)

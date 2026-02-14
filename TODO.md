@@ -16,7 +16,7 @@
 
 ## Operations & Infrastructure
 
-- [ ] **RPC authentication** — add bearer token or mTLS support for non-localhost deployments
+- [x] **RPC authentication** — mTLS support for non-localhost deployments (server + client certificates, auto-detect, safety net)
 - [ ] **Monitoring & alerting** — Grafana dashboards, consensus stall alerts, disk usage tracking
 - [ ] **Log rotation / structured logging** — log management for long-running nodes
 - [ ] **Database evaluation** — benchmark sled at scale; evaluate RocksDB or similar if needed
