@@ -2,8 +2,6 @@
   <img src="assets/umbra-header.jpg" alt="Umbra" width="600" />
 </p>
 
-# Umbra
-
 A post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust.
 
 Umbra is designed from the ground up to be **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final** — with no trusted setup required.
