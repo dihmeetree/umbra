@@ -586,28 +586,41 @@ async fn get_metrics(
 
 // ── GET /fee-estimate (F4) ──
 
-#[derive(Serialize)]
-struct FeeEstimateResponse {
-    min_fee: u64,
-    median_fee: Option<u64>,
-    suggested_fee: u64,
-    mempool_size: usize,
-    percentiles: Option<[u64; 5]>,
+#[derive(Deserialize)]
+struct FeeEstimateQuery {
+    /// Number of inputs (default: 1)
+    #[serde(default = "default_one")]
+    inputs: usize,
+    /// Number of outputs (default: 1)
+    #[serde(default = "default_one")]
+    outputs: usize,
+    /// Total message bytes (default: 0)
+    #[serde(default)]
+    message_bytes: usize,
 }
 
-async fn get_fee_estimate(State(state): State<RpcState>) -> Json<FeeEstimateResponse> {
-    let node = state.node.read().await;
-    let percentiles = node.mempool.fee_percentiles();
-    let median_fee = percentiles.map(|p| p[2]);
-    let suggested_fee = median_fee
-        .map(|m| m.max(crate::constants::MIN_TX_FEE))
-        .unwrap_or(crate::constants::MIN_TX_FEE);
+fn default_one() -> usize {
+    1
+}
+
+#[derive(Serialize)]
+struct FeeEstimateResponse {
+    fee: u64,
+    base: u64,
+    per_input: u64,
+    per_output: u64,
+    per_message_kb: u64,
+}
+
+async fn get_fee_estimate(Query(params): Query<FeeEstimateQuery>) -> Json<FeeEstimateResponse> {
+    let fee =
+        crate::constants::compute_weight_fee(params.inputs, params.outputs, params.message_bytes);
     Json(FeeEstimateResponse {
-        min_fee: crate::constants::MIN_TX_FEE,
-        median_fee,
-        suggested_fee,
-        mempool_size: node.mempool.len(),
-        percentiles,
+        fee,
+        base: crate::constants::FEE_BASE,
+        per_input: crate::constants::FEE_PER_INPUT,
+        per_output: crate::constants::FEE_PER_OUTPUT,
+        per_message_kb: crate::constants::FEE_PER_MESSAGE_KB,
     })
 }
 
@@ -950,14 +963,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fee_estimate_empty_mempool() {
+    async fn fee_estimate_default_params() {
         let state = test_rpc_state();
         let app = router(state);
+        // Default: 1 input, 1 output, 0 message bytes → fee = 100+100+100 = 300
         let (status, json) = get_json(&app, "/fee-estimate").await;
         assert_eq!(status, HttpStatus::OK);
-        assert_eq!(json["min_fee"], 1);
-        assert_eq!(json["suggested_fee"], 1);
-        assert!(json["percentiles"].is_null());
+        assert_eq!(json["fee"], 300);
+        assert_eq!(json["base"], 100);
+        assert_eq!(json["per_input"], 100);
+        assert_eq!(json["per_output"], 100);
+        assert_eq!(json["per_message_kb"], 10);
+    }
+
+    #[tokio::test]
+    async fn fee_estimate_custom_params() {
+        let state = test_rpc_state();
+        let app = router(state);
+        // 2 inputs, 3 outputs, 2048 message bytes → fee = 100+200+300+20 = 620
+        let (status, json) =
+            get_json(&app, "/fee-estimate?inputs=2&outputs=3&message_bytes=2048").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["fee"], 620);
     }
 
     #[tokio::test]
@@ -1003,6 +1030,7 @@ mod tests {
 
         // Build a valid transaction
         let recipient = crate::crypto::keys::FullKeypair::generate();
+        // 1 input, 1 output, no messages → deterministic fee = 300
         let tx = crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: 1000,
@@ -1010,8 +1038,7 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 900)
-            .set_fee(100)
+            .add_output(recipient.kem.public.clone(), 700)
             .set_proof_options(winterfell::ProofOptions::new(
                 42,
                 8,
@@ -1067,9 +1094,13 @@ mod tests {
         )
     }
 
-    fn make_valid_tx(fee: u64, seed: u8) -> crate::transaction::Transaction {
+    /// Build a valid Transfer transaction with 1 input and 1 output.
+    /// Deterministic fee = 300 (FEE_BASE + 1*FEE_PER_INPUT + 1*FEE_PER_OUTPUT).
+    fn make_valid_tx(seed: u8) -> crate::transaction::Transaction {
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        let input_value = fee + 100;
+        // 1 input, 1 output, no messages → fee = 300
+        let output_value = 100u64;
+        let input_value = output_value + 300; // 400
         crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: input_value,
@@ -1077,8 +1108,7 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", &[seed]),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 100)
-            .set_fee(fee)
+            .add_output(recipient.kem.public.clone(), output_value)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap()
@@ -1155,7 +1185,7 @@ mod tests {
     async fn submit_tx_duplicate() {
         let state = test_rpc_state();
 
-        let tx = make_valid_tx(100, 200);
+        let tx = make_valid_tx(200);
         let tx_hex = hex::encode(crate::serialize(&tx).unwrap());
 
         // First submission should succeed

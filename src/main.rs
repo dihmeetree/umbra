@@ -10,7 +10,7 @@
 //!   umbra --demo                  # run protocol demo
 //!   umbra wallet init             # create a new wallet
 //!   umbra wallet balance           # scan chain + show balance
-//!   umbra wallet send --to <file> --amount N --fee N
+//!   umbra wallet send --to <file> --amount N
 //!   umbra wallet messages          # show received messages
 
 use clap::{Parser, Subcommand};
@@ -130,10 +130,6 @@ enum WalletAction {
         #[arg(long)]
         amount: u64,
 
-        /// Transaction fee (in base units).
-        #[arg(long)]
-        fee: u64,
-
         /// Optional message to encrypt for the recipient.
         #[arg(long)]
         message: Option<String>,
@@ -146,11 +142,7 @@ enum WalletAction {
     History,
 
     /// Consolidate all unspent outputs into one.
-    Consolidate {
-        /// Transaction fee (in base units).
-        #[arg(long)]
-        fee: u64,
-    },
+    Consolidate,
 
     /// Recover a wallet from a mnemonic phrase + backup file.
     Recover {
@@ -382,14 +374,11 @@ async fn run_wallet_command(
         WalletAction::Send {
             to,
             amount,
-            fee,
             message,
-        } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, fee, message, tls_ref).await,
+        } => wallet_cli::cmd_send(data_dir, rpc_addr, &to, amount, message, tls_ref).await,
         WalletAction::Messages => wallet_cli::cmd_messages(data_dir),
         WalletAction::History => wallet_cli::cmd_history(data_dir),
-        WalletAction::Consolidate { fee } => {
-            wallet_cli::cmd_consolidate(data_dir, rpc_addr, fee, tls_ref).await
-        }
+        WalletAction::Consolidate => wallet_cli::cmd_consolidate(data_dir, rpc_addr, tls_ref).await,
         WalletAction::Recover { phrase } => wallet_cli::cmd_recover(data_dir, &phrase),
         WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
         WalletAction::Web { host, port } => {

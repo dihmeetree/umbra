@@ -179,6 +179,20 @@ impl Transaction {
         )
     }
 
+    /// Compute the deterministic fee for this transaction based on its weight.
+    ///
+    /// For transfer transactions, the fee is fully determined by the number of
+    /// inputs, outputs, and total message ciphertext bytes. This is only
+    /// meaningful for `TxType::Transfer`; validator transactions use explicit fees.
+    pub fn compute_fee(&self) -> u64 {
+        let message_bytes: usize = self
+            .messages
+            .iter()
+            .map(|m| m.payload.ciphertext.len())
+            .sum();
+        crate::constants::compute_weight_fee(self.inputs.len(), self.outputs.len(), message_bytes)
+    }
+
     /// Validate transaction structure (not state-dependent checks).
     ///
     /// Verifies all zk-STARK proofs and checks consistency between proofs
@@ -215,11 +229,14 @@ impl Transaction {
         // Transaction-type-specific validation
         match &self.tx_type {
             TxType::Transfer => {
-                // Reject non-quantized fees to prevent fee-based fingerprinting.
-                // Only enforced for transfers; validator register/deregister fees
-                // encode bond amounts and are already distinguishable by tx type.
-                if self.fee != crate::transaction::builder::quantize_fee(self.fee) {
-                    return Err(TxValidationError::FeeNotQuantized);
+                // Deterministic weight-based fee: must exactly match the formula.
+                // This eliminates fee-based fingerprinting entirely.
+                let expected = self.compute_fee();
+                if self.fee != expected {
+                    return Err(TxValidationError::FeeNotDeterministic {
+                        expected,
+                        actual: self.fee,
+                    });
                 }
             }
             TxType::ValidatorRegister {
@@ -512,8 +529,8 @@ pub enum TxValidationError {
     FeeTooLow,
     #[error("fee exceeds maximum ({} allowed)", crate::constants::MAX_TX_FEE)]
     FeeTooHigh,
-    #[error("fee must be a standard quantized tier")]
-    FeeNotQuantized,
+    #[error("fee must be {expected} for this transaction shape (got {actual})")]
+    FeeNotDeterministic { expected: u64, actual: u64 },
     #[error("validator registration fee too low (bond + fee required)")]
     InsufficientBond,
     #[error("invalid validator signing key")]
@@ -545,6 +562,7 @@ mod tests {
     }
 
     fn make_test_tx() -> Transaction {
+        // 1 input, 1 output, no messages → deterministic fee = 100 + 100 + 100 = 300
         let recipient = FullKeypair::generate();
         TransactionBuilder::new()
             .add_input(InputSpec {
@@ -553,8 +571,7 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 900)
-            .set_fee(100)
+            .add_output(recipient.kem.public.clone(), 700)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap()
@@ -653,6 +670,9 @@ mod tests {
         let mut tx = make_test_tx();
         let dup = tx.inputs[0].clone();
         tx.inputs.push(dup);
+        // Update fee to match 2-input shape so the deterministic fee check passes
+        // and we reach the duplicate nullifier check.
+        tx.fee = crate::constants::compute_weight_fee(2, 1, 0);
         assert!(matches!(
             tx.validate_structure(0),
             Err(TxValidationError::DuplicateNullifier)
@@ -681,12 +701,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_non_quantized_fee() {
+    fn validate_rejects_wrong_fee() {
         let mut tx = make_test_tx();
-        tx.fee = 50; // not a standard fee tier
+        let expected = tx.compute_fee();
+        tx.fee = expected + 1; // wrong deterministic fee
         assert!(matches!(
             tx.validate_structure(0),
-            Err(TxValidationError::FeeNotQuantized)
+            Err(TxValidationError::FeeNotDeterministic { .. })
         ));
     }
 
@@ -854,16 +875,19 @@ mod tests {
         // TX must have valid proofs — which the builder provides.
         let recipient = FullKeypair::generate();
         let oversized_plaintext = vec![0xAA; crate::constants::MAX_MESSAGE_SIZE + 1];
+        // 1 input, 1 output, 1 message (65537 bytes plaintext):
+        // ciphertext after padding = ceil((4+65537)/64)*64 = 65600 bytes
+        // message_kb = ceil(65600/1024) = 65
+        // deterministic fee = 100 + 100 + 100 + 65*10 = 950
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1000,
+                value: 1950,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 900)
+            .add_output(recipient.kem.public.clone(), 1000)
             .add_message(recipient.kem.public.clone(), oversized_plaintext)
-            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -953,6 +977,7 @@ mod tests {
         // We set expiry_epoch=5 and rebuild the binding and proofs via
         // the builder so the TX is fully valid at the boundary.
         let recipient = FullKeypair::generate();
+        // 1 input, 1 output, no messages → deterministic fee = 100 + 100 + 100 = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 1000,
@@ -960,8 +985,7 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 900)
-            .set_fee(100)
+            .add_output(recipient.kem.public.clone(), 700)
             .set_expiry_epoch(5)
             .set_proof_options(test_proof_options())
             .build()
@@ -984,16 +1008,16 @@ mod tests {
     fn validate_rejects_duplicate_output_commitments() {
         // Build a transaction and manually duplicate an output commitment
         let recipient = FullKeypair::generate();
+        // 1 input, 2 outputs, no messages → deterministic fee = 100 + 100 + 200 = 400
         let mut tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1000,
+                value: 1300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(recipient.kem.public.clone(), 450)
             .add_output(recipient.kem.public.clone(), 450)
-            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();

@@ -133,7 +133,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **509 tests**.
+**~28,500 lines of Rust** across 43 source files with **511 tests**.
 
 ## Building
 
@@ -263,10 +263,10 @@ cargo run --release -- wallet init
 cargo run --release -- wallet balance
 
 # Send 1000 units to a recipient
-cargo run --release -- wallet send --to ./bob.umbra-address --amount 1000 --fee 10
+cargo run --release -- wallet send --to ./bob.umbra-address --amount 1000
 
 # Send with an encrypted message
-cargo run --release -- wallet send --to ./bob.umbra-address --amount 500 --fee 10 --message "Payment for services"
+cargo run --release -- wallet send --to ./bob.umbra-address --amount 500 --message "Payment for services"
 
 # View received messages
 cargo run --release -- wallet messages
@@ -275,7 +275,7 @@ cargo run --release -- wallet messages
 cargo run --release -- wallet history
 
 # Consolidate all UTXOs into one output
-cargo run --release -- wallet consolidate --fee 10
+cargo run --release -- wallet consolidate
 
 # Recover a wallet from backup (requires wallet.recovery file in data dir)
 cargo run --release -- wallet recover --phrase "abandon ability able about ..."
@@ -510,7 +510,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 509 tests cover:
+All 511 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -525,8 +525,8 @@ All 509 tests cover:
 - **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, equivocation evidence verification (valid, wrong epoch, non-committee, same vertex, bad signature) and serialization roundtrip, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state; create_vote standalone with signature verification, create_vote reject, is_vote_accepted tracking, leader_none_for_empty_committee, committee_member/vote without keypair, dynamic quorum values, validator activation epoch, inactive validators excluded from committee
 - **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses, snapshot sync messages (manifest, chunks), equivocation evidence; BFT vote/key exchange/auth response roundtrips, get_vertex/get_tips/get_transaction roundtrips, decode empty/short/truncated/corrupted buffer returns None, NatInfo/NatPunchRequest/NatPunchNotify serialization roundtrips
 - **NAT traversal** — external addr with no info returns None, manual addr has highest priority, UPnP overrides observed, observed quorum required (3 peers), minority IP ignored, same peer not double-counted, record_observed returns true on quorum change, is_reachable reflects external addr
-- **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, non-quantized fee, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
-- **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement, fee quantization (tier rounding, above-max, overflow safety)
+- **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, wrong deterministic fee, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
+- **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement, deterministic fee auto-computation
 - **STARK formal verification** — 44 adversarial tests proving AIR constraint soundness: 5 positive baselines (all 154 balance + 52 spend constraints zero on honest traces, boundary assertions match), 3 inflation resistance (output value increase, commitment forgery, field wraparound), 4 range proof attacks (non-boolean bits, wrong reconstruction, 2^59 overflow, mid-block bit change), 2 commitment binding (wrong value/blinding), 2 proof_link integrity (wrong digest/nonce), 2 digest chaining (broken chain, wrong chain_flag), 2 fee integrity (wrong final fee, nonzero initial), 2 vanishing constraint safety (confirms C25/C87 vanish at padding is safe, nonzero block_value caught by C26), 2 padding safety (nonzero value/state[4]), 2 balance equation (multi-IO corruption, off-by-one fee), 1 tx_content_hash Fiat-Shamir binding (full prove+verify), 2 nullifier binding (wrong spend_auth/commitment), 5 Merkle attacks (wrong sibling/root, bit flip, non-boolean bit, level skip), 2 proof_link consistency (wrong commitment register/nonce), 1 register invariance (mid-trace mutation), 4 domain separation (wrong nullifier/proof_link/merge domain, chained merge domain via constraint 32), 2 cross-proof (proof_link mismatch, proof transplant rejection)
 - **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found, not-found, invalid hex, wrong length), /vertices/finalized, /peers; POST /tx (valid submission, invalid hex, valid hex with invalid bincode, duplicate submission, oversized payload); full submit-and-retrieve roundtrip
 - **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt, nonce uniqueness; UTXO consolidation (success path with history, fee exceeds total); pending output expiry (basic, not-yet-expired, exact boundary epoch); insufficient funds and arithmetic overflow; saturating balance addition; history cap enforcement; coinbase output scanning
@@ -591,7 +591,7 @@ Umbra uses a UTXO model with full zero-knowledge privacy:
 Transaction {
     inputs:        [Nullifier + ProofLink + SpendStarkProof]
     outputs:       [Commitment + StealthAddress + EncryptedNote]
-    fee:           u64 (public)
+    fee:           u64 (public, deterministic for transfers)
     chain_id:      Hash (replay protection across networks)
     expiry_epoch:  u64 (transaction expiration)
     balance_proof: BalanceStarkProof
@@ -669,6 +669,10 @@ Proves in zero knowledge:
 | `RANGE_BITS` | 59 | Bit width for value range proofs |
 | `MAX_TX_IO` | 16 | Max inputs or outputs per transaction (range-proof safe) |
 | `MIN_TX_FEE` | 1 | Minimum transaction fee (prevents zero-fee spam) |
+| `FEE_BASE` | 100 | Base component of deterministic fee formula |
+| `FEE_PER_INPUT` | 100 | Per-input component of deterministic fee formula |
+| `FEE_PER_OUTPUT` | 100 | Per-output component of deterministic fee formula |
+| `FEE_PER_MESSAGE_KB` | 10 | Per-KB message component of deterministic fee formula |
 | `INITIAL_BLOCK_REWARD` | 50,000 | Coinbase reward per vertex (halves over time) |
 | `HALVING_INTERVAL_EPOCHS` | 500 | Epochs between each reward halving |
 | `MAX_HALVINGS` | 63 | Halvings before reward reaches zero |
@@ -794,7 +798,7 @@ All transaction validity is verified via zk-STARKs:
 - **Domain-separated hashing** — all critical hashes (`tx_id`, `vertex_id`, stealth key derivation, content hash) use BLAKE3 `new_derive_key` for proper cryptographic domain separation
 - **Rescue sponge domain separation** — all four Rescue Prime hash functions use distinct nonzero domain tags in the sponge capacity: `commitment` (`"commit"`), `nullifier` (`"null"`), `proof_link` (`"link"`), and `merge` (`"merge"`). This prevents cross-function collisions regardless of rate inputs, enforced in the STARK AIR via boundary assertions and transition constraints
 - **Chain ID enforcement** — `apply_transaction()` explicitly checks `chain_id` against the chain state, providing defense-in-depth beyond the implicit binding via balance proofs
-- **Minimum transaction fee** — `validate_structure()` enforces `MIN_TX_FEE`, preventing zero-fee spam; coinbase funding bypasses validation by adding outputs directly to state
+- **Minimum transaction fee** — `validate_structure()` enforces `MIN_TX_FEE`, preventing zero-fee spam; transfer fees are deterministic from transaction shape (see above); coinbase funding bypasses validation by adding outputs directly to state
 - **MAC boundary protection** — the encrypt-then-MAC construction length-prefixes each variable-length field (ciphertext, KEM ciphertext) before computing the MAC, preventing boundary-ambiguity attacks
 - **Equivocation detection** — BFT tracks `(voter_id, round) → vertex_id` and records `EquivocationEvidence` when a validator votes for conflicting vertices in the same round
 - **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` and automatic expiry after `PENDING_EXPIRY_EPOCHS` to prevent double-spend of outputs in unconfirmed transactions and recover stuck funds
@@ -860,7 +864,7 @@ All transaction validity is verified via zk-STARKs:
 - **P2P frame padding** — encrypted P2P frames are padded to 1024-byte bucket boundaries, preventing traffic analysis from distinguishing message types by size
 - **Dandelion++ timing jitter** — stem-phase forwarding adds exponentially-distributed random delays before relaying to the next hop, preventing timing decomposition attacks for sender deanonymization
 - **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation work on KEM decapsulation failure, equalizing timing with the success path
-- **Fee quantization** — transfer transaction fees are enforced to match standard quantized tiers at the node validation level, preventing fee-based fingerprinting where distinctive fee preferences become a persistent tracking signal
+- **Deterministic weight-based fees** — transfer fees are computed deterministically from transaction shape (`fee = FEE_BASE + inputs * FEE_PER_INPUT + outputs * FEE_PER_OUTPUT + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB`), eliminating fee-based fingerprinting entirely since every transaction of the same shape pays the exact same fee with no user choice involved
 - **RPC rate limiting** — commitment-proof queries are rate-limited per IP (60 requests per 60-second window) to prevent Merkle tree enumeration attacks that could map wallet activity to commitment indices
 - **Peer address redaction** — peer discovery responses and RPC endpoints strip IP addresses, preventing validator deanonymization via address correlation
 - **NatInfo privacy** — NatInfo messages send empty observed addresses, preventing peers from learning their own externally-visible IP through the P2P layer
@@ -888,7 +892,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 509 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, and formal verification of all 206 AIR constraints; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 511 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, and formal verification of all 206 AIR constraints; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

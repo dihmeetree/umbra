@@ -194,6 +194,17 @@ pub mod constants {
     /// through transaction validation.
     pub const MIN_TX_FEE: u64 = 1;
 
+    // ── Deterministic weight-based fee constants ──
+
+    /// Base fee per transaction (covers balance proof verification overhead).
+    pub const FEE_BASE: u64 = 100;
+    /// Fee per input (covers spend proof verification, nullifier processing).
+    pub const FEE_PER_INPUT: u64 = 100;
+    /// Fee per output (covers commitment tree insertion, stealth address processing).
+    pub const FEE_PER_OUTPUT: u64 = 100;
+    /// Fee per 1024 bytes of message ciphertext (covers storage and relay).
+    pub const FEE_PER_MESSAGE_KB: u64 = 10;
+
     /// Maximum transaction fee in base units.
     ///
     /// Prevents fee-based overflow/saturation attacks on epoch fee accumulators.
@@ -230,6 +241,21 @@ pub mod constants {
         let n = active_count as u64;
         VALIDATOR_BASE_BOND
             .saturating_add(VALIDATOR_BASE_BOND.saturating_mul(n) / BOND_SCALING_FACTOR)
+    }
+
+    /// Compute the deterministic fee from transaction shape.
+    ///
+    /// Every transfer transaction of the same shape (input count, output count,
+    /// message sizes) pays the exact same fee. This eliminates fee-based
+    /// fingerprinting entirely.
+    ///
+    /// `message_bytes` is the total ciphertext byte length across all messages.
+    pub fn compute_weight_fee(num_inputs: usize, num_outputs: usize, message_bytes: usize) -> u64 {
+        let message_kb = message_bytes.div_ceil(1024) as u64;
+        FEE_BASE
+            + (num_inputs as u64) * FEE_PER_INPUT
+            + (num_outputs as u64) * FEE_PER_OUTPUT
+            + message_kb * FEE_PER_MESSAGE_KB
     }
 
     /// Compute the chain ID for mainnet.
@@ -413,5 +439,35 @@ mod tests {
         assert!(bond > constants::VALIDATOR_BASE_BOND);
         // u64::MAX / 100 + BASE_BOND
         assert!(bond > u64::MAX / 200);
+    }
+
+    #[test]
+    fn compute_weight_fee_basic() {
+        // 1 input, 1 output, no messages: 100 + 100 + 100 = 300
+        assert_eq!(constants::compute_weight_fee(1, 1, 0), 300);
+        // 2 inputs, 1 output: 100 + 200 + 100 = 400
+        assert_eq!(constants::compute_weight_fee(2, 1, 0), 400);
+        // 1 input, 2 outputs: 100 + 100 + 200 = 400
+        assert_eq!(constants::compute_weight_fee(1, 2, 0), 400);
+    }
+
+    #[test]
+    fn compute_weight_fee_message_rounding() {
+        // 1 byte of message rounds up to 1 KB
+        assert_eq!(constants::compute_weight_fee(1, 1, 1), 310);
+        // 1024 bytes = exactly 1 KB
+        assert_eq!(constants::compute_weight_fee(1, 1, 1024), 310);
+        // 1025 bytes rounds up to 2 KB
+        assert_eq!(constants::compute_weight_fee(1, 1, 1025), 320);
+    }
+
+    #[test]
+    fn compute_weight_fee_max_tx() {
+        // 16 inputs, 16 outputs, 16 * 64 KiB messages
+        let max_msg_bytes = 16 * 65_536;
+        let fee = constants::compute_weight_fee(16, 16, max_msg_bytes);
+        // 100 + 16*100 + 16*100 + ceil(1048576/1024)*10 = 100 + 1600 + 1600 + 10240 = 13540
+        assert_eq!(fee, 13_540);
+        assert!(fee <= constants::MAX_TX_FEE);
     }
 }

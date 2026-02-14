@@ -1267,12 +1267,18 @@ mod tests {
 
     /// Build a valid transfer transaction that spends a commitment already in the state.
     /// The commitment is added to the state before building the tx, so the merkle root matches.
-    fn build_valid_tx_for_state(
-        state: &mut ChainState,
-        value: u64,
-        fee: u64,
-        seed: u8,
-    ) -> Transaction {
+    ///
+    /// The fee is auto-computed by the builder (1 input, 1 output, no messages = 300).
+    /// `value` must be greater than 300 so there is a positive output amount.
+    fn build_valid_tx_for_state(state: &mut ChainState, value: u64, seed: u8) -> Transaction {
+        // Deterministic fee for 1 input, 1 output, no messages = 300
+        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        assert!(
+            value > det_fee,
+            "input value must exceed deterministic fee ({})",
+            det_fee
+        );
+
         let blinding = BlindingFactor::from_bytes([seed; 32]);
         let spend_auth = crate::hash_domain(b"test.spend_auth", &[seed]);
         let commitment = Commitment::commit(value, &blinding);
@@ -1290,8 +1296,7 @@ mod tests {
                 spend_auth,
                 merkle_path,
             })
-            .add_output(recipient.kem.public.clone(), value - fee)
-            .set_fee(fee)
+            .add_output(recipient.kem.public.clone(), value - det_fee)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap()
@@ -1724,8 +1729,9 @@ mod tests {
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Build a valid transaction against the current state
-        let fee = 100;
-        let tx = build_valid_tx_for_state(&mut state, 1000, fee, 1);
+        // Deterministic fee for 1 input, 1 output, no messages = 300
+        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        let tx = build_valid_tx_for_state(&mut state, 1000, 1);
         let tx_nullifier = tx.inputs[0].nullifier;
         let tx_output_commitment = tx.outputs[0].commitment;
 
@@ -1750,7 +1756,7 @@ mod tests {
         assert!(state.is_spent(&tx_nullifier));
 
         // Verify fees accumulated
-        assert_eq!(state.epoch_fees(), fees_before + fee);
+        assert_eq!(state.epoch_fees(), fees_before + det_fee);
 
         // Verify last_finalized updated
         assert_eq!(state.last_finalized(), Some(&vertex_id));
@@ -1817,17 +1823,16 @@ mod tests {
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
-        // Build and apply first vertex with fee=100
-        let fee1 = 100;
-        let tx1 = build_valid_tx_for_state(&mut state, 500, fee1, 10);
+        // Build and apply first vertex (deterministic fee for 1-in/1-out = 300)
+        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        let tx1 = build_valid_tx_for_state(&mut state, 500, 10);
         let v1 = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx1]);
         state.apply_vertex(&v1).unwrap();
         let fees_after_v1 = state.epoch_fees();
-        assert_eq!(fees_after_v1, fee1);
+        assert_eq!(fees_after_v1, det_fee);
 
-        // Build and apply second vertex with fee=1000 in the same epoch
-        let fee2 = 1_000;
-        let tx2 = build_valid_tx_for_state(&mut state, 2000, fee2, 20);
+        // Build and apply second vertex in the same epoch (same deterministic fee)
+        let tx2 = build_valid_tx_for_state(&mut state, 2000, 20);
         let v2 = make_test_vertex(vec![genesis_id], 2, 0, &val_signing.public, vec![tx2]);
         state.apply_vertex(&v2).unwrap();
         let fees_after_v2 = state.epoch_fees();
@@ -1835,9 +1840,9 @@ mod tests {
         // Regression: fees must accumulate, not reset per vertex
         assert_eq!(
             fees_after_v2,
-            fee1 + fee2,
+            det_fee * 2,
             "epoch_fees should accumulate across vertices: expected {}, got {}",
-            fee1 + fee2,
+            det_fee * 2,
             fees_after_v2
         );
     }
@@ -1847,17 +1852,18 @@ mod tests {
         let state = ChainState::new();
 
         // Build a valid transaction but with a wrong chain_id
+        // Deterministic fee for 1 input, 1 output = 300
+        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
         let recipient = FullKeypair::generate();
         let wrong_chain_id = crate::hash_domain(b"wrong.chain", b"not-umbra");
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 200,
+                value: det_fee + 100,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(recipient.kem.public.clone(), 100)
-            .set_fee(100)
             .set_chain_id(wrong_chain_id)
             .set_proof_options(test_proof_options())
             .build()
@@ -1876,7 +1882,7 @@ mod tests {
         let mut state = ChainState::new();
 
         // Build a valid transaction against the state
-        let tx = build_valid_tx_for_state(&mut state, 300, 100, 50);
+        let tx = build_valid_tx_for_state(&mut state, 400, 50);
         let nullifier = tx.inputs[0].nullifier;
 
         // First validation + application should succeed

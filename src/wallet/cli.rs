@@ -254,12 +254,13 @@ pub async fn cmd_scan(
 }
 
 /// Send a transaction.
+///
+/// The fee is computed deterministically from the transaction shape.
 pub async fn cmd_send(
     data_dir: &Path,
     rpc_addr: SocketAddr,
     to_file: &Path,
     amount: u64,
-    fee: u64,
     message: Option<String>,
     wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -279,9 +280,10 @@ pub async fn cmd_send(
     let recipient: PublicAddress =
         crate::deserialize(&addr_bytes).map_err(|e| format!("invalid address: {}", e))?;
 
-    // Build transaction
+    // Build transaction (fee is auto-computed)
     let msg_bytes = message.map(|m| m.into_bytes());
-    let tx = wallet.build_transaction(&recipient.kem, amount, fee, msg_bytes)?;
+    let tx = wallet.build_transaction(&recipient.kem, amount, msg_bytes)?;
+    let fee = tx.fee;
     let tx_id = tx.tx_id();
 
     // Submit to node
@@ -297,7 +299,7 @@ pub async fn cmd_send(
     println!("Transaction submitted!");
     println!("TX ID: {}", result.tx_id);
     println!("Amount: {} units", amount);
-    println!("Fee: {} units", fee);
+    println!("Fee: {} units (deterministic)", fee);
     println!(
         "Remaining balance: {} units (pending outputs excluded)",
         wallet.balance()
@@ -361,10 +363,11 @@ pub fn cmd_history(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Consolidate all unspent outputs into a single output.
+///
+/// The fee is computed deterministically from the transaction shape.
 pub async fn cmd_consolidate(
     data_dir: &Path,
     rpc_addr: SocketAddr,
-    fee: u64,
     wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
@@ -383,7 +386,8 @@ pub async fn cmd_consolidate(
     }
 
     println!("Consolidating {} unspent outputs...", unspent_count);
-    let tx = wallet.build_consolidation_tx(fee, None)?;
+    let tx = wallet.build_consolidation_tx(None)?;
+    let fee = tx.fee;
     let tx_id = tx.tx_id();
 
     // Submit
@@ -396,7 +400,7 @@ pub async fn cmd_consolidate(
 
     println!("Consolidation submitted!");
     println!("TX ID: {}", result.tx_id);
-    println!("Fee: {} units", fee);
+    println!("Fee: {} units (deterministic)", fee);
     println!("Remaining balance: {} units", wallet.balance());
     let _ = tx_id;
     Ok(())

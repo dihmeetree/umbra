@@ -263,54 +263,87 @@ impl Wallet {
     }
 
     /// Build a transaction sending `amount` to a recipient, with optional message.
+    ///
+    /// The fee is computed deterministically from the transaction shape.
     pub fn build_transaction(
         &mut self,
         recipient_kem_pk: &crate::crypto::keys::KemPublicKey,
         amount: u64,
-        fee: u64,
         message: Option<Vec<u8>>,
     ) -> Result<Transaction, WalletError> {
-        self.build_transaction_with_state(recipient_kem_pk, amount, fee, message, None)
+        self.build_transaction_with_state(recipient_kem_pk, amount, message, None)
     }
 
     /// Build a transaction with access to chain state for Merkle path resolution.
+    ///
+    /// The fee is computed deterministically from the transaction shape.
+    /// Uses iterative UTXO selection: estimates the fee from expected input/output
+    /// counts, selects UTXOs, then re-estimates until stable.
     pub fn build_transaction_with_state(
         &mut self,
         recipient_kem_pk: &crate::crypto::keys::KemPublicKey,
         amount: u64,
-        fee: u64,
         message: Option<Vec<u8>>,
         state: Option<&crate::state::ChainState>,
     ) -> Result<Transaction, WalletError> {
-        // Quantize fee to standard tiers to prevent fee-based fingerprinting
-        let fee = crate::transaction::builder::quantize_fee(fee);
+        // Estimate message ciphertext size (Kyber1024 ciphertext ~1568 + nonce 24 + mac 32 + padded plaintext)
+        let msg_bytes_estimate: usize = message.as_ref().map(|m| m.len() + 1700).unwrap_or(0);
+
+        // Iterative UTXO selection: fee depends on input count, input count depends on fee
+        let mut num_inputs = 1usize;
+        let mut num_outputs = 2usize; // payment + change (conservative estimate)
+        let selected;
+        let selected_total;
+        let fee;
+        loop {
+            let estimated_fee =
+                crate::constants::compute_weight_fee(num_inputs, num_outputs, msg_bytes_estimate);
+            let total_needed = amount
+                .checked_add(estimated_fee)
+                .ok_or(WalletError::ArithmeticOverflow)?;
+
+            // Select outputs to spend (simple greedy, only fully unspent)
+            let mut sel: Vec<usize> = Vec::new();
+            let mut sel_total = 0u64;
+
+            for (i, output) in self.outputs.iter().enumerate() {
+                if output.status != SpendStatus::Unspent {
+                    continue;
+                }
+                sel.push(i);
+                sel_total = sel_total
+                    .checked_add(output.value)
+                    .ok_or(WalletError::ArithmeticOverflow)?;
+                if sel_total >= total_needed {
+                    break;
+                }
+            }
+
+            if sel_total < total_needed {
+                return Err(WalletError::InsufficientFunds {
+                    available: sel_total,
+                    needed: total_needed,
+                });
+            }
+
+            let actual_outputs = if sel_total == total_needed { 1 } else { 2 };
+            let actual_fee =
+                crate::constants::compute_weight_fee(sel.len(), actual_outputs, msg_bytes_estimate);
+
+            if sel.len() == num_inputs && actual_outputs == num_outputs {
+                // Converged
+                selected = sel;
+                selected_total = sel_total;
+                fee = actual_fee;
+                break;
+            }
+            num_inputs = sel.len();
+            num_outputs = actual_outputs;
+        }
+
         let total_needed = amount
             .checked_add(fee)
             .ok_or(WalletError::ArithmeticOverflow)?;
-
-        // Select outputs to spend (simple greedy, only fully unspent)
-        let mut selected: Vec<usize> = Vec::new();
-        let mut selected_total = 0u64;
-
-        for (i, output) in self.outputs.iter().enumerate() {
-            if output.status != SpendStatus::Unspent {
-                continue;
-            }
-            selected.push(i);
-            selected_total = selected_total
-                .checked_add(output.value)
-                .ok_or(WalletError::ArithmeticOverflow)?;
-            if selected_total >= total_needed {
-                break;
-            }
-        }
-
-        if selected_total < total_needed {
-            return Err(WalletError::InsufficientFunds {
-                available: selected_total,
-                needed: total_needed,
-            });
-        }
 
         // Build inputs with Merkle paths from state
         let mut builder = TransactionBuilder::new();
@@ -343,13 +376,9 @@ impl Wallet {
             builder = builder.add_message(recipient_kem_pk.clone(), msg_data);
         }
 
-        builder = builder.set_fee(fee);
-
         let tx = builder.build().map_err(WalletError::Build)?;
 
         // Mark outputs as pending (not fully spent until confirmed on-chain).
-        // Use `confirm_transaction` after the tx is finalized, or
-        // `cancel_transaction` if it fails to be included.
         let tx_binding = tx.tx_binding;
         for &idx in &selected {
             self.outputs[idx].status = SpendStatus::Pending {
@@ -363,7 +392,7 @@ impl Wallet {
             tx_id: tx.tx_id().0,
             direction: TxDirection::Send,
             amount,
-            fee,
+            fee: tx.fee,
             epoch: 0, // caller can update epoch if known
         });
 
@@ -467,9 +496,9 @@ impl Wallet {
     /// Build a consolidation transaction that merges all unspent outputs into one.
     ///
     /// Sends all unspent value (minus fee) back to ourselves in a single output.
+    /// The fee is computed deterministically from the transaction shape.
     pub fn build_consolidation_tx(
         &mut self,
-        fee: u64,
         state: Option<&crate::state::ChainState>,
     ) -> Result<Transaction, WalletError> {
         let unspent: Vec<usize> = self
@@ -489,6 +518,9 @@ impl Wallet {
             .map(|&i| self.outputs[i].value)
             .try_fold(0u64, |acc, v| acc.checked_add(v))
             .ok_or(WalletError::ArithmeticOverflow)?;
+
+        // Deterministic fee for N-input, 1-output, no-message consolidation
+        let fee = crate::constants::compute_weight_fee(unspent.len(), 1, 0);
 
         if total <= fee {
             return Err(WalletError::InsufficientFunds {
@@ -516,7 +548,6 @@ impl Wallet {
         // Single output back to ourselves
         let consolidated_amount = total - fee;
         builder = builder.add_output(self.keypair.kem.public.clone(), consolidated_amount);
-        builder = builder.set_fee(fee);
 
         let tx = builder.build().map_err(WalletError::Build)?;
 
@@ -1118,15 +1149,15 @@ mod tests {
         let mut receiver_wallet = Wallet::new();
 
         // Build a transaction paying the receiver
+        // 1 input, 1 output, no messages → fee = 100+100+100 = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1000,
+                value: 1200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(receiver_wallet.kem_public_key().clone(), 900)
-            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1141,9 +1172,11 @@ mod tests {
     fn wallet_scan_message() {
         let mut receiver_wallet = Wallet::new();
 
+        // 1 input, 1 output, 1 message (26 bytes → padded to 64 → ceil(64/1024)=1 KB)
+        // fee = 100 + 100 + 100 + 1*10 = 310
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 100,
+                value: 400,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1153,7 +1186,6 @@ mod tests {
                 receiver_wallet.kem_public_key().clone(),
                 b"secret message from sender".to_vec(),
             )
-            .set_fee(10)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1172,15 +1204,15 @@ mod tests {
         let recipient = FullKeypair::generate();
         let mut bystander = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 100,
+                value: 390,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(recipient.kem.public.clone(), 90)
-            .set_fee(10)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1194,16 +1226,15 @@ mod tests {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
 
-        // Give Alice some funds (coinbase — bypasses min-fee via direct build)
+        // Give Alice some funds — 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10001,
+                value: 10300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(alice.kem_public_key().clone(), 10000)
-            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1211,12 +1242,12 @@ mod tests {
         alice.scan_transaction(&funding_tx);
         assert_eq!(alice.balance(), 10000);
 
-        // Alice sends 3000 to Bob with fee 100
+        // Alice sends 3000 to Bob (fee is deterministic: 100 + 100 + 200 = 400)
         let tx = alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
 
-        assert_eq!(tx.fee, 100);
+        assert_eq!(tx.fee, 400); // FEE_BASE + 1*INPUT + 2*OUTPUT
         assert_eq!(tx.outputs.len(), 2); // Payment + change
         assert_eq!(alice.balance(), 0); // All outputs now pending
 
@@ -1225,7 +1256,7 @@ mod tests {
 
         // Alice scans her own transaction to pick up change
         alice.scan_transaction(&tx);
-        assert_eq!(alice.balance(), 6900); // 10000 - 3000 - 100
+        assert_eq!(alice.balance(), 6600); // 10000 - 3000 - 400
     }
 
     #[test]
@@ -1233,16 +1264,17 @@ mod tests {
         let mut wallet = Wallet::new();
 
         // Give wallet some funds
+        // 1 input, 1 output, 1 message (12 bytes → padded to 64 → ceil(64/1024)=1 KB)
+        // fee = 100 + 100 + 100 + 1*10 = 310
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 5000,
+                value: 4310,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(wallet.kem_public_key().clone(), 4000)
             .add_message(wallet.kem_public_key().clone(), b"test message".to_vec())
-            .set_fee(1000)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1273,15 +1305,15 @@ mod tests {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10001,
+                value: 10300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(alice.kem_public_key().clone(), 10000)
-            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1290,7 +1322,7 @@ mod tests {
         assert_eq!(alice.balance(), 10000);
 
         let tx = alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
 
         // Pending — balance is 0
@@ -1304,7 +1336,7 @@ mod tests {
 
         // Scan to pick up change
         alice.scan_transaction(&tx);
-        assert_eq!(alice.balance(), 6900);
+        assert_eq!(alice.balance(), 6600); // 10000 - 3000 - 400
     }
 
     #[test]
@@ -1320,15 +1352,15 @@ mod tests {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 5001,
+                value: 5300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(alice.kem_public_key().clone(), 5000)
-            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1338,7 +1370,7 @@ mod tests {
 
         // Build tx puts outputs in Pending
         let _tx = alice
-            .build_transaction(bob.kem_public_key(), 1000, 100, None)
+            .build_transaction(bob.kem_public_key(), 1000, None)
             .unwrap();
 
         // Pending outputs excluded from balance
@@ -1351,15 +1383,15 @@ mod tests {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10001,
+                value: 10300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(alice.kem_public_key().clone(), 10000)
-            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1369,7 +1401,7 @@ mod tests {
 
         // Build a transaction — outputs become pending
         let tx = alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
         assert_eq!(alice.balance(), 0); // All pending
 
@@ -1382,15 +1414,15 @@ mod tests {
     fn scan_records_receive_history() {
         let mut wallet = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1000,
+                value: 1200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(wallet.kem_public_key().clone(), 900)
-            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1406,22 +1438,22 @@ mod tests {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10001,
+                value: 10300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(alice.kem_public_key().clone(), 10000)
-            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
 
         alice.scan_transaction(&funding_tx);
         alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
 
         // Should have receive + send
@@ -1429,22 +1461,22 @@ mod tests {
         assert_eq!(alice.history()[0].direction, TxDirection::Receive);
         assert_eq!(alice.history()[1].direction, TxDirection::Send);
         assert_eq!(alice.history()[1].amount, 3000);
-        assert_eq!(alice.history()[1].fee, 100);
+        assert_eq!(alice.history()[1].fee, 400); // deterministic: 100 + 100 + 200
     }
 
     #[test]
     fn history_persists_in_wallet_file() {
         let mut wallet = Wallet::new();
 
+        // 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1000,
+                value: 1200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(wallet.kem_public_key().clone(), 900)
-            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1537,16 +1569,15 @@ mod tests {
     fn consolidation_needs_two_outputs() {
         let mut wallet = Wallet::new();
 
-        // Give wallet one output
+        // Give wallet one output — 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1000,
+                value: 1200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(wallet.kem_public_key().clone(), 900)
-            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1554,23 +1585,23 @@ mod tests {
         wallet.scan_transaction(&tx);
         assert_eq!(wallet.unspent_outputs().len(), 1);
 
-        let result = wallet.build_consolidation_tx(10, None);
+        let result = wallet.build_consolidation_tx(None);
         assert!(matches!(result, Err(WalletError::NothingToConsolidate)));
     }
 
-    /// Helper: create a wallet and fund it via a coinbase-style transaction with a given amount.
-    /// Returns (wallet, funding_tx).
+    /// Helper: create a wallet and fund it via a transaction with a given amount.
+    /// 1 input, 1 output, no messages → deterministic fee = 300.
     fn funded_wallet(amount: u64) -> Wallet {
         let mut wallet = Wallet::new();
+        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: amount + 1,
+                value: amount + 300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
             .add_output(wallet.kem_public_key().clone(), amount)
-            .set_fee(1)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1586,7 +1617,7 @@ mod tests {
 
         // Build a transaction, marking the output as Pending with created_epoch=0
         let _tx = alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
         assert_eq!(alice.balance(), 0);
 
@@ -1613,7 +1644,7 @@ mod tests {
         let bob = Wallet::new();
 
         let _tx = alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
         assert_eq!(alice.balance(), 0);
 
@@ -1640,7 +1671,7 @@ mod tests {
         let bob = Wallet::new();
 
         let _tx = alice
-            .build_transaction(bob.kem_public_key(), 3000, 100, None)
+            .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
 
         // Set created_epoch=5, max_age=10 => threshold is created_epoch + max_age = 15
@@ -1670,13 +1701,14 @@ mod tests {
         let mut alice = funded_wallet(5000);
         let bob = Wallet::new();
 
-        // Try to spend more than the balance
-        let result = alice.build_transaction(bob.kem_public_key(), 5000, 100, None);
+        // Try to spend more than the balance (amount + deterministic fee > balance)
+        // Fee for 1 input, 2 outputs = 100 + 100 + 200 = 400
+        let result = alice.build_transaction(bob.kem_public_key(), 5000, None);
         assert!(matches!(
             result,
             Err(WalletError::InsufficientFunds {
                 available: 5000,
-                needed: 5100
+                needed: 5400
             })
         ));
     }
@@ -1686,8 +1718,8 @@ mod tests {
         let mut alice = funded_wallet(5000);
         let bob = Wallet::new();
 
-        // amount + fee overflows u64
-        let result = alice.build_transaction(bob.kem_public_key(), u64::MAX, 1, None);
+        // amount + deterministic fee overflows u64
+        let result = alice.build_transaction(bob.kem_public_key(), u64::MAX, None);
         assert!(matches!(result, Err(WalletError::ArithmeticOverflow)));
     }
 
@@ -1727,17 +1759,16 @@ mod tests {
     fn build_consolidation_tx_success() {
         let mut wallet = Wallet::new();
 
-        // Fund wallet with 3 separate outputs
+        // Fund wallet with 3 separate outputs — each: 1 input, 1 output, no messages → fee = 300
         for i in 0..3 {
             let funding_tx = TransactionBuilder::new()
                 .add_input(InputSpec {
-                    value: 1001,
+                    value: 1300,
                     blinding: BlindingFactor::from_bytes([i + 10; 32]),
                     spend_auth: crate::hash_domain(b"test", &[i]),
                     merkle_path: vec![],
                 })
                 .add_output(wallet.kem_public_key().clone(), 1000)
-                .set_fee(1)
                 .set_proof_options(test_proof_options())
                 .build()
                 .unwrap();
@@ -1749,9 +1780,10 @@ mod tests {
 
         let history_before = wallet.history().len(); // 3 receives
 
-        // Consolidate with fee=10
-        let tx = wallet.build_consolidation_tx(10, None).unwrap();
-        assert_eq!(tx.fee, 10);
+        // Consolidate (fee is deterministic: 100 + 3*100 + 1*100 = 500)
+        let tx = wallet.build_consolidation_tx(None).unwrap();
+        let expected_fee = crate::constants::compute_weight_fee(3, 1, 0);
+        assert_eq!(tx.fee, expected_fee);
         // One output (consolidated amount back to self)
         assert_eq!(tx.outputs.len(), 1);
 
@@ -1770,25 +1802,27 @@ mod tests {
         assert_eq!(wallet.history().len(), history_before + 1);
         let last_entry = wallet.history().last().unwrap();
         assert_eq!(last_entry.direction, TxDirection::Send);
-        assert_eq!(last_entry.amount, 2990); // 3000 - 10 fee
-        assert_eq!(last_entry.fee, 10);
+        assert_eq!(last_entry.amount, 3000 - expected_fee);
+        assert_eq!(last_entry.fee, expected_fee);
     }
 
     #[test]
     fn build_consolidation_tx_fee_exceeds_total() {
         let mut wallet = Wallet::new();
 
-        // Fund wallet with 2 small outputs
+        // Fund wallet with 2 small outputs (total 200)
+        // Deterministic fee for 2 inputs, 1 output = 100 + 200 + 100 = 400
+        // Since 200 <= 400, consolidation should fail with InsufficientFunds
+        // Each funding: 1 input, 1 output, no messages → fee = 300
         for i in 0..2 {
             let funding_tx = TransactionBuilder::new()
                 .add_input(InputSpec {
-                    value: 101,
+                    value: 400,
                     blinding: BlindingFactor::from_bytes([i + 20; 32]),
                     spend_auth: crate::hash_domain(b"test", &[i + 20]),
                     merkle_path: vec![],
                 })
                 .add_output(wallet.kem_public_key().clone(), 100)
-                .set_fee(1)
                 .set_proof_options(test_proof_options())
                 .build()
                 .unwrap();
@@ -1798,19 +1832,17 @@ mod tests {
         assert_eq!(wallet.balance(), 200);
         assert_eq!(wallet.unspent_outputs().len(), 2);
 
-        // Try to consolidate with fee that exceeds total (total <= fee)
-        let result = wallet.build_consolidation_tx(200, None);
+        // Deterministic fee (400) exceeds total (200)
+        let expected_fee = crate::constants::compute_weight_fee(2, 1, 0);
+        let result = wallet.build_consolidation_tx(None);
         assert!(matches!(
             result,
-            Err(WalletError::InsufficientFunds {
-                available: 200,
-                needed: 200,
-            })
+            Err(WalletError::InsufficientFunds { available: 200, .. })
         ));
-
-        // Also try with fee > total
-        let result = wallet.build_consolidation_tx(300, None);
-        assert!(matches!(result, Err(WalletError::InsufficientFunds { .. })));
+        // The needed amount should be the deterministic fee
+        if let Err(WalletError::InsufficientFunds { needed, .. }) = result {
+            assert_eq!(needed, expected_fee);
+        }
     }
 
     #[test]

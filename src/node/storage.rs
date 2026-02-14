@@ -765,9 +765,13 @@ mod tests {
         )
     }
 
-    fn make_test_tx(fee: u64, seed: u8) -> Transaction {
+    /// Build a valid Transfer transaction with 1 input and 1 output.
+    /// Deterministic fee = 300 (FEE_BASE + 1*FEE_PER_INPUT + 1*FEE_PER_OUTPUT).
+    fn make_test_tx(seed: u8) -> Transaction {
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        let input_value = fee + 100;
+        // 1 input, 1 output, no messages → fee = 300
+        let output_value = 100u64;
+        let input_value = output_value + 300; // 400
         crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: input_value,
@@ -775,8 +779,7 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", &[seed]),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 100)
-            .set_fee(fee)
+            .add_output(recipient.kem.public.clone(), output_value)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap()
@@ -811,7 +814,7 @@ mod tests {
     #[test]
     fn transaction_put_get_roundtrip() {
         let storage = temp_storage();
-        let tx = make_test_tx(10, 1);
+        let tx = make_test_tx(1);
         let tx_id = tx.tx_id();
 
         storage.put_transaction(&tx).unwrap();
@@ -819,7 +822,7 @@ mod tests {
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.tx_id(), tx_id);
-        assert_eq!(retrieved.fee, 10);
+        assert_eq!(retrieved.fee, 300); // deterministic: 1 input, 1 output
         assert_eq!(retrieved.inputs.len(), tx.inputs.len());
         assert_eq!(retrieved.outputs.len(), tx.outputs.len());
     }

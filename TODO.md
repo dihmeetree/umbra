@@ -28,7 +28,7 @@
 - [ ] **Multi-wallet support** — manage multiple wallets from a single node
 - [ ] **Hardware wallet integration** — support external signing devices
 - [ ] **Address book / contacts** — save and label recipient addresses
-- [ ] **Auto fee suggestion** — wallet queries `/fee-estimate` and suggests a fee in the send flow
+- [x] **Deterministic fees** — fees are computed automatically from transaction shape; no user selection needed
 
 ## Protocol
 

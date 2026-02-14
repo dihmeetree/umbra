@@ -360,9 +360,13 @@ mod tests {
         )
     }
 
-    fn make_test_tx(fee: u64, seed: u8) -> Transaction {
+    /// Build a test Transfer transaction with 1 input and 1 output.
+    /// Deterministic fee = FEE_BASE + 1*FEE_PER_INPUT + 1*FEE_PER_OUTPUT = 300.
+    fn make_test_tx(seed: u8) -> Transaction {
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        let input_value = fee + 100;
+        let output_value = 100u64;
+        let fee = 300u64; // deterministic: 100 + 100 + 100
+        let input_value = output_value + fee;
         TransactionBuilder::new()
             .add_input(InputSpec {
                 value: input_value,
@@ -370,8 +374,32 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", &[seed]),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 100)
-            .set_fee(fee)
+            .add_output(recipient.kem.public.clone(), output_value)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    /// Build a test Transfer transaction with 1 input and `num_outputs` outputs.
+    /// This allows creating transactions with different deterministic fees:
+    ///   fee = FEE_BASE + FEE_PER_INPUT + num_outputs * FEE_PER_OUTPUT
+    ///       = 100 + 100 + num_outputs * 100 = 200 + num_outputs * 100
+    /// So: 1 output → 300, 2 outputs → 400, 3 outputs → 500, etc.
+    fn make_test_tx_n_outputs(num_outputs: usize, seed: u8) -> Transaction {
+        let output_value_each = 100u64;
+        let fee = 200 + (num_outputs as u64) * 100;
+        let input_value = output_value_each * num_outputs as u64 + fee;
+        let mut builder = TransactionBuilder::new().add_input(InputSpec {
+            value: input_value,
+            blinding: BlindingFactor::from_bytes([seed; 32]),
+            spend_auth: crate::hash_domain(b"test", &[seed]),
+            merkle_path: vec![],
+        });
+        for _ in 0..num_outputs {
+            let recipient = crate::crypto::keys::FullKeypair::generate();
+            builder = builder.add_output(recipient.kem.public.clone(), output_value_each);
+        }
+        builder
             .set_proof_options(test_proof_options())
             .build()
             .unwrap()
@@ -380,7 +408,7 @@ mod tests {
     #[test]
     fn insert_and_retrieve() {
         let mut pool = Mempool::with_defaults();
-        let tx = make_test_tx(10, 1);
+        let tx = make_test_tx(1);
         let tx_id = tx.tx_id();
 
         let result = pool.insert(tx);
@@ -394,7 +422,7 @@ mod tests {
     #[test]
     fn reject_duplicate() {
         let mut pool = Mempool::with_defaults();
-        let tx = make_test_tx(10, 2);
+        let tx = make_test_tx(2);
 
         assert!(pool.insert(tx.clone()).is_ok());
         match pool.insert(tx) {
@@ -407,32 +435,35 @@ mod tests {
     fn reject_nullifier_conflict() {
         let mut pool = Mempool::with_defaults();
         // Two transactions with the exact same input (same value, blinding, spend_auth
-        // produces the same nullifier) but different outputs
+        // produces the same nullifier) but different outputs (different recipients)
         let recipient1 = crate::crypto::keys::FullKeypair::generate();
         let recipient2 = crate::crypto::keys::FullKeypair::generate();
 
+        // 1 input, 1 output → deterministic fee = 300
+        let fee = 300u64;
+        let output_value = 100u64;
+        let input_value = output_value + fee; // 400
+
         let tx1 = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 200,
+                value: input_value,
                 blinding: BlindingFactor::from_bytes([3; 32]),
                 spend_auth: crate::hash_domain(b"test", &[3]),
                 merkle_path: vec![],
             })
-            .add_output(recipient1.kem.public.clone(), 190)
-            .set_fee(10)
+            .add_output(recipient1.kem.public.clone(), output_value)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
 
         let tx2 = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 200,
+                value: input_value,
                 blinding: BlindingFactor::from_bytes([3; 32]),
                 spend_auth: crate::hash_domain(b"test", &[3]),
                 merkle_path: vec![],
             })
-            .add_output(recipient2.kem.public.clone(), 100)
-            .set_fee(100)
+            .add_output(recipient2.kem.public.clone(), output_value)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -455,9 +486,11 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        let tx_low = make_test_tx(1, 10);
-        let tx_mid = make_test_tx(10, 11);
-        let tx_high = make_test_tx(100, 12);
+        // Different output counts → different deterministic fees:
+        // 1 output → fee=300, 2 outputs → fee=400, 3 outputs → fee=500
+        let tx_low = make_test_tx_n_outputs(1, 10); // fee=300
+        let tx_mid = make_test_tx_n_outputs(2, 11); // fee=400
+        let tx_high = make_test_tx_n_outputs(3, 12); // fee=500
 
         assert!(pool.insert(tx_low).is_ok());
         assert!(pool.insert(tx_mid.clone()).is_ok());
@@ -475,9 +508,10 @@ mod tests {
     fn drain_highest_fee_ordering() {
         let mut pool = Mempool::with_defaults();
 
-        let tx1 = make_test_tx(1, 20);
-        let tx2 = make_test_tx(100, 21);
-        let tx3 = make_test_tx(10, 22);
+        // Different output counts → different deterministic fees
+        let tx1 = make_test_tx_n_outputs(1, 20); // fee=300
+        let tx2 = make_test_tx_n_outputs(3, 21); // fee=500
+        let tx3 = make_test_tx_n_outputs(2, 22); // fee=400
 
         pool.insert(tx1).unwrap();
         pool.insert(tx2).unwrap();
@@ -485,15 +519,15 @@ mod tests {
 
         let drained = pool.drain_highest_fee(2);
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].fee, 100); // highest first
-        assert_eq!(drained[1].fee, 10);
+        assert_eq!(drained[0].fee, 500); // highest first
+        assert_eq!(drained[1].fee, 400);
         assert_eq!(pool.len(), 1); // one left
     }
 
     #[test]
     fn remove_by_txid() {
         let mut pool = Mempool::with_defaults();
-        let tx = make_test_tx(10, 30);
+        let tx = make_test_tx(30);
         let tx_id = tx.tx_id();
 
         pool.insert(tx).unwrap();
@@ -508,7 +542,7 @@ mod tests {
     #[test]
     fn remove_conflicting_nullifiers() {
         let mut pool = Mempool::with_defaults();
-        let tx = make_test_tx(10, 40);
+        let tx = make_test_tx(40);
         let nullifiers: Vec<Nullifier> = tx.inputs.iter().map(|i| i.nullifier).collect();
 
         pool.insert(tx).unwrap();
@@ -526,11 +560,11 @@ mod tests {
         assert_eq!(stats.transaction_count, 0);
         assert_eq!(stats.total_bytes, 0);
 
-        pool.insert(make_test_tx(10, 50)).unwrap();
+        pool.insert(make_test_tx(50)).unwrap();
         let stats = pool.stats();
         assert_eq!(stats.transaction_count, 1);
         assert!(stats.total_bytes > 0);
-        assert_eq!(stats.min_fee, Some(10));
+        assert_eq!(stats.min_fee, Some(300)); // deterministic fee: 1 input, 1 output
     }
 
     #[test]
@@ -538,16 +572,16 @@ mod tests {
         let mut pool = Mempool::with_defaults();
 
         // Build a tx with expiry_epoch = 5 through the builder
+        // 1 input, 1 output → deterministic fee = 300
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 110,
+                value: 400,
                 blinding: BlindingFactor::from_bytes([60; 32]),
                 spend_auth: crate::hash_domain(b"test", &[60]),
                 merkle_path: vec![],
             })
             .add_output(recipient.kem.public.clone(), 100)
-            .set_fee(10)
             .set_expiry_epoch(5)
             .set_proof_options(test_proof_options())
             .build()
@@ -569,7 +603,7 @@ mod tests {
     #[test]
     fn evict_expired_keeps_no_expiry() {
         let mut pool = Mempool::with_defaults();
-        let tx = make_test_tx(10, 61); // expiry_epoch = 0 (no expiry)
+        let tx = make_test_tx(61); // expiry_epoch = 0 (no expiry)
         pool.insert(tx).unwrap();
         pool.set_epoch(1000);
         assert_eq!(pool.evict_expired(), 0);
@@ -594,9 +628,11 @@ mod tests {
     #[test]
     fn fee_percentiles_with_transactions() {
         let mut pool = Mempool::with_defaults();
-        // Insert transactions with different fees
-        for (i, fee) in [1, 10, 100, 1_000, 10_000].iter().enumerate() {
-            pool.insert(make_test_tx(*fee, 70 + i as u8)).unwrap();
+        // Insert transactions with different deterministic fees via different output counts:
+        // 1 output → 300, 2 outputs → 400, 3 outputs → 500, 4 outputs → 600, 5 outputs → 700
+        for (i, num_outputs) in [1, 2, 3, 4, 5].iter().enumerate() {
+            pool.insert(make_test_tx_n_outputs(*num_outputs, 70 + i as u8))
+                .unwrap();
         }
 
         let percentiles = pool.fee_percentiles().unwrap();
@@ -610,19 +646,20 @@ mod tests {
 
     #[test]
     fn byte_limit_eviction() {
-        // Insert a single tx to measure its size
-        let sample_tx = make_test_tx(1, 80);
+        // Insert a single tx to measure its size (use largest variant for sizing)
+        let sample_tx = make_test_tx_n_outputs(3, 80);
         let one_tx_size = sample_tx.estimated_size();
 
-        // Set max_bytes to hold at most 2 transactions
+        // Set max_bytes to hold at most 2 transactions of the largest size
         let config = MempoolConfig {
             max_transactions: usize::MAX,
             max_bytes: one_tx_size * 2 + one_tx_size / 2, // ~2.5x one tx
         };
         let mut pool = Mempool::new(config);
 
-        let tx_low = make_test_tx(1, 81);
-        let tx_mid = make_test_tx(10, 82);
+        // Different output counts → different deterministic fees for eviction ordering
+        let tx_low = make_test_tx_n_outputs(1, 81); // fee=300
+        let tx_mid = make_test_tx_n_outputs(2, 82); // fee=400
         pool.insert(tx_low.clone()).unwrap();
         pool.insert(tx_mid.clone()).unwrap();
         assert_eq!(pool.len(), 2);
@@ -630,10 +667,10 @@ mod tests {
         assert!(bytes_after_two > 0);
 
         // Inserting a third tx with a higher fee should evict the lowest-fee tx
-        let tx_high = make_test_tx(100, 83);
+        let tx_high = make_test_tx_n_outputs(3, 83); // fee=500
         pool.insert(tx_high.clone()).unwrap();
         assert_eq!(pool.len(), 2);
-        // The lowest fee tx (fee=1) should have been evicted
+        // The lowest fee tx (fee=300) should have been evicted
         assert!(!pool.contains(&tx_low.tx_id()));
         assert!(pool.contains(&tx_mid.tx_id()));
         assert!(pool.contains(&tx_high.tx_id()));
@@ -649,31 +686,33 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        let tx_a = make_test_tx(10, 90);
-        let tx_b = make_test_tx(1_000, 91);
+        // Use different output counts for different fees:
+        // 1 output → fee=300, 3 outputs → fee=500
+        let tx_a = make_test_tx_n_outputs(1, 90); // fee=300
+        let tx_b = make_test_tx_n_outputs(3, 91); // fee=500
         pool.insert(tx_a.clone()).unwrap();
         pool.insert(tx_b.clone()).unwrap();
         assert_eq!(pool.len(), 2);
 
-        // The minimum fee in pool is 10. Inserting a tx with fee == 10 should
+        // The minimum fee in pool is 300. Inserting a tx with fee == 300 should
         // be rejected because the condition is `fee <= lowest_fee`.
-        let tx_equal = make_test_tx(10, 92);
+        let tx_equal = make_test_tx_n_outputs(1, 92); // fee=300
         match pool.insert(tx_equal) {
             Err(MempoolError::FeeTooLow { fee, min_fee }) => {
-                assert_eq!(fee, 10);
-                assert_eq!(min_fee, 11); // lowest_fee + 1
+                assert_eq!(fee, 300);
+                assert_eq!(min_fee, 301); // lowest_fee + 1
             }
             other => panic!("expected FeeTooLow, got {:?}", other),
         }
         assert_eq!(pool.len(), 2);
 
-        // Inserting a tx with fee = 100 (next tier above lowest) should succeed and evict fee=10
-        let tx_above = make_test_tx(100, 93);
+        // Inserting a tx with fee=400 (next tier above lowest) should succeed and evict fee=300
+        let tx_above = make_test_tx_n_outputs(2, 93); // fee=400
         pool.insert(tx_above.clone()).unwrap();
         assert_eq!(pool.len(), 2);
-        assert!(!pool.contains(&tx_a.tx_id())); // fee=10 evicted
-        assert!(pool.contains(&tx_b.tx_id())); // fee=1000 stays
-        assert!(pool.contains(&tx_above.tx_id())); // fee=100 accepted
+        assert!(!pool.contains(&tx_a.tx_id())); // fee=300 evicted
+        assert!(pool.contains(&tx_b.tx_id())); // fee=500 stays
+        assert!(pool.contains(&tx_above.tx_id())); // fee=400 accepted
     }
 
     #[test]
@@ -682,8 +721,10 @@ mod tests {
 
         // Build two transactions with the same nullifier (same value, blinding, spend_auth)
         // but different outputs (different recipients) so they have different tx_ids.
-        let value = 110u64;
-        let fee = 10u64;
+        // 1 input, 1 output → deterministic fee = 300
+        let fee = 300u64;
+        let output_value = 100u64;
+        let value = output_value + fee; // 400
         let blinding = BlindingFactor::from_bytes([100; 32]);
         let spend_auth = crate::hash_domain(b"test", &[100]);
 
@@ -695,8 +736,7 @@ mod tests {
                 spend_auth,
                 merkle_path: vec![],
             })
-            .add_output(recipient1.kem.public.clone(), value - fee)
-            .set_fee(fee)
+            .add_output(recipient1.kem.public.clone(), output_value)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -709,8 +749,7 @@ mod tests {
                 spend_auth,
                 merkle_path: vec![],
             })
-            .add_output(recipient2.kem.public.clone(), value - fee)
-            .set_fee(fee)
+            .add_output(recipient2.kem.public.clone(), output_value)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -738,16 +777,16 @@ mod tests {
         pool.set_epoch(10);
 
         // Build a tx with expiry_epoch=5: it's already expired at epoch 10
+        // 1 input, 1 output → deterministic fee = 300
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx_expired = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 110,
+                value: 400,
                 blinding: BlindingFactor::from_bytes([110; 32]),
                 spend_auth: crate::hash_domain(b"test", &[110]),
                 merkle_path: vec![],
             })
             .add_output(recipient.kem.public.clone(), 100)
-            .set_fee(10)
             .set_expiry_epoch(5)
             .set_proof_options(test_proof_options())
             .build()
@@ -768,7 +807,7 @@ mod tests {
         }
 
         // Build a tx with expiry_epoch=0 (no expiry) — should be accepted
-        let tx_no_expiry = make_test_tx(10, 111);
+        let tx_no_expiry = make_test_tx(111);
         assert_eq!(tx_no_expiry.expiry_epoch, 0);
         assert!(pool.insert(tx_no_expiry).is_ok());
         assert_eq!(pool.len(), 1);
@@ -777,12 +816,12 @@ mod tests {
     #[test]
     fn fee_percentiles_single_tx() {
         let mut pool = Mempool::with_defaults();
-        pool.insert(make_test_tx(100, 120)).unwrap();
+        pool.insert(make_test_tx(120)).unwrap();
 
         let percentiles = pool.fee_percentiles().unwrap();
-        // With a single transaction, all percentiles should be the same value
+        // With a single transaction (fee=300), all percentiles should be the same value
         for &p in &percentiles {
-            assert_eq!(p, 100);
+            assert_eq!(p, 300);
         }
     }
 
@@ -790,9 +829,9 @@ mod tests {
     fn total_bytes_accurate_after_operations() {
         let mut pool = Mempool::with_defaults();
 
-        let tx1 = make_test_tx(10, 130);
-        let tx2 = make_test_tx(100, 131);
-        let tx3 = make_test_tx(1_000, 132);
+        let tx1 = make_test_tx(130);
+        let tx2 = make_test_tx(131);
+        let tx3 = make_test_tx(132);
         let tx1_size = tx1.estimated_size();
         let tx2_size = tx2.estimated_size();
         let tx3_size = tx3.estimated_size();
@@ -810,7 +849,7 @@ mod tests {
         assert_eq!(pool.total_bytes(), bytes_after_three - tx2_size);
 
         // Insert another
-        let tx4 = make_test_tx(10_000, 133);
+        let tx4 = make_test_tx(133);
         let tx4_size = tx4.estimated_size();
         pool.insert(tx4).unwrap();
         assert_eq!(pool.total_bytes(), bytes_after_three - tx2_size + tx4_size);

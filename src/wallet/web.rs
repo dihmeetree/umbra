@@ -202,7 +202,6 @@ fn error_page(msg: impl Into<String>) -> ErrorTemplate {
 pub struct SendForm {
     recipient: String,
     amount: u64,
-    fee: u64,
     message: Option<String>,
 }
 
@@ -511,8 +510,8 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         }
     }
 
-    // Build transaction
-    let tx = match wallet.build_transaction(&recipient.kem, form.amount, form.fee, msg_bytes) {
+    // Build transaction (fee is auto-computed)
+    let tx = match wallet.build_transaction(&recipient.kem, form.amount, msg_bytes) {
         Ok(tx) => tx,
         Err(e) => {
             return SendTemplate {
@@ -558,7 +557,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         active_tab: "send",
         tx_id: result.tx_id,
         amount: form.amount,
-        fee: form.fee,
+        fee: tx.fee,
         remaining_balance: remaining,
     }
     .into_response()

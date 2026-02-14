@@ -60,8 +60,7 @@ pub fn run_demo() {
             spend_auth: coinbase_auth,
             merkle_path: vec![],
         })
-        .add_output(alice_wallet.kem_public_key().clone(), 99_999)
-        .set_fee(1)
+        .add_output(alice_wallet.kem_public_key().clone(), 99_700)
         .build()
         .unwrap();
 
@@ -86,7 +85,6 @@ pub fn run_demo() {
         .build_transaction(
             bob_wallet.kem_public_key(),
             25_000,
-            100,
             Some(b"Hey Bob! Payment for the quantum computer parts.".to_vec()),
         )
         .unwrap();
