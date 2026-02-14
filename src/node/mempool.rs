@@ -431,8 +431,8 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", &[3]),
                 merkle_path: vec![],
             })
-            .add_output(recipient2.kem.public.clone(), 180)
-            .set_fee(20)
+            .add_output(recipient2.kem.public.clone(), 100)
+            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -455,9 +455,9 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        let tx_low = make_test_tx(5, 10);
+        let tx_low = make_test_tx(1, 10);
         let tx_mid = make_test_tx(10, 11);
-        let tx_high = make_test_tx(20, 12);
+        let tx_high = make_test_tx(100, 12);
 
         assert!(pool.insert(tx_low).is_ok());
         assert!(pool.insert(tx_mid.clone()).is_ok());
@@ -475,8 +475,8 @@ mod tests {
     fn drain_highest_fee_ordering() {
         let mut pool = Mempool::with_defaults();
 
-        let tx1 = make_test_tx(5, 20);
-        let tx2 = make_test_tx(20, 21);
+        let tx1 = make_test_tx(1, 20);
+        let tx2 = make_test_tx(100, 21);
         let tx3 = make_test_tx(10, 22);
 
         pool.insert(tx1).unwrap();
@@ -485,7 +485,7 @@ mod tests {
 
         let drained = pool.drain_highest_fee(2);
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].fee, 20); // highest first
+        assert_eq!(drained[0].fee, 100); // highest first
         assert_eq!(drained[1].fee, 10);
         assert_eq!(pool.len(), 1); // one left
     }
@@ -595,7 +595,7 @@ mod tests {
     fn fee_percentiles_with_transactions() {
         let mut pool = Mempool::with_defaults();
         // Insert transactions with different fees
-        for (i, fee) in [5, 10, 15, 20, 25].iter().enumerate() {
+        for (i, fee) in [1, 10, 100, 1_000, 10_000].iter().enumerate() {
             pool.insert(make_test_tx(*fee, 70 + i as u8)).unwrap();
         }
 
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn byte_limit_eviction() {
         // Insert a single tx to measure its size
-        let sample_tx = make_test_tx(5, 80);
+        let sample_tx = make_test_tx(1, 80);
         let one_tx_size = sample_tx.estimated_size();
 
         // Set max_bytes to hold at most 2 transactions
@@ -621,7 +621,7 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        let tx_low = make_test_tx(5, 81);
+        let tx_low = make_test_tx(1, 81);
         let tx_mid = make_test_tx(10, 82);
         pool.insert(tx_low.clone()).unwrap();
         pool.insert(tx_mid.clone()).unwrap();
@@ -630,10 +630,10 @@ mod tests {
         assert!(bytes_after_two > 0);
 
         // Inserting a third tx with a higher fee should evict the lowest-fee tx
-        let tx_high = make_test_tx(20, 83);
+        let tx_high = make_test_tx(100, 83);
         pool.insert(tx_high.clone()).unwrap();
         assert_eq!(pool.len(), 2);
-        // The lowest fee tx (fee=5) should have been evicted
+        // The lowest fee tx (fee=1) should have been evicted
         assert!(!pool.contains(&tx_low.tx_id()));
         assert!(pool.contains(&tx_mid.tx_id()));
         assert!(pool.contains(&tx_high.tx_id()));
@@ -650,7 +650,7 @@ mod tests {
         let mut pool = Mempool::new(config);
 
         let tx_a = make_test_tx(10, 90);
-        let tx_b = make_test_tx(20, 91);
+        let tx_b = make_test_tx(1_000, 91);
         pool.insert(tx_a.clone()).unwrap();
         pool.insert(tx_b.clone()).unwrap();
         assert_eq!(pool.len(), 2);
@@ -667,13 +667,13 @@ mod tests {
         }
         assert_eq!(pool.len(), 2);
 
-        // Inserting a tx with fee = 11 (one above lowest) should succeed and evict fee=10
-        let tx_above = make_test_tx(11, 93);
+        // Inserting a tx with fee = 100 (next tier above lowest) should succeed and evict fee=10
+        let tx_above = make_test_tx(100, 93);
         pool.insert(tx_above.clone()).unwrap();
         assert_eq!(pool.len(), 2);
         assert!(!pool.contains(&tx_a.tx_id())); // fee=10 evicted
-        assert!(pool.contains(&tx_b.tx_id())); // fee=20 stays
-        assert!(pool.contains(&tx_above.tx_id())); // fee=11 accepted
+        assert!(pool.contains(&tx_b.tx_id())); // fee=1000 stays
+        assert!(pool.contains(&tx_above.tx_id())); // fee=100 accepted
     }
 
     #[test]
@@ -777,12 +777,12 @@ mod tests {
     #[test]
     fn fee_percentiles_single_tx() {
         let mut pool = Mempool::with_defaults();
-        pool.insert(make_test_tx(42, 120)).unwrap();
+        pool.insert(make_test_tx(100, 120)).unwrap();
 
         let percentiles = pool.fee_percentiles().unwrap();
         // With a single transaction, all percentiles should be the same value
         for &p in &percentiles {
-            assert_eq!(p, 42);
+            assert_eq!(p, 100);
         }
     }
 
@@ -791,8 +791,8 @@ mod tests {
         let mut pool = Mempool::with_defaults();
 
         let tx1 = make_test_tx(10, 130);
-        let tx2 = make_test_tx(20, 131);
-        let tx3 = make_test_tx(30, 132);
+        let tx2 = make_test_tx(100, 131);
+        let tx3 = make_test_tx(1_000, 132);
         let tx1_size = tx1.estimated_size();
         let tx2_size = tx2.estimated_size();
         let tx3_size = tx3.estimated_size();
@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(pool.total_bytes(), bytes_after_three - tx2_size);
 
         // Insert another
-        let tx4 = make_test_tx(40, 133);
+        let tx4 = make_test_tx(10_000, 133);
         let tx4_size = tx4.estimated_size();
         pool.insert(tx4).unwrap();
         assert_eq!(pool.total_bytes(), bytes_after_three - tx2_size + tx4_size);

@@ -218,7 +218,7 @@ pub fn load_or_generate_keypair(
         let keypair = SigningKeypair::from_bytes(pk_bytes, sk_bytes).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid key data")
         })?;
-        tracing::info!(key = %hex::encode(&keypair.public.fingerprint()[..8]), "Loaded validator key");
+        tracing::info!("Loaded validator key");
         Ok((keypair, kem_kp))
     } else {
         std::fs::create_dir_all(data_dir)?;
@@ -240,7 +240,7 @@ pub fn load_or_generate_keypair(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
-        tracing::info!(key = %hex::encode(&keypair.public.fingerprint()[..8]), "Generated validator key");
+        tracing::info!("Generated validator key");
         Ok((keypair, kem_kp))
     }
 }
@@ -374,7 +374,7 @@ impl Node {
             bft.advance_round();
             ledger.dag.advance_round();
 
-            tracing::info!(validator = %hex::encode(&our_validator_id[..8]), "Registered as genesis validator");
+            tracing::info!("Registered as genesis validator");
         }
 
         // Record our finalized count before storage is moved into NodeState
@@ -471,12 +471,19 @@ impl Node {
         self.seen_messages_current.contains(hash) || self.seen_messages_prev.contains(hash)
     }
 
-    /// Mark a message hash as seen. When the current set exceeds capacity,
-    /// the previous set is dropped, current becomes previous, and a new
-    /// empty set becomes current.
+    /// Mark a message hash as seen. When the current set exceeds capacity
+    /// (with random jitter to prevent deterministic rotation timing), the
+    /// previous set is dropped, current becomes previous, and a new empty
+    /// set becomes current.
     fn mark_seen(&mut self, hash: Hash) {
         self.seen_messages_current.insert(hash);
-        if self.seen_messages_current.len() > SEEN_MESSAGES_CAPACITY {
+        // Randomize rotation threshold to make dedup timing unpredictable,
+        // preventing spy nodes from probing when seen_messages rotates.
+        let jitter = {
+            use rand::RngExt;
+            rand::rng().random_range(0..SEEN_MESSAGES_CAPACITY / 5)
+        };
+        if self.seen_messages_current.len() > SEEN_MESSAGES_CAPACITY + jitter {
             std::mem::swap(
                 &mut self.seen_messages_current,
                 &mut self.seen_messages_prev,
@@ -572,14 +579,14 @@ impl Node {
                 self.refresh_vrf_from_bft().await;
             }
             P2pEvent::PeerConnected(peer_id) => {
-                tracing::info!(peer = %hex::encode(&peer_id[..8]), "Peer connected");
+                tracing::info!(peer = "<redacted>", "Peer connected");
                 // If we need sync, ask this peer about their state
                 if let SyncState::NeedSync { .. } = &self.sync_state {
                     let _ = self.p2p.send_to(peer_id, Message::GetEpochState).await;
                 }
             }
             P2pEvent::PeerDisconnected(peer_id) => {
-                tracing::info!(peer = %hex::encode(&peer_id[..8]), "Peer disconnected");
+                tracing::info!(peer = "<redacted>", "Peer disconnected");
                 self.chunk_request_timestamps.remove(&peer_id);
                 // If we were syncing from this peer, revert to NeedSync
                 match &self.sync_state {
@@ -802,14 +809,14 @@ impl Node {
                 // Verify both signatures independently
                 if !state.bft.verify_equivocation_evidence(&evidence) {
                     tracing::debug!(
-                        voter = %hex::encode(&evidence.voter_id[..8]),
+                        voter = "<redacted>",
                         "Rejected invalid equivocation evidence"
                     );
                     return;
                 }
                 if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
                     tracing::warn!(
-                        validator = %hex::encode(&evidence.voter_id[..8]),
+                        validator = "<redacted>",
                         epoch = evidence.epoch,
                         round = evidence.round,
                         "Slashed validator via network evidence",
@@ -838,7 +845,19 @@ impl Node {
             }
             Message::GetPeers => {
                 if let Ok(peers) = self.p2p.get_peers().await {
-                    let _ = self.p2p.send_to(from, Message::PeersResponse(peers)).await;
+                    // Redact IP addresses from peer info to prevent
+                    // validator deanonymization via peer list gossip.
+                    let redacted: Vec<_> = peers
+                        .into_iter()
+                        .map(|mut p| {
+                            p.address = String::new();
+                            p
+                        })
+                        .collect();
+                    let _ = self
+                        .p2p
+                        .send_to(from, Message::PeersResponse(redacted))
+                        .await;
                 }
             }
             Message::PeersResponse(peers) => {
@@ -940,10 +959,7 @@ impl Node {
                 if let SyncState::NeedSync { our_finalized } = self.sync_state {
                     // Skip peers on cooldown from recent failures
                     if self.sync_failed_peers.contains_key(&from) {
-                        tracing::debug!(
-                            peer = %hex::encode(&from[..8]),
-                            "Skipping sync peer, on cooldown"
-                        );
+                        tracing::debug!(peer = "<redacted>", "Skipping sync peer, on cooldown");
                         return;
                     }
 
@@ -960,7 +976,7 @@ impl Node {
                         if use_snapshot {
                             // Large gap or fresh node: try snapshot sync first
                             tracing::info!(
-                                peer = %hex::encode(&from[..8]),
+                                peer = "<redacted>",
                                 our_finalized = our_finalized,
                                 gap = gap,
                                 "Requesting snapshot from peer"
@@ -972,7 +988,7 @@ impl Node {
                         } else {
                             // Small gap: use vertex-by-vertex sync
                             tracing::info!(
-                                peer = %hex::encode(&from[..8]),
+                                peer = "<redacted>",
                                 our_finalized = our_finalized,
                                 gap = gap,
                                 "Starting vertex sync from peer"
@@ -1052,7 +1068,7 @@ impl Node {
                     if self.sync_rounds > MAX_SYNC_ROUNDS {
                         tracing::warn!(
                             rounds = MAX_SYNC_ROUNDS,
-                            peer = %hex::encode(&from[..8]),
+                            peer = "<redacted>",
                             "Sync exceeded max rounds, giving up"
                         );
                         let peer_id = from;
@@ -1378,7 +1394,7 @@ impl Node {
                     // Validate: reject absurdly large snapshots (> 1 GiB)
                     if snapshot_size > 1_073_741_824 {
                         tracing::warn!(
-                            peer = %hex::encode(&from[..8]),
+                            peer = "<redacted>",
                             size = snapshot_size,
                             "Snapshot too large, skipping"
                         );
@@ -1391,7 +1407,7 @@ impl Node {
                     // DDoS: Cap chunk count to prevent OOM allocation
                     if total_chunks > crate::constants::MAX_SNAPSHOT_CHUNKS {
                         tracing::warn!(
-                            peer = %hex::encode(&from[..8]),
+                            peer = "<redacted>",
                             chunks = total_chunks,
                             "Snapshot manifest exceeds max chunk count, skipping"
                         );
@@ -1402,7 +1418,7 @@ impl Node {
                         snapshot_size.div_ceil(crate::constants::SNAPSHOT_CHUNK_SIZE as u64) as u32;
                     if total_chunks != expected_chunks {
                         tracing::warn!(
-                            peer = %hex::encode(&from[..8]),
+                            peer = "<redacted>",
                             claimed = total_chunks,
                             expected = expected_chunks,
                             "Snapshot manifest chunk count mismatch, skipping"
@@ -1732,7 +1748,7 @@ impl Node {
                 for evidence in &evidence_to_broadcast {
                     if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
                         tracing::warn!(
-                            validator = %hex::encode(&evidence.voter_id[..8]),
+                            validator = "<redacted>",
                             round = evidence.round,
                             "Slashed validator for equivocation"
                         );
@@ -1864,7 +1880,7 @@ impl Node {
             if elapsed > std::time::Duration::from_millis(crate::constants::SYNC_REQUEST_TIMEOUT_MS)
             {
                 tracing::warn!(
-                    peer = %hex::encode(&peer[..8]),
+                    peer = "<redacted>",
                     elapsed_ms = %elapsed.as_millis(),
                     "Sync timeout, retrying"
                 );
@@ -1888,7 +1904,7 @@ impl Node {
             if elapsed > std::time::Duration::from_millis(crate::constants::SYNC_REQUEST_TIMEOUT_MS)
             {
                 tracing::warn!(
-                    peer = %hex::encode(&peer[..8]),
+                    peer = "<redacted>",
                     elapsed_ms = %elapsed.as_millis(),
                     "Snapshot sync timeout"
                 );
@@ -1952,12 +1968,17 @@ impl Node {
             }
             self.stem_txs
                 .insert(tx_hash, (hops_remaining, Instant::now()));
-            // Random delay to prevent timing-based sender deanonymization
+            // Exponential-distribution delay to prevent timing-based sender
+            // deanonymization. Exponential is preferred over uniform because it
+            // makes cumulative multi-hop delays harder to decompose.
             let delay_ms = {
                 use rand::RngExt;
-                rand::rng().random_range(
-                    crate::constants::DANDELION_STEM_DELAY_MIN_MS
-                        ..=crate::constants::DANDELION_STEM_DELAY_MAX_MS,
+                let lambda = 1.0 / crate::constants::DANDELION_STEM_DELAY_MAX_MS as f64;
+                let u: f64 = rand::rng().random_range(0.001f64..1.0f64);
+                let exp_sample = (-u.ln() / lambda) as u64;
+                exp_sample.clamp(
+                    crate::constants::DANDELION_STEM_DELAY_MIN_MS,
+                    crate::constants::DANDELION_STEM_DELAY_MAX_MS * 3,
                 )
             };
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -1988,6 +2009,13 @@ impl Node {
 
         for hash in expired {
             self.stem_txs.remove(&hash);
+            // Random delay before fluffing to prevent timing correlation
+            // between stem timeout and originator identification.
+            let jitter_ms = {
+                use rand::RngExt;
+                rand::rng().random_range(50u64..=500u64)
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
             // The tx is already in our mempool, broadcast it
             let state = self.state.read().await;
             if let Some(tx) = state.mempool.get(&TxId(hash)).cloned() {

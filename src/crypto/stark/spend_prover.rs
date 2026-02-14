@@ -292,18 +292,6 @@ pub fn prove_spend(
         ));
     }
 
-    // Validate first_path_bit matches witness
-    let expected_first_bit = if witness.merkle_path[0].1 {
-        Felt::ONE
-    } else {
-        Felt::ZERO
-    };
-    if pub_inputs.first_path_bit != expected_first_bit {
-        return Err(StarkError::InvalidWitness(
-            "first_path_bit does not match Merkle path".into(),
-        ));
-    }
-
     // Validate proof_link matches
     let expected_proof_link = rescue::hash_proof_link(&witness.commitment, &witness.link_nonce);
     if expected_proof_link != pub_inputs.proof_link {

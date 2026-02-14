@@ -96,8 +96,6 @@ pub struct SpendPublicInputs {
     /// Computed as Rescue(commitment, link_nonce) — the actual commitment
     /// is a private witness inside the proof.
     pub proof_link: [Felt; 4],
-    /// Direction bit for first Merkle level (0=commitment on left, 1=on right)
-    pub first_path_bit: Felt,
 }
 
 /// Witness data for the spend proof (known only to prover).
@@ -152,7 +150,6 @@ impl ToElements<Felt> for SpendPublicInputs {
         elems.extend_from_slice(&self.merkle_root);
         elems.extend_from_slice(&self.nullifier);
         elems.extend_from_slice(&self.proof_link);
-        elems.push(self.first_path_bit);
         elems
     }
 }
@@ -254,7 +251,7 @@ impl BalancePublicInputs {
 impl SpendPublicInputs {
     /// Serialize to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(104);
+        let mut buf = Vec::with_capacity(96);
         for e in &self.merkle_root {
             buf.extend_from_slice(&e.as_int().to_le_bytes());
         }
@@ -264,21 +261,20 @@ impl SpendPublicInputs {
         for e in &self.proof_link {
             buf.extend_from_slice(&e.as_int().to_le_bytes());
         }
-        buf.extend_from_slice(&self.first_path_bit.as_int().to_le_bytes());
         buf
     }
 
     /// Deserialize from bytes. Rejects trailing data.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() != 104 {
+        if data.len() != 96 {
             return None;
         }
         let mut pos = 0;
         let read_felt = |pos: &mut usize| -> Felt {
-            // Safety: length pre-checked >= 104 bytes, we read exactly 13 × 8 = 104
+            // Safety: length pre-checked >= 96 bytes, we read exactly 12 × 8 = 96
             let bytes: [u8; 8] = data[*pos..*pos + 8]
                 .try_into()
-                .expect("pre-checked 104-byte minimum");
+                .expect("pre-checked 96-byte minimum");
             *pos += 8;
             Felt::new(u64::from_le_bytes(bytes))
         };
@@ -300,12 +296,10 @@ impl SpendPublicInputs {
             read_felt(&mut pos),
             read_felt(&mut pos),
         ];
-        let first_path_bit = read_felt(&mut pos);
         Some(SpendPublicInputs {
             merkle_root,
             nullifier,
             proof_link,
-            first_path_bit,
         })
     }
 }
@@ -411,15 +405,13 @@ mod tests {
             merkle_root: [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
             nullifier: [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
             proof_link: [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
-            first_path_bit: Felt::new(1),
         };
         let bytes = pub_inputs.to_bytes();
-        assert_eq!(bytes.len(), 104);
+        assert_eq!(bytes.len(), 96);
         let decoded = SpendPublicInputs::from_bytes(&bytes).expect("roundtrip should succeed");
         assert_eq!(decoded.merkle_root[0].as_int(), 1);
         assert_eq!(decoded.nullifier[0].as_int(), 5);
         assert_eq!(decoded.proof_link[0].as_int(), 9);
-        assert_eq!(decoded.first_path_bit.as_int(), 1);
     }
 
     #[test]
@@ -428,21 +420,20 @@ mod tests {
             merkle_root: [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
             nullifier: [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
             proof_link: [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
-            first_path_bit: Felt::new(1),
         };
         let mut bytes = pub_inputs.to_bytes();
-        bytes.push(0xFF); // trailing byte → 105 bytes
+        bytes.push(0xFF); // trailing byte → 97 bytes
         assert!(
             SpendPublicInputs::from_bytes(&bytes).is_none(),
-            "should reject trailing data (105 bytes != 104)"
+            "should reject trailing data (97 bytes != 96)"
         );
     }
 
     #[test]
     fn spend_from_bytes_rejects_truncated_data() {
         assert!(
-            SpendPublicInputs::from_bytes(&[0u8; 103]).is_none(),
-            "should reject truncated data (103 bytes < 104)"
+            SpendPublicInputs::from_bytes(&[0u8; 95]).is_none(),
+            "should reject truncated data (95 bytes < 96)"
         );
         assert!(
             SpendPublicInputs::from_bytes(&[]).is_none(),

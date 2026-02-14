@@ -652,11 +652,13 @@ async fn p2p_loop(
                             // DDoS: Track per-IP connections
                             *connections_per_ip.entry(addr.ip()).or_insert(0) += 1;
 
-                            // Send NatInfo to the new peer (over encrypted channel)
+                            // Send NatInfo to the new peer (over encrypted channel).
+                            // Privacy: do NOT send observed_addr (the peer's IP as
+                            // we see it) to avoid leaking their network identity.
                             let our_ext = nat_state.external_addr().map(|a| a.to_string());
                             let _ = msg_tx.try_send(Message::NatInfo {
                                 external_addr: our_ext,
-                                observed_addr: addr.to_string(),
+                                observed_addr: String::new(),
                             });
 
                             peers.insert(peer_id, PeerConnection {

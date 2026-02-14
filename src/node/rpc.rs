@@ -24,12 +24,13 @@
 //! - Consider requiring authentication for `/commitment-proof` queries.
 //! - Run wallet scanning against a local trusted node, not a remote RPC.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::TlsConfig;
 
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -42,11 +43,30 @@ use super::NodeState;
 use crate::network::p2p::P2pHandle;
 use crate::transaction::TxId;
 
+/// Maximum commitment-proof queries per IP per window.
+const COMMITMENT_PROOF_RATE_LIMIT: u32 = 60;
+/// Rate limit window duration in seconds.
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
 /// Shared RPC state.
 #[derive(Clone)]
 pub struct RpcState {
     pub node: Arc<RwLock<NodeState>>,
     pub p2p: P2pHandle,
+    /// Per-IP rate limiter for sensitive endpoints (commitment-proof).
+    /// Maps IP → (request_count, window_start).
+    rate_limiter: Arc<tokio::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+}
+
+impl RpcState {
+    /// Create a new RpcState with rate limiting.
+    pub fn new(node: Arc<RwLock<NodeState>>, p2p: P2pHandle) -> Self {
+        Self {
+            node,
+            p2p,
+            rate_limiter: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 /// Build the RPC router.
@@ -147,13 +167,17 @@ pub async fn serve(
         Some(loaded) => {
             tracing::info!(addr = %addr, tls = true, "RPC server listening");
             axum_server::bind_rustls(addr, loaded.config)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await?;
         }
         None => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!(addr = %addr, tls = false, "RPC server listening");
-            axum::serve(listener, app).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -324,7 +348,6 @@ async fn get_state(State(state): State<RpcState>) -> Json<ChainStateResponse> {
 #[derive(Serialize)]
 struct PeerInfoResponse {
     peer_id: String,
-    address: String,
     last_seen: u64,
 }
 
@@ -334,7 +357,6 @@ async fn get_peers(State(state): State<RpcState>) -> Json<Vec<PeerInfoResponse>>
         .into_iter()
         .map(|p| PeerInfoResponse {
             peer_id: hex::encode(p.peer_id),
-            address: p.address,
             last_seen: p.last_seen,
         })
         .collect();
@@ -650,8 +672,33 @@ struct CommitmentProofResponse {
 
 async fn get_commitment_proof(
     State(state): State<RpcState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(index): Path<usize>,
 ) -> Result<Json<CommitmentProofResponse>, (StatusCode, String)> {
+    // Rate limit: prevent tree enumeration attacks
+    {
+        let mut limiter = state.rate_limiter.lock().await;
+        let now = std::time::Instant::now();
+        let entry = limiter.entry(addr.ip()).or_insert((0, now));
+        if now.duration_since(entry.1).as_secs() >= RATE_LIMIT_WINDOW_SECS {
+            // Reset window
+            *entry = (1, now);
+        } else {
+            entry.0 += 1;
+            if entry.0 > COMMITMENT_PROOF_RATE_LIMIT {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate limit exceeded for commitment-proof queries".to_string(),
+                ));
+            }
+        }
+        // Periodic cleanup: remove stale entries
+        if limiter.len() > 10_000 {
+            let cutoff = now - std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS * 2);
+            limiter.retain(|_, (_, start)| *start > cutoff);
+        }
+    }
+
     let node = state.node.read().await;
     let path = node.ledger.state.commitment_path(index).ok_or((
         StatusCode::NOT_FOUND,
@@ -733,10 +780,7 @@ mod tests {
         // Create a P2pHandle from a channel (we won't use it in most tests)
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let p2p = P2pHandle::from_sender(tx);
-        RpcState {
-            node: node_state,
-            p2p,
-        }
+        RpcState::new(node_state, p2p)
     }
 
     async fn get_json(app: &axum::Router, path: &str) -> (HttpStatus, serde_json::Value) {
@@ -941,15 +985,15 @@ mod tests {
     async fn commitment_proof_out_of_range() {
         let state = test_rpc_state();
         let app = router(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/commitment-proof/0")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
+        let mut request = Request::builder()
+            .uri("/commitment-proof/0")
+            .body(axum::body::Body::empty())
             .unwrap();
+        // Inject ConnectInfo so the rate limiter extractor works in tests
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), HttpStatus::NOT_FOUND);
     }
 

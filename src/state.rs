@@ -1724,7 +1724,7 @@ mod tests {
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Build a valid transaction against the current state
-        let fee = 50;
+        let fee = 100;
         let tx = build_valid_tx_for_state(&mut state, 1000, fee, 1);
         let tx_nullifier = tx.inputs[0].nullifier;
         let tx_output_commitment = tx.outputs[0].commitment;
@@ -1817,17 +1817,17 @@ mod tests {
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
-        // Build and apply first vertex with fee=30
-        let fee1 = 30;
+        // Build and apply first vertex with fee=100
+        let fee1 = 100;
         let tx1 = build_valid_tx_for_state(&mut state, 500, fee1, 10);
         let v1 = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx1]);
         state.apply_vertex(&v1).unwrap();
         let fees_after_v1 = state.epoch_fees();
         assert_eq!(fees_after_v1, fee1);
 
-        // Build and apply second vertex with fee=70 in the same epoch
-        let fee2 = 70;
-        let tx2 = build_valid_tx_for_state(&mut state, 800, fee2, 20);
+        // Build and apply second vertex with fee=1000 in the same epoch
+        let fee2 = 1_000;
+        let tx2 = build_valid_tx_for_state(&mut state, 2000, fee2, 20);
         let v2 = make_test_vertex(vec![genesis_id], 2, 0, &val_signing.public, vec![tx2]);
         state.apply_vertex(&v2).unwrap();
         let fees_after_v2 = state.epoch_fees();
@@ -1856,8 +1856,8 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 150)
-            .set_fee(50)
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(100)
             .set_chain_id(wrong_chain_id)
             .set_proof_options(test_proof_options())
             .build()
@@ -1876,7 +1876,7 @@ mod tests {
         let mut state = ChainState::new();
 
         // Build a valid transaction against the state
-        let tx = build_valid_tx_for_state(&mut state, 300, 20, 50);
+        let tx = build_valid_tx_for_state(&mut state, 300, 100, 50);
         let nullifier = tx.inputs[0].nullifier;
 
         // First validation + application should succeed

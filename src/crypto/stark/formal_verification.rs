@@ -313,13 +313,11 @@ fn build_simple_spend() -> (TraceTable<Felt>, SpendAir, SpendPublicInputs) {
         }
     }
     let merkle_root = current;
-    let first_path_bit = if path[0].1 { Felt::ONE } else { Felt::ZERO };
 
     let pub_inputs = SpendPublicInputs {
         merkle_root,
         nullifier,
         proof_link,
-        first_path_bit,
     };
     let witness = SpendWitness {
         spend_auth,
@@ -1208,13 +1206,11 @@ fn cross_proof_transplant() {
         }
     }
     let merkle_root = current;
-    let first_path_bit = if path[0].1 { Felt::ONE } else { Felt::ZERO };
 
     let pub_inputs = SpendPublicInputs {
         merkle_root,
         nullifier,
         proof_link,
-        first_path_bit,
     };
     let witness = SpendWitness {
         spend_auth,
@@ -1231,7 +1227,6 @@ fn cross_proof_transplant() {
         merkle_root: [Felt::new(1), Felt::new(1), Felt::new(1), Felt::new(1)],
         nullifier,
         proof_link,
-        first_path_bit,
     };
     let tampered = SpendStarkProof {
         proof_bytes: proof.proof_bytes,

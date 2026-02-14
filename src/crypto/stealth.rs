@@ -139,15 +139,25 @@ fn derive_one_time_key(shared_secret: &[u8; 32], output_index: u32) -> Hash {
     crate::hash_domain(b"umbra.stealth.one_time_key", &data)
 }
 
-/// Derive the spending authorization key from shared secret + owner's signing key fingerprint.
-/// This ties the stealth spend capability to the recipient's identity.
+/// Derive the spending authorization key from shared secret + owner's signing key
+/// fingerprint + output index.
+///
+/// The output_index ensures each output produces a unique spend_auth, preventing
+/// linkability across outputs sent to the same recipient. Without this, an observer
+/// who compromises one spend_auth could link all outputs sharing the same
+/// (shared_secret, fingerprint) pair.
 ///
 /// Uses `hash_domain` (BLAKE3 `new_derive_key`) for proper domain separation.
-/// Inputs are fixed-length (32 + 32 bytes), so concatenation is unambiguous.
-pub fn derive_spend_auth(shared_secret: &[u8; 32], signing_key_fingerprint: &Hash) -> Hash {
-    let mut data = [0u8; 64];
+/// Inputs are fixed-length (32 + 32 + 4 bytes), so concatenation is unambiguous.
+pub fn derive_spend_auth(
+    shared_secret: &[u8; 32],
+    signing_key_fingerprint: &Hash,
+    output_index: u32,
+) -> Hash {
+    let mut data = [0u8; 68];
     data[..32].copy_from_slice(shared_secret);
-    data[32..].copy_from_slice(signing_key_fingerprint);
+    data[32..64].copy_from_slice(signing_key_fingerprint);
+    data[64..68].copy_from_slice(&output_index.to_le_bytes());
     crate::hash_domain(b"umbra.stealth.spend_auth", &data)
 }
 
@@ -186,8 +196,8 @@ mod tests {
     fn derive_spend_auth_deterministic() {
         let secret = [42u8; 32];
         let fingerprint = crate::hash_domain(b"test", b"fp");
-        let a = derive_spend_auth(&secret, &fingerprint);
-        let b = derive_spend_auth(&secret, &fingerprint);
+        let a = derive_spend_auth(&secret, &fingerprint, 0);
+        let b = derive_spend_auth(&secret, &fingerprint, 0);
         assert_eq!(a, b);
     }
 
@@ -197,8 +207,18 @@ mod tests {
         let fp1 = crate::hash_domain(b"test", b"key1");
         let fp2 = crate::hash_domain(b"test", b"key2");
         assert_ne!(
-            derive_spend_auth(&secret, &fp1),
-            derive_spend_auth(&secret, &fp2)
+            derive_spend_auth(&secret, &fp1, 0),
+            derive_spend_auth(&secret, &fp2, 0)
+        );
+    }
+
+    #[test]
+    fn derive_spend_auth_differs_by_index() {
+        let secret = [42u8; 32];
+        let fp = crate::hash_domain(b"test", b"key");
+        assert_ne!(
+            derive_spend_auth(&secret, &fp, 0),
+            derive_spend_auth(&secret, &fp, 1)
         );
     }
 

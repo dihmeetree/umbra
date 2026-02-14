@@ -60,8 +60,8 @@ pub fn run_demo() {
             spend_auth: coinbase_auth,
             merkle_path: vec![],
         })
-        .add_output(alice_wallet.kem_public_key().clone(), 100_000)
-        .set_fee(0)
+        .add_output(alice_wallet.kem_public_key().clone(), 99_999)
+        .set_fee(1)
         .build()
         .unwrap();
 

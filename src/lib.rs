@@ -117,7 +117,8 @@ pub mod constants {
 
     /// Padding bucket size (bytes) for encrypted P2P frames. Messages are padded
     /// to the next multiple of this value to resist traffic analysis.
-    pub const P2P_PADDING_BUCKET: usize = 512;
+    /// Set to 1024 to reduce message type classification by size bucket.
+    pub const P2P_PADDING_BUCKET: usize = 1024;
 
     /// Number of Dandelion++ stem hops before fluffing (F6).
     pub const DANDELION_STEM_HOPS: u8 = 2;

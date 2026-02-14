@@ -300,10 +300,7 @@ async fn bootstrap_network(
         let p2p_handle = node.p2p_handle();
 
         // Start RPC
-        let rpc_state = RpcState {
-            node: state.clone(),
-            p2p: p2p_handle,
-        };
+        let rpc_state = RpcState::new(state.clone(), p2p_handle);
         tokio::spawn(async move {
             let _ = rpc_serve(rpc_addr, rpc_state, None).await;
         });

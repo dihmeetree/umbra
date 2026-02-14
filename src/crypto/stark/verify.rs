@@ -396,13 +396,11 @@ mod tests {
             }
         }
         let merkle_root = current;
-        let first_path_bit = if path[0].1 { Felt::ONE } else { Felt::ZERO };
 
         let pub_inputs = SpendPublicInputs {
             merkle_root,
             nullifier,
             proof_link,
-            first_path_bit,
         };
         let witness = SpendWitness {
             spend_auth,

@@ -207,7 +207,11 @@ impl Wallet {
 
         // Derive spend authorization
         let signing_fingerprint = self.keypair.signing.public.fingerprint();
-        let spend_auth = derive_spend_auth(&stealth_info.shared_secret, &signing_fingerprint);
+        let spend_auth = derive_spend_auth(
+            &stealth_info.shared_secret,
+            &signing_fingerprint,
+            output_index,
+        );
 
         // Decrypt the note data reusing the shared secret from stealth detection,
         // avoiding a redundant second KEM decapsulation and reducing side-channel
@@ -278,6 +282,8 @@ impl Wallet {
         message: Option<Vec<u8>>,
         state: Option<&crate::state::ChainState>,
     ) -> Result<Transaction, WalletError> {
+        // Quantize fee to standard tiers to prevent fee-based fingerprinting
+        let fee = crate::transaction::builder::quantize_fee(fee);
         let total_needed = amount
             .checked_add(fee)
             .ok_or(WalletError::ArithmeticOverflow)?;
@@ -1142,12 +1148,12 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(receiver_wallet.kem_public_key().clone(), 50)
+            .add_output(receiver_wallet.kem_public_key().clone(), 90)
             .add_message(
                 receiver_wallet.kem_public_key().clone(),
                 b"secret message from sender".to_vec(),
             )
-            .set_fee(50)
+            .set_fee(10)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -1173,8 +1179,8 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 50)
-            .set_fee(50)
+            .add_output(recipient.kem.public.clone(), 90)
+            .set_fee(10)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();

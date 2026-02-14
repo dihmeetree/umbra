@@ -212,10 +212,16 @@ impl Transaction {
         if self.fee > crate::constants::MAX_TX_FEE {
             return Err(TxValidationError::FeeTooHigh);
         }
-
         // Transaction-type-specific validation
         match &self.tx_type {
-            TxType::Transfer => {}
+            TxType::Transfer => {
+                // Reject non-quantized fees to prevent fee-based fingerprinting.
+                // Only enforced for transfers; validator register/deregister fees
+                // encode bond amounts and are already distinguishable by tx type.
+                if self.fee != crate::transaction::builder::quantize_fee(self.fee) {
+                    return Err(TxValidationError::FeeNotQuantized);
+                }
+            }
             TxType::ValidatorRegister {
                 signing_key,
                 kem_public_key,
@@ -506,6 +512,8 @@ pub enum TxValidationError {
     FeeTooLow,
     #[error("fee exceeds maximum ({} allowed)", crate::constants::MAX_TX_FEE)]
     FeeTooHigh,
+    #[error("fee must be a standard quantized tier")]
+    FeeNotQuantized,
     #[error("validator registration fee too low (bond + fee required)")]
     InsufficientBond,
     #[error("invalid validator signing key")]
@@ -669,6 +677,16 @@ mod tests {
         assert!(matches!(
             tx.validate_structure(0),
             Err(TxValidationError::FeeTooLow)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_non_quantized_fee() {
+        let mut tx = make_test_tx();
+        tx.fee = 50; // not a standard fee tier
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::FeeNotQuantized)
         ));
     }
 

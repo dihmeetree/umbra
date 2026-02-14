@@ -56,6 +56,42 @@ use crate::Hash;
 /// Nonce size in bytes.
 const NONCE_SIZE: usize = 24;
 
+/// Padding bucket for encrypted payloads (bytes). Ciphertexts are padded to the
+/// next multiple of this value to prevent message length from leaking information
+/// about the plaintext structure.
+const ENCRYPT_PADDING_BUCKET: usize = 64;
+
+/// Pad plaintext with a 4-byte length prefix and random padding to the next
+/// multiple of `ENCRYPT_PADDING_BUCKET`.
+fn pad_plaintext(plaintext: &[u8]) -> Vec<u8> {
+    let len = plaintext.len() as u32;
+    let total = 4 + plaintext.len();
+    let padded_len = total.div_ceil(ENCRYPT_PADDING_BUCKET) * ENCRYPT_PADDING_BUCKET;
+    let mut buf = Vec::with_capacity(padded_len);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(plaintext);
+    // Fill remaining with random bytes to prevent padding oracle attacks
+    let pad_bytes = padded_len - total;
+    if pad_bytes > 0 {
+        let mut pad = vec![0u8; pad_bytes];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut pad);
+        buf.extend_from_slice(&pad);
+    }
+    buf
+}
+
+/// Remove padding: read 4-byte length prefix, return that many bytes.
+fn unpad_plaintext(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 4 {
+        return None;
+    }
+    let len = u32::from_le_bytes(data[..4].try_into().ok()?) as usize;
+    if 4 + len > data.len() {
+        return None;
+    }
+    Some(data[4..4 + len].to_vec())
+}
+
 /// An encrypted message with its KEM ciphertext for the recipient.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedPayload {
@@ -82,7 +118,8 @@ impl EncryptedPayload {
         let nonce = random_nonce();
         let (enc_key, mac_key) = derive_keys(&shared_secret, &nonce);
 
-        let ciphertext = xor_keystream(&enc_key, &nonce, plaintext);
+        let padded = pad_plaintext(plaintext);
+        let ciphertext = xor_keystream(&enc_key, &nonce, &padded);
         let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ct);
 
         Some(EncryptedPayload {
@@ -109,7 +146,8 @@ impl EncryptedPayload {
             return None;
         }
 
-        Some(xor_keystream(&enc_key, &self.nonce, &self.ciphertext))
+        let padded = xor_keystream(&enc_key, &self.nonce, &self.ciphertext);
+        unpad_plaintext(&padded)
     }
 
     /// Encrypt with a pre-established shared secret (for stealth address outputs
@@ -127,7 +165,8 @@ impl EncryptedPayload {
         }
         let nonce = random_nonce();
         let (enc_key, mac_key) = derive_keys(shared_secret, &nonce);
-        let ciphertext = xor_keystream(&enc_key, &nonce, plaintext);
+        let padded = pad_plaintext(plaintext);
+        let ciphertext = xor_keystream(&enc_key, &nonce, &padded);
         let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ciphertext);
 
         Some(EncryptedPayload {
@@ -150,7 +189,8 @@ impl EncryptedPayload {
         if !crate::constant_time_eq(&expected_mac, &self.mac) {
             return None;
         }
-        Some(xor_keystream(&enc_key, &self.nonce, &self.ciphertext))
+        let padded = xor_keystream(&enc_key, &self.nonce, &self.ciphertext);
+        unpad_plaintext(&padded)
     }
 }
 

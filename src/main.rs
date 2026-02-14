@@ -350,10 +350,7 @@ async fn run_node(
     let rpc_addr = config.rpc_addr;
     let mut node = umbra::node::Node::new(config).await?;
 
-    let rpc_state = umbra::node::rpc::RpcState {
-        node: node.state(),
-        p2p: node.p2p_handle(),
-    };
+    let rpc_state = umbra::node::rpc::RpcState::new(node.state(), node.p2p_handle());
     tokio::spawn(umbra::node::rpc::serve(rpc_addr, rpc_state, loaded_tls));
 
     let shutdown = CancellationToken::new();

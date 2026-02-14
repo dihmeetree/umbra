@@ -10,9 +10,6 @@
 //!     .build()?;
 //! ```
 
-use rand::RngExt;
-use winterfell::math::FieldElement;
-
 use crate::crypto::commitment::{BlindingFactor, Commitment};
 use crate::crypto::encryption::EncryptedPayload;
 use crate::crypto::keys::KemPublicKey;
@@ -30,6 +27,7 @@ use crate::transaction::{
     compute_tx_content_hash, Transaction, TxInput, TxMessage, TxOutput, TxType,
 };
 use crate::Hash;
+use rand::RngExt;
 
 /// An input to be spent, with its secret witness data.
 pub struct InputSpec {
@@ -53,6 +51,22 @@ pub struct OutputSpec {
 pub struct MessageSpec {
     pub recipient_kem_pk: KemPublicKey,
     pub plaintext: Vec<u8>,
+}
+
+/// Standard fee tiers for privacy. Using quantized fees prevents fee-based
+/// fingerprinting where a user's preferred fee amount becomes a persistent
+/// tracking signal.
+pub const FEE_TIERS: [u64; 8] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
+/// Quantize a fee to the next standard tier.
+pub fn quantize_fee(fee: u64) -> u64 {
+    for &tier in &FEE_TIERS {
+        if tier >= fee {
+            return tier;
+        }
+    }
+    // Above all tiers: round up to next 10M multiple (saturating to prevent overflow)
+    fee.div_ceil(10_000_000).saturating_mul(10_000_000)
 }
 
 /// Builder for constructing transactions.
@@ -199,11 +213,6 @@ impl TransactionBuilder {
 
             let commitment_felts = commitment.to_felts();
             let spend_auth_felts = hash_to_felts(&spec.spend_auth);
-            let first_path_bit = if stark_path[0].1 {
-                Felt::ONE
-            } else {
-                Felt::ZERO
-            };
 
             // Generate random link_nonce and compute proof_link
             let link_nonce: [Felt; 4] = [
@@ -224,7 +233,6 @@ impl TransactionBuilder {
                 merkle_root: merkle_root_felts,
                 nullifier: nullifier.to_felts(),
                 proof_link: proof_link_felts,
-                first_path_bit,
             };
             let spend_witness = SpendWitness {
                 spend_auth: spend_auth_felts,
@@ -451,12 +459,12 @@ mod tests {
                 spend_auth,
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 450)
+            .add_output(recipient.kem.public.clone(), 400)
             .add_message(
                 recipient.kem.public.clone(),
                 b"Hello from Umbra! This is a private message.".to_vec(),
             )
-            .set_fee(50)
+            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
@@ -537,15 +545,15 @@ mod tests {
                 merkle_path: vec![],
             })
             .add_output(r1.kem.public.clone(), 500)
-            .add_output(r2.kem.public.clone(), 450)
-            .set_fee(50)
+            .add_output(r2.kem.public.clone(), 400)
+            .set_fee(100)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
 
         assert_eq!(tx.inputs.len(), 2);
         assert_eq!(tx.outputs.len(), 2);
-        assert_eq!(tx.fee, 50);
+        assert_eq!(tx.fee, 100);
     }
 
     #[test]
@@ -587,5 +595,31 @@ mod tests {
         }
         let result = builder.build();
         assert!(matches!(result, Err(TxBuildError::TooManyOutputs)));
+    }
+
+    #[test]
+    fn quantize_fee_rounds_up_to_tier() {
+        assert_eq!(quantize_fee(0), 1);
+        assert_eq!(quantize_fee(1), 1);
+        assert_eq!(quantize_fee(2), 10);
+        assert_eq!(quantize_fee(10), 10);
+        assert_eq!(quantize_fee(73), 100);
+        assert_eq!(quantize_fee(100), 100);
+        assert_eq!(quantize_fee(5_000), 10_000);
+        assert_eq!(quantize_fee(10_000_000), 10_000_000);
+    }
+
+    #[test]
+    fn quantize_fee_above_max_tier() {
+        assert_eq!(quantize_fee(10_000_001), 20_000_000);
+        assert_eq!(quantize_fee(25_000_000), 30_000_000);
+        assert_eq!(quantize_fee(50_000_000), 50_000_000);
+    }
+
+    #[test]
+    fn quantize_fee_max_u64() {
+        // Must not panic on overflow
+        let result = quantize_fee(u64::MAX);
+        assert!(result >= u64::MAX / 10_000_000 * 10_000_000);
     }
 }
