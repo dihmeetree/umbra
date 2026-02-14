@@ -30,8 +30,9 @@ pub fn felts_to_hash(elements: &[Felt; DIGEST_SIZE]) -> Hash {
 /// **Important:** This conversion is lossy for non-field-native values. A u64 value
 /// in `[p, 2^64)` will be reduced mod p, so `felts_to_hash(hash_to_felts(h))` may
 /// differ from `h` when `h` originates from BLAKE3 or another source of uniformly
-/// random bytes. The probability of reduction per element is ~2^(-32), giving a
-/// negligible full-digest collision probability of ~2^(-128).
+/// random bytes. The probability of alteration per element is ~2^(-30) (since
+/// `(2^64 - p) / 2^64 = (2^32 - 1) / 2^64`). The 2^(-128) figure applies to two
+/// independently random hashes colliding after reduction, not to per-hash alteration.
 ///
 /// For field-native digests (e.g., Rescue Prime outputs where all elements are
 /// already in `[0, p)`), the round-trip is lossless.

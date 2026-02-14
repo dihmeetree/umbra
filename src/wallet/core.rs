@@ -19,96 +19,61 @@ use crate::transaction::builder::{decode_note, InputSpec, TransactionBuilder};
 use crate::transaction::{Transaction, TxOutput};
 use crate::Hash;
 
-/// Maximum number of transaction history entries retained by the wallet.
 const MAX_HISTORY_ENTRIES: usize = 10_000;
 
-/// Number of epochs after which pending outputs are considered expired.
 pub const PENDING_EXPIRY_EPOCHS: u64 = 10;
 
-/// Direction of a transaction relative to this wallet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TxDirection {
-    /// We sent funds to someone else.
     Send,
-    /// We received funds from someone.
     Receive,
-    /// We received a coinbase reward.
     Coinbase,
 }
 
-/// A record of a transaction in the wallet's history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxHistoryEntry {
-    /// Transaction ID (or vertex ID for coinbase).
     pub tx_id: Hash,
-    /// Direction of the transaction.
     pub direction: TxDirection,
-    /// Amount transferred.
     pub amount: u64,
-    /// Fee paid (0 for receives/coinbase).
     pub fee: u64,
-    /// Epoch when the transaction was observed.
     pub epoch: u64,
 }
 
-/// Spend status of a wallet output.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpendStatus {
-    /// Output is available for spending.
     Unspent,
-    /// Output is used in a pending (unconfirmed) transaction.
-    /// Contains the `tx_binding` of the pending transaction so
-    /// it can be confirmed or cancelled, and the epoch when the
-    /// pending state was created so it can auto-expire.
     Pending {
         tx_binding: Hash,
         created_epoch: u64,
     },
-    /// Output has been confirmed spent on-chain.
     Spent,
 }
 
-/// A spendable output owned by this wallet.
 #[derive(Clone, Debug)]
 pub struct OwnedOutput {
-    /// The commitment for this output
     pub commitment: Commitment,
-    /// The decrypted value
     pub value: u64,
-    /// The blinding factor
     pub blinding: BlindingFactor,
-    /// The spend authorization key
     pub spend_auth: Hash,
-    /// Spend status (unspent / pending / spent)
     pub status: SpendStatus,
-    /// Index in the global commitment tree
     pub commitment_index: Option<usize>,
 }
 
-/// A decrypted message received by this wallet.
 #[derive(Clone, Debug)]
 pub struct ReceivedMessage {
-    /// The transaction that contained this message
     pub tx_hash: Hash,
-    /// The decrypted message content (may contain application-level routing tags)
     pub content: Vec<u8>,
 }
 
-/// The Umbra wallet.
 #[derive(Clone)]
 pub struct Wallet {
-    /// Our identity keypair
     keypair: FullKeypair,
-    /// Outputs we own
     outputs: Vec<OwnedOutput>,
-    /// Messages received
     messages: Vec<ReceivedMessage>,
-    /// Transaction history log
     history: Vec<TxHistoryEntry>,
 }
 
 impl Wallet {
-    /// Create a new wallet with a fresh keypair.
     pub fn new() -> Self {
         Wallet {
             keypair: FullKeypair::generate(),
@@ -118,7 +83,6 @@ impl Wallet {
         }
     }
 
-    /// Create a wallet from an existing keypair.
     pub fn from_keypair(keypair: FullKeypair) -> Self {
         Wallet {
             keypair,
@@ -128,22 +92,18 @@ impl Wallet {
         }
     }
 
-    /// Get our public address (for receiving payments).
     pub fn address(&self) -> crate::crypto::keys::PublicAddress {
         self.keypair.public_address()
     }
 
-    /// Get the KEM public key (for sending to us).
     pub fn kem_public_key(&self) -> &crate::crypto::keys::KemPublicKey {
         &self.keypair.kem.public
     }
 
-    /// Scan a transaction for outputs and messages addressed to us.
     pub fn scan_transaction(&mut self, tx: &Transaction) {
         self.scan_transaction_with_state(tx, None);
     }
 
-    /// Scan a transaction with optional chain state for commitment index resolution.
     pub fn scan_transaction_with_state(
         &mut self,
         tx: &Transaction,
@@ -151,12 +111,9 @@ impl Wallet {
     ) {
         let tx_id = tx.tx_id();
         let epoch = state.map(|s| s.epoch()).unwrap_or(0);
-
-        // Scan outputs
         let mut received_amount = 0u64;
         for (idx, output) in tx.outputs.iter().enumerate() {
             if let Some(mut owned) = self.try_claim_output(output, idx as u32) {
-                // C5: Resolve commitment_index from chain state if available
                 if let Some(st) = state {
                     owned.commitment_index = st.find_commitment(&owned.commitment);
                 }
@@ -164,8 +121,6 @@ impl Wallet {
                 self.outputs.push(owned);
             }
         }
-
-        // Record receive history if we claimed any outputs
         if received_amount > 0 {
             self.push_history(TxHistoryEntry {
                 tx_id: tx_id.0,
@@ -175,8 +130,6 @@ impl Wallet {
                 epoch,
             });
         }
-
-        // Scan messages
         for msg in &tx.messages {
             if let Some(plaintext) = msg.payload.decrypt(&self.keypair.kem) {
                 self.messages.push(ReceivedMessage {
@@ -187,9 +140,6 @@ impl Wallet {
         }
     }
 
-    /// Resolve commitment indices for all outputs using the given chain state.
-    ///
-    /// Call this after the transaction outputs have been added to the chain state.
     pub fn resolve_commitment_indices(&mut self, state: &crate::state::ChainState) {
         for output in &mut self.outputs {
             if output.commitment_index.is_none() {
@@ -198,36 +148,25 @@ impl Wallet {
         }
     }
 
-    /// Try to claim an output as ours by detecting the stealth address.
     fn try_claim_output(&self, output: &TxOutput, output_index: u32) -> Option<OwnedOutput> {
-        // Try to detect the stealth address
         let stealth_info = output
             .stealth_address
             .try_detect_at_index(&self.keypair.kem, output_index)?;
-
-        // Derive spend authorization
         let signing_fingerprint = self.keypair.signing.public.fingerprint();
         let spend_auth = derive_spend_auth(
             &stealth_info.shared_secret,
             &signing_fingerprint,
             output_index,
         );
-
-        // Decrypt the note data reusing the shared secret from stealth detection,
-        // avoiding a redundant second KEM decapsulation and reducing side-channel
-        // exposure of the KEM secret key.
         let shared_secret = SharedSecret(stealth_info.shared_secret);
         let note_data = output
             .encrypted_note
             .decrypt_with_shared_secret(&shared_secret)?;
         let (value, blinding) = decode_note(&note_data)?;
-
-        // Verify the commitment matches
         let expected_commitment = Commitment::commit(value, &blinding);
         if expected_commitment != output.commitment {
             return None;
         }
-
         Some(OwnedOutput {
             commitment: output.commitment,
             value,
@@ -238,10 +177,6 @@ impl Wallet {
         })
     }
 
-    /// Get our spendable balance (only fully unspent outputs, not pending).
-    ///
-    /// Uses saturating arithmetic so the result caps at `u64::MAX` gracefully
-    /// when many outputs are held simultaneously.
     pub fn balance(&self) -> u64 {
         self.outputs
             .iter()
@@ -249,7 +184,6 @@ impl Wallet {
             .fold(0u64, |acc, o| acc.saturating_add(o.value))
     }
 
-    /// Get unspent outputs (excludes pending and spent).
     pub fn unspent_outputs(&self) -> Vec<&OwnedOutput> {
         self.outputs
             .iter()
@@ -257,14 +191,10 @@ impl Wallet {
             .collect()
     }
 
-    /// Get all received messages.
     pub fn received_messages(&self) -> &[ReceivedMessage] {
         &self.messages
     }
 
-    /// Build a transaction sending `amount` to a recipient, with optional message.
-    ///
-    /// The fee is computed deterministically from the transaction shape.
     pub fn build_transaction(
         &mut self,
         recipient_kem_pk: &crate::crypto::keys::KemPublicKey,
@@ -274,11 +204,6 @@ impl Wallet {
         self.build_transaction_with_state(recipient_kem_pk, amount, message, None)
     }
 
-    /// Build a transaction with access to chain state for Merkle path resolution.
-    ///
-    /// The fee is computed deterministically from the transaction shape.
-    /// Uses iterative UTXO selection: estimates the fee from expected input/output
-    /// counts, selects UTXOs, then re-estimates until stable.
     pub fn build_transaction_with_state(
         &mut self,
         recipient_kem_pk: &crate::crypto::keys::KemPublicKey,
@@ -286,12 +211,9 @@ impl Wallet {
         message: Option<Vec<u8>>,
         state: Option<&crate::state::ChainState>,
     ) -> Result<Transaction, WalletError> {
-        // Estimate message ciphertext size (Kyber1024 ciphertext ~1568 + nonce 24 + mac 32 + padded plaintext)
         let msg_bytes_estimate: usize = message.as_ref().map(|m| m.len() + 1700).unwrap_or(0);
-
-        // Iterative UTXO selection: fee depends on input count, input count depends on fee
         let mut num_inputs = 1usize;
-        let mut num_outputs = 2usize; // payment + change (conservative estimate)
+        let mut num_outputs = 2usize;
         let selected;
         let selected_total;
         let fee;
@@ -301,11 +223,8 @@ impl Wallet {
             let total_needed = amount
                 .checked_add(estimated_fee)
                 .ok_or(WalletError::ArithmeticOverflow)?;
-
-            // Select outputs to spend (simple greedy, only fully unspent)
             let mut sel: Vec<usize> = Vec::new();
             let mut sel_total = 0u64;
-
             for (i, output) in self.outputs.iter().enumerate() {
                 if output.status != SpendStatus::Unspent {
                     continue;
@@ -318,20 +237,16 @@ impl Wallet {
                     break;
                 }
             }
-
             if sel_total < total_needed {
                 return Err(WalletError::InsufficientFunds {
                     available: sel_total,
                     needed: total_needed,
                 });
             }
-
             let actual_outputs = if sel_total == total_needed { 1 } else { 2 };
             let actual_fee =
                 crate::constants::compute_weight_fee(sel.len(), actual_outputs, msg_bytes_estimate);
-
             if sel.len() == num_inputs && actual_outputs == num_outputs {
-                // Converged
                 selected = sel;
                 selected_total = sel_total;
                 fee = actual_fee;
@@ -340,12 +255,9 @@ impl Wallet {
             num_inputs = sel.len();
             num_outputs = actual_outputs;
         }
-
         let total_needed = amount
             .checked_add(fee)
             .ok_or(WalletError::ArithmeticOverflow)?;
-
-        // Build inputs with Merkle paths from state
         let mut builder = TransactionBuilder::new();
         for &idx in &selected {
             let output = &self.outputs[idx];
@@ -361,24 +273,15 @@ impl Wallet {
                 merkle_path,
             });
         }
-
-        // Build outputs
         builder = builder.add_output(recipient_kem_pk.clone(), amount);
-
-        // Change output (back to ourselves)
         let change = selected_total - total_needed;
         if change > 0 {
             builder = builder.add_output(self.keypair.kem.public.clone(), change);
         }
-
-        // Add message if provided
         if let Some(msg_data) = message {
             builder = builder.add_message(recipient_kem_pk.clone(), msg_data);
         }
-
         let tx = builder.build().map_err(WalletError::Build)?;
-
-        // Mark outputs as pending (not fully spent until confirmed on-chain).
         let tx_binding = tx.tx_binding;
         for &idx in &selected {
             self.outputs[idx].status = SpendStatus::Pending {
@@ -386,22 +289,16 @@ impl Wallet {
                 created_epoch: 0,
             };
         }
-
-        // Record send in history
         self.push_history(TxHistoryEntry {
             tx_id: tx.tx_id().0,
             direction: TxDirection::Send,
             amount,
             fee: tx.fee,
-            epoch: 0, // caller can update epoch if known
+            epoch: 0,
         });
-
         Ok(tx)
     }
 
-    /// Confirm that a pending transaction was included on-chain.
-    /// Moves all outputs with matching `tx_binding` from `Pending` to `Spent`.
-    /// Zeroizes the spend authorization key since it's no longer needed.
     pub fn confirm_transaction(&mut self, tx_binding: &Hash) {
         for output in &mut self.outputs {
             if let SpendStatus::Pending {
@@ -410,15 +307,13 @@ impl Wallet {
             {
                 if tb == tx_binding {
                     output.status = SpendStatus::Spent;
-                    // Zeroize spend_auth — spent outputs should not retain secrets
                     output.spend_auth.zeroize();
+                    output.blinding.zeroize();
                 }
             }
         }
     }
 
-    /// Cancel a pending transaction (e.g., it was not included before expiry).
-    /// Moves all outputs with matching `tx_binding` from `Pending` back to `Unspent`.
     pub fn cancel_transaction(&mut self, tx_binding: &Hash) {
         for output in &mut self.outputs {
             if let SpendStatus::Pending {
@@ -432,8 +327,6 @@ impl Wallet {
         }
     }
 
-    /// Cancel pending transactions older than `max_age_epochs` epochs.
-    /// Returns the number of outputs returned to Unspent.
     pub fn expire_pending(&mut self, current_epoch: u64, max_age_epochs: u64) -> usize {
         let mut count = 0;
         for output in &mut self.outputs {
@@ -447,11 +340,6 @@ impl Wallet {
         count
     }
 
-    /// Scan a single coinbase output (not part of any transaction).
-    ///
-    /// Coinbase outputs are created during vertex finalization and use
-    /// output_index 0. Call this with the coinbase output returned from
-    /// the RPC `/vertices/finalized` response.
     pub fn scan_coinbase_output(
         &mut self,
         output: &TxOutput,
@@ -465,7 +353,7 @@ impl Wallet {
             let amount = owned.value;
             self.outputs.push(owned);
             self.push_history(TxHistoryEntry {
-                tx_id: [0u8; 32], // coinbase has no tx_id
+                tx_id: [0u8; 32],
                 direction: TxDirection::Coinbase,
                 amount,
                 fee: 0,
@@ -474,17 +362,13 @@ impl Wallet {
         }
     }
 
-    /// Get the number of owned outputs.
     pub fn output_count(&self) -> usize {
         self.outputs.len()
     }
-
-    /// Get the transaction history.
     pub fn history(&self) -> &[TxHistoryEntry] {
         &self.history
     }
 
-    /// Push a history entry and cap the total size to [`MAX_HISTORY_ENTRIES`].
     fn push_history(&mut self, entry: TxHistoryEntry) {
         self.history.push(entry);
         if self.history.len() > MAX_HISTORY_ENTRIES {
@@ -493,10 +377,6 @@ impl Wallet {
         }
     }
 
-    /// Build a consolidation transaction that merges all unspent outputs into one.
-    ///
-    /// Sends all unspent value (minus fee) back to ourselves in a single output.
-    /// The fee is computed deterministically from the transaction shape.
     pub fn build_consolidation_tx(
         &mut self,
         state: Option<&crate::state::ChainState>,
@@ -508,27 +388,21 @@ impl Wallet {
             .filter(|(_, o)| o.status == SpendStatus::Unspent)
             .map(|(i, _)| i)
             .collect();
-
         if unspent.len() < 2 {
             return Err(WalletError::NothingToConsolidate);
         }
-
         let total: u64 = unspent
             .iter()
             .map(|&i| self.outputs[i].value)
             .try_fold(0u64, |acc, v| acc.checked_add(v))
             .ok_or(WalletError::ArithmeticOverflow)?;
-
-        // Deterministic fee for N-input, 1-output, no-message consolidation
         let fee = crate::constants::compute_weight_fee(unspent.len(), 1, 0);
-
         if total <= fee {
             return Err(WalletError::InsufficientFunds {
                 available: total,
                 needed: fee,
             });
         }
-
         let mut builder = TransactionBuilder::new();
         for &idx in &unspent {
             let output = &self.outputs[idx];
@@ -544,14 +418,9 @@ impl Wallet {
                 merkle_path,
             });
         }
-
-        // Single output back to ourselves
         let consolidated_amount = total - fee;
         builder = builder.add_output(self.keypair.kem.public.clone(), consolidated_amount);
-
         let tx = builder.build().map_err(WalletError::Build)?;
-
-        // Mark all inputs as pending
         let tx_binding = tx.tx_binding;
         for &idx in &unspent {
             self.outputs[idx].status = SpendStatus::Pending {
@@ -559,8 +428,6 @@ impl Wallet {
                 created_epoch: 0,
             };
         }
-
-        // Record in history
         self.push_history(TxHistoryEntry {
             tx_id: tx.tx_id().0,
             direction: TxDirection::Send,
@@ -568,11 +435,9 @@ impl Wallet {
             fee,
             epoch: 0,
         });
-
         Ok(tx)
     }
 
-    /// Get the raw keypair (for recovery backup).
     pub fn keypair(&self) -> &FullKeypair {
         &self.keypair
     }
@@ -584,25 +449,17 @@ impl Default for Wallet {
     }
 }
 
-// ── Recovery ─────────────────────────────────────────────────────────────
+// -- Recovery -----------------------------------------------------------------
 
-/// Generate a 24-word mnemonic phrase and the 32-byte entropy it encodes.
-///
-/// Uses 256 bits of random entropy, computes an 8-bit BLAKE3 checksum,
-/// then maps 264 bits to 24 × 11-bit indices into the BIP39 English wordlist.
 pub fn generate_mnemonic() -> (Vec<String>, [u8; 32]) {
     let entropy: [u8; 32] = rand::random();
     let words = entropy_to_words(&entropy);
     (words, entropy)
 }
 
-/// Convert 32-byte entropy to a 24-word mnemonic.
 fn entropy_to_words(entropy: &[u8; 32]) -> Vec<String> {
     use super::bip39_words::WORDLIST;
-    // 8-bit checksum = first byte of BLAKE3(entropy)
     let checksum = blake3::hash(entropy).as_bytes()[0];
-
-    // 256 bits entropy + 8 bits checksum = 264 bits = 24 × 11-bit words
     let mut bits = Vec::with_capacity(264);
     for byte in entropy {
         for i in (0..8).rev() {
@@ -612,7 +469,6 @@ fn entropy_to_words(entropy: &[u8; 32]) -> Vec<String> {
     for i in (0..8).rev() {
         bits.push((checksum >> i) & 1);
     }
-
     let mut words = Vec::with_capacity(24);
     for chunk in bits.chunks(11) {
         let mut index = 0u16;
@@ -624,20 +480,14 @@ fn entropy_to_words(entropy: &[u8; 32]) -> Vec<String> {
     words
 }
 
-/// Convert a 24-word mnemonic back to 32-byte entropy.
-///
-/// Validates the checksum and returns an error if invalid.
 pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
     use super::bip39_words::WORDLIST;
-
     if words.len() != 24 {
         return Err(WalletError::Recovery(format!(
             "expected 24 words, got {}",
             words.len()
         )));
     }
-
-    // Map words to 11-bit indices
     let mut bits = Vec::with_capacity(264);
     for word in words {
         let lower = word.to_lowercase();
@@ -648,53 +498,35 @@ pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
             bits.push(((index >> i) & 1) as u8);
         }
     }
-
-    // Extract 256 bits entropy + 8 bits checksum
     let mut entropy = [0u8; 32];
     for (i, byte) in entropy.iter_mut().enumerate() {
         for j in 0..8 {
             *byte = (*byte << 1) | bits[i * 8 + j];
         }
     }
-
     let mut checksum = 0u8;
     for j in 0..8 {
         checksum = (checksum << 1) | bits[256 + j];
     }
-
-    // Zeroize intermediate secret bits
     bits.zeroize();
-
-    // Validate checksum
     let expected_checksum = blake3::hash(&entropy).as_bytes()[0];
     if checksum != expected_checksum {
         entropy.zeroize();
         return Err(WalletError::Recovery("invalid mnemonic checksum".into()));
     }
-
     Ok(entropy)
 }
 
 impl Wallet {
-    /// Create an encrypted backup of the wallet key material.
-    ///
-    /// Returns (mnemonic_words, encrypted_backup_bytes). Both are needed
-    /// to recover the wallet — the mnemonic derives the encryption key,
-    /// and the backup contains the actual PQ key material.
     pub fn create_recovery_backup(&self) -> (Vec<String>, Vec<u8>) {
         let (words, mut entropy) = generate_mnemonic();
-
-        // Derive encryption key from entropy
         let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
-
-        // Serialize key material
         let mut material = zeroize::Zeroizing::new(Vec::new());
         let spk = &self.keypair.signing.public.0;
         let ssk = &self.keypair.signing.secret.0;
         let kpk = &self.keypair.kem.public.0;
         let ksk = &self.keypair.kem.secret.0;
-
         material.extend_from_slice(&(spk.len() as u32).to_le_bytes());
         material.extend_from_slice(spk);
         material.extend_from_slice(&(ssk.len() as u32).to_le_bytes());
@@ -703,32 +535,21 @@ impl Wallet {
         material.extend_from_slice(kpk);
         material.extend_from_slice(&(ksk.len() as u32).to_le_bytes());
         material.extend_from_slice(ksk);
-
-        // Generate random nonce to ensure unique keystream per backup
         let mut nonce = [0u8; RECOVERY_NONCE_SIZE];
         rand::rng().fill_bytes(&mut nonce);
-
-        // Encrypt with BLAKE3 keystream XOR (nonce prevents keystream reuse)
         let encrypted = xor_keystream(&key, &nonce, &material);
-        // material is auto-zeroized on drop via Zeroizing wrapper
-
-        // MAC covers nonce + ciphertext (encrypt-then-MAC)
         let mut mac_input = Vec::with_capacity(RECOVERY_NONCE_SIZE + encrypted.len());
         mac_input.extend_from_slice(&nonce);
         mac_input.extend_from_slice(&encrypted);
         let mac = blake3::keyed_hash(&key, &mac_input);
         key.zeroize();
-
-        // Format: [24-byte nonce][32-byte MAC][ciphertext]
         let mut backup = Vec::with_capacity(RECOVERY_NONCE_SIZE + 32 + encrypted.len());
         backup.extend_from_slice(&nonce);
         backup.extend_from_slice(mac.as_bytes());
         backup.extend_from_slice(&encrypted);
-
         (words, backup)
     }
 
-    /// Recover a wallet from a mnemonic phrase and encrypted backup file.
     pub fn recover_from_backup(
         words: &[String],
         encrypted_backup: &[u8],
@@ -736,23 +557,17 @@ impl Wallet {
         let mut entropy = words_to_entropy(words)?;
         let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
-
-        // Format: [24-byte nonce][32-byte MAC][ciphertext]
         let min_len = RECOVERY_NONCE_SIZE + 32;
         if encrypted_backup.len() < min_len {
             key.zeroize();
             return Err(WalletError::Recovery("backup too short".into()));
         }
-
-        // Extract nonce, MAC, and ciphertext
         let nonce: [u8; RECOVERY_NONCE_SIZE] =
             encrypted_backup[..RECOVERY_NONCE_SIZE]
                 .try_into()
                 .map_err(|_| WalletError::Recovery("truncated backup".into()))?;
         let stored_mac = &encrypted_backup[RECOVERY_NONCE_SIZE..min_len];
         let ciphertext = &encrypted_backup[min_len..];
-
-        // Verify MAC (covers nonce + ciphertext)
         let mut mac_input = Vec::with_capacity(RECOVERY_NONCE_SIZE + ciphertext.len());
         mac_input.extend_from_slice(&nonce);
         mac_input.extend_from_slice(ciphertext);
@@ -763,12 +578,8 @@ impl Wallet {
                 "invalid mnemonic or corrupted backup".into(),
             ));
         }
-
-        // Decrypt
         let material = zeroize::Zeroizing::new(xor_keystream(&key, &nonce, ciphertext));
         key.zeroize();
-
-        // Parse key material
         let mut pos = 0;
         let read_vec = |data: &[u8], pos: &mut usize| -> Result<Vec<u8>, WalletError> {
             if *pos + 4 > data.len() {
@@ -787,19 +598,15 @@ impl Wallet {
             *pos += len;
             Ok(v)
         };
-
         let spk = read_vec(&material, &mut pos)?;
         let ssk = read_vec(&material, &mut pos)?;
         let kpk = read_vec(&material, &mut pos)?;
         let ksk = read_vec(&material, &mut pos)?;
-        // material is auto-zeroized on drop via Zeroizing wrapper
         drop(material);
-
         let signing = SigningKeypair::from_bytes(spk, ssk)
             .ok_or_else(|| WalletError::Recovery("invalid signing key in backup".into()))?;
         let kem = KemKeypair::from_bytes(kpk, ksk)
             .ok_or_else(|| WalletError::Recovery("invalid KEM key in backup".into()))?;
-
         Ok(Wallet {
             keypair: FullKeypair { signing, kem },
             outputs: Vec::new(),
@@ -809,20 +616,13 @@ impl Wallet {
     }
 }
 
-/// Size of the random nonce prepended to recovery backups.
 const RECOVERY_NONCE_SIZE: usize = 24;
 
-/// XOR data with a BLAKE3 keystream, incorporating a nonce for uniqueness.
-///
-/// Each 32-byte block derives a unique key by incorporating the master key,
-/// nonce, and block index into `blake3::derive_key`, ensuring every block
-/// produces a distinct keystream even if the same key is reused.
 fn xor_keystream(key: &[u8; 32], nonce: &[u8; RECOVERY_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut offset = 0;
     let mut block_idx: u64 = 0;
     while offset < data.len() {
-        // Incorporate nonce + block_idx into the key derivation input
         let mut block_input = Vec::with_capacity(32 + RECOVERY_NONCE_SIZE + 8);
         block_input.extend_from_slice(key);
         block_input.extend_from_slice(nonce);
@@ -838,9 +638,8 @@ fn xor_keystream(key: &[u8; 32], nonce: &[u8; RECOVERY_NONCE_SIZE], data: &[u8])
     result
 }
 
-// ── Persistence ──────────────────────────────────────────────────────────
+// -- Persistence --------------------------------------------------------------
 
-/// Wallet file format (bincode-serialized).
 #[derive(Serialize, Deserialize)]
 struct WalletFile {
     version: u32,
@@ -851,7 +650,6 @@ struct WalletFile {
     outputs: Vec<SerializedOutput>,
     messages: Vec<SerializedMessage>,
     last_scanned_sequence: u64,
-    /// Transaction history (added in version 2).
     history: Vec<TxHistoryEntry>,
 }
 
@@ -913,7 +711,6 @@ impl From<SerializedSpendStatus> for SpendStatus {
     }
 }
 
-/// Legacy v1 wallet file format (without history).
 #[derive(Serialize, Deserialize)]
 struct WalletFileV1 {
     version: u32,
@@ -927,13 +724,51 @@ struct WalletFileV1 {
 }
 
 const WALLET_FILE_VERSION: u32 = 2;
+const ENCRYPTED_MAGIC: [u8; 4] = [0x55, 0x4D, 0x42, 0x45];
+const WALLET_SALT_SIZE: usize = 32;
+const WALLET_NONCE_SIZE: usize = 24;
+
+fn derive_wallet_key(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u8; 32] {
+    let mut input = Vec::with_capacity(salt.len() + password.len());
+    input.extend_from_slice(salt);
+    input.extend_from_slice(password.as_bytes());
+    crate::hash_domain(b"umbra.wallet.file.key", &input)
+}
+
+fn derive_wallet_mac_key(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u8; 32] {
+    let mut input = Vec::with_capacity(salt.len() + password.len());
+    input.extend_from_slice(salt);
+    input.extend_from_slice(password.as_bytes());
+    crate::hash_domain(b"umbra.wallet.file.mac", &input)
+}
+
+fn wallet_xor_keystream(key: &[u8; 32], nonce: &[u8; WALLET_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len());
+    let mut offset = 0;
+    let mut block_idx: u64 = 0;
+    while offset < data.len() {
+        let mut block_input = Vec::with_capacity(32 + WALLET_NONCE_SIZE + 8);
+        block_input.extend_from_slice(key);
+        block_input.extend_from_slice(nonce);
+        block_input.extend_from_slice(&block_idx.to_le_bytes());
+        let block = crate::hash_domain(b"umbra.wallet.file.stream", &block_input);
+        let end = std::cmp::min(offset + 32, data.len());
+        for i in offset..end {
+            result.push(data[i] ^ block[i - offset]);
+        }
+        offset = end;
+        block_idx += 1;
+    }
+    result
+}
 
 impl Wallet {
-    /// Save the wallet to a file.
-    ///
-    /// Persists keypair, outputs, messages, and scan progress.
-    /// File permissions are set to 0o600 on Unix.
-    pub fn save_to_file(&self, path: &Path, last_scanned_seq: u64) -> Result<(), WalletError> {
+    pub fn save_to_file(
+        &self,
+        path: &Path,
+        last_scanned_seq: u64,
+        password: Option<&str>,
+    ) -> Result<(), WalletError> {
         let outputs: Vec<SerializedOutput> = self
             .outputs
             .iter()
@@ -946,7 +781,6 @@ impl Wallet {
                 commitment_index: o.commitment_index,
             })
             .collect();
-
         let messages: Vec<SerializedMessage> = self
             .messages
             .iter()
@@ -955,7 +789,6 @@ impl Wallet {
                 content: m.content.clone(),
             })
             .collect();
-
         let wallet_file = WalletFile {
             version: WALLET_FILE_VERSION,
             signing_pk: self.keypair.signing.public.0.clone(),
@@ -967,14 +800,34 @@ impl Wallet {
             last_scanned_sequence: last_scanned_seq,
             history: self.history.clone(),
         };
-
-        let bytes = crate::serialize(&wallet_file)
+        let plaintext = crate::serialize(&wallet_file)
             .map_err(|e| WalletError::Persistence(format!("serialize failed: {}", e)))?;
-
-        // Atomic write: write to temp file, fsync, rename, fsync directory.
-        // Without fsync, a crash after rename can leave an empty/corrupt file.
+        let bytes = if let Some(pw) = password {
+            let salt: [u8; WALLET_SALT_SIZE] = rand::random();
+            let mut nonce = [0u8; WALLET_NONCE_SIZE];
+            rand::rng().fill_bytes(&mut nonce);
+            let mut enc_key = derive_wallet_key(pw, &salt);
+            let mut mac_key = derive_wallet_mac_key(pw, &salt);
+            let ciphertext = wallet_xor_keystream(&enc_key, &nonce, &plaintext);
+            enc_key.zeroize();
+            let mut mac_input = Vec::with_capacity(WALLET_NONCE_SIZE + ciphertext.len());
+            mac_input.extend_from_slice(&nonce);
+            mac_input.extend_from_slice(&ciphertext);
+            let mac = blake3::keyed_hash(&mac_key, &mac_input);
+            mac_key.zeroize();
+            let mut out = Vec::with_capacity(
+                4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 32 + ciphertext.len(),
+            );
+            out.extend_from_slice(&ENCRYPTED_MAGIC);
+            out.extend_from_slice(&salt);
+            out.extend_from_slice(&nonce);
+            out.extend_from_slice(mac.as_bytes());
+            out.extend_from_slice(&ciphertext);
+            out
+        } else {
+            plaintext
+        };
         let tmp_path = path.with_extension("dat.tmp");
-
         {
             let mut file = std::fs::File::create(&tmp_path)
                 .map_err(|e| WalletError::Persistence(format!("create failed: {}", e)))?;
@@ -983,43 +836,66 @@ impl Wallet {
             file.sync_all()
                 .map_err(|e| WalletError::Persistence(format!("fsync failed: {}", e)))?;
         }
-
-        // Set permissions on temp file before rename
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| WalletError::Persistence(format!("chmod failed: {}", e)))?;
         }
-
-        // Atomic rename
         std::fs::rename(&tmp_path, path)
             .map_err(|e| WalletError::Persistence(format!("rename failed: {}", e)))?;
-
-        // fsync the parent directory to ensure the rename is durable
         if let Some(parent) = path.parent() {
             if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all(); // Best-effort; rename already succeeded
+                let _ = dir.sync_all();
             }
         }
-
         Ok(())
     }
 
-    /// Load a wallet from a file.
-    ///
-    /// Returns the wallet and the last scanned sequence number.
-    /// Supports migration from v1 (no history) to v2.
-    pub fn load_from_file(path: &Path) -> Result<(Self, u64), WalletError> {
-        let bytes = std::fs::read(path)
+    pub fn load_from_file(path: &Path, password: Option<&str>) -> Result<(Self, u64), WalletError> {
+        let raw = std::fs::read(path)
             .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
-
-        // Try v2 first, fall back to v1
+        let bytes = if raw.len() >= 4 && raw[..4] == ENCRYPTED_MAGIC {
+            let min_len = 4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 32;
+            if raw.len() < min_len {
+                return Err(WalletError::Persistence(
+                    "encrypted wallet file truncated".into(),
+                ));
+            }
+            let pw = password.ok_or_else(|| {
+                WalletError::Persistence("wallet file is encrypted; password required".into())
+            })?;
+            let salt: [u8; WALLET_SALT_SIZE] = raw[4..4 + WALLET_SALT_SIZE]
+                .try_into()
+                .map_err(|_| WalletError::Persistence("truncated salt".into()))?;
+            let nonce: [u8; WALLET_NONCE_SIZE] = raw
+                [4 + WALLET_SALT_SIZE..4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE]
+                .try_into()
+                .map_err(|_| WalletError::Persistence("truncated nonce".into()))?;
+            let stored_mac = &raw[4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE..min_len];
+            let ciphertext = &raw[min_len..];
+            let mut mac_key = derive_wallet_mac_key(pw, &salt);
+            let mut mac_input = Vec::with_capacity(WALLET_NONCE_SIZE + ciphertext.len());
+            mac_input.extend_from_slice(&nonce);
+            mac_input.extend_from_slice(ciphertext);
+            let expected_mac = blake3::keyed_hash(&mac_key, &mac_input);
+            mac_key.zeroize();
+            if !crate::constant_time_eq(stored_mac, expected_mac.as_bytes()) {
+                return Err(WalletError::Persistence(
+                    "decryption failed: wrong password or corrupted file".into(),
+                ));
+            }
+            let mut enc_key = derive_wallet_key(pw, &salt);
+            let plaintext = wallet_xor_keystream(&enc_key, &nonce, ciphertext);
+            enc_key.zeroize();
+            plaintext
+        } else {
+            raw
+        };
         let wallet_file: WalletFile = if let Ok(wf) = crate::deserialize::<WalletFile>(&bytes) {
             if wf.version == WALLET_FILE_VERSION {
                 wf
             } else if wf.version == 1 {
-                // v1 files won't have history, deserialize as v1 and migrate
                 let wf1: WalletFileV1 = crate::deserialize(&bytes).map_err(|e| {
                     WalletError::Persistence(format!("v1 deserialization failed: {}", e))
                 })?;
@@ -1041,7 +917,6 @@ impl Wallet {
                 )));
             }
         } else {
-            // Try parsing as v1 directly
             let wf1: WalletFileV1 = crate::deserialize(&bytes)
                 .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
             if wf1.version != 1 {
@@ -1062,16 +937,11 @@ impl Wallet {
                 history: Vec::new(),
             }
         };
-
-        // Validate and reconstruct keys
         let signing = SigningKeypair::from_bytes(wallet_file.signing_pk, wallet_file.signing_sk)
             .ok_or_else(|| WalletError::Persistence("invalid signing key data".into()))?;
-
         let kem = KemKeypair::from_bytes(wallet_file.kem_pk, wallet_file.kem_sk)
             .ok_or_else(|| WalletError::Persistence("invalid KEM key data".into()))?;
-
         let keypair = FullKeypair { signing, kem };
-
         let outputs: Vec<OwnedOutput> = wallet_file
             .outputs
             .into_iter()
@@ -1084,7 +954,6 @@ impl Wallet {
                 commitment_index: o.commitment_index,
             })
             .collect();
-
         let messages: Vec<ReceivedMessage> = wallet_file
             .messages
             .into_iter()
@@ -1093,19 +962,16 @@ impl Wallet {
                 content: m.content,
             })
             .collect();
-
         let wallet = Wallet {
             keypair,
             outputs,
             messages,
             history: wallet_file.history,
         };
-
         Ok((wallet, wallet_file.last_scanned_sequence))
     }
 }
 
-/// Wallet errors.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum WalletError {
     #[error("insufficient funds: have {available}, need {needed}")]
@@ -1147,9 +1013,6 @@ mod tests {
     #[test]
     fn wallet_scan_and_receive() {
         let mut receiver_wallet = Wallet::new();
-
-        // Build a transaction paying the receiver
-        // 1 input, 1 output, no messages → fee = 100+100+100 = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 1200,
@@ -1161,8 +1024,6 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
-        // Receiver scans and finds the output
         receiver_wallet.scan_transaction(&tx);
         assert_eq!(receiver_wallet.balance(), 900);
         assert_eq!(receiver_wallet.unspent_outputs().len(), 1);
@@ -1171,9 +1032,6 @@ mod tests {
     #[test]
     fn wallet_scan_message() {
         let mut receiver_wallet = Wallet::new();
-
-        // 1 input, 1 output, 1 message (26 bytes → padded to 64 → ceil(64/1024)=1 KB)
-        // fee = 100 + 100 + 100 + 1*10 = 310
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 400,
@@ -1189,9 +1047,7 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         receiver_wallet.scan_transaction(&tx);
-
         assert_eq!(receiver_wallet.received_messages().len(), 1);
         assert_eq!(
             receiver_wallet.received_messages()[0].content,
@@ -1203,8 +1059,6 @@ mod tests {
     fn wallet_wrong_recipient_no_detect() {
         let recipient = FullKeypair::generate();
         let mut bystander = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 390,
@@ -1216,7 +1070,6 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         bystander.scan_transaction(&tx);
         assert_eq!(bystander.balance(), 0);
     }
@@ -1225,8 +1078,6 @@ mod tests {
     fn wallet_spend_and_change() {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
-
-        // Give Alice some funds — 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 10300,
@@ -1238,34 +1089,22 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         alice.scan_transaction(&funding_tx);
         assert_eq!(alice.balance(), 10000);
-
-        // Alice sends 3000 to Bob (fee is deterministic: 100 + 100 + 200 = 400)
         let tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-
-        assert_eq!(tx.fee, 400); // FEE_BASE + 1*INPUT + 2*OUTPUT
-        assert_eq!(tx.outputs.len(), 2); // Payment + change
-        assert_eq!(alice.balance(), 0); // All outputs now pending
-
-        // Confirm the transaction
+        assert_eq!(tx.fee, 400);
+        assert_eq!(tx.outputs.len(), 2);
+        assert_eq!(alice.balance(), 0);
         alice.confirm_transaction(&tx.tx_binding);
-
-        // Alice scans her own transaction to pick up change
         alice.scan_transaction(&tx);
-        assert_eq!(alice.balance(), 6600); // 10000 - 3000 - 400
+        assert_eq!(alice.balance(), 6600);
     }
 
     #[test]
     fn wallet_save_load_roundtrip() {
         let mut wallet = Wallet::new();
-
-        // Give wallet some funds
-        // 1 input, 1 output, 1 message (12 bytes → padded to 64 → ceil(64/1024)=1 KB)
-        // fee = 100 + 100 + 100 + 1*10 = 310
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 4310,
@@ -1278,20 +1117,14 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         wallet.scan_transaction(&tx);
         assert_eq!(wallet.balance(), 4000);
         assert_eq!(wallet.received_messages().len(), 1);
-
         let original_address = wallet.address().address_id();
-
-        // Save to temp file
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.dat");
-        wallet.save_to_file(&path, 42).unwrap();
-
-        // Load back
-        let (loaded, last_seq) = Wallet::load_from_file(&path).unwrap();
+        wallet.save_to_file(&path, 42, None).unwrap();
+        let (loaded, last_seq) = Wallet::load_from_file(&path, None).unwrap();
         assert_eq!(last_seq, 42);
         assert_eq!(loaded.balance(), 4000);
         assert_eq!(loaded.received_messages().len(), 1);
@@ -1304,8 +1137,6 @@ mod tests {
     fn wallet_confirm_transaction_marks_spent() {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 10300,
@@ -1317,26 +1148,16 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         alice.scan_transaction(&funding_tx);
         assert_eq!(alice.balance(), 10000);
-
         let tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-
-        // Pending — balance is 0
         assert_eq!(alice.balance(), 0);
-
-        // Confirm makes them Spent (not Pending)
         alice.confirm_transaction(&tx.tx_binding);
-
-        // Still 0 balance (input is Spent, not Unspent)
         assert_eq!(alice.balance(), 0);
-
-        // Scan to pick up change
         alice.scan_transaction(&tx);
-        assert_eq!(alice.balance(), 6600); // 10000 - 3000 - 400
+        assert_eq!(alice.balance(), 6600);
     }
 
     #[test]
@@ -1351,8 +1172,6 @@ mod tests {
     fn wallet_balance_excludes_pending() {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 5300,
@@ -1364,16 +1183,11 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         alice.scan_transaction(&funding_tx);
         assert_eq!(alice.balance(), 5000);
-
-        // Build tx puts outputs in Pending
         let _tx = alice
             .build_transaction(bob.kem_public_key(), 1000, None)
             .unwrap();
-
-        // Pending outputs excluded from balance
         assert_eq!(alice.balance(), 0);
         assert_eq!(alice.unspent_outputs().len(), 0);
     }
@@ -1382,8 +1196,6 @@ mod tests {
     fn wallet_cancel_pending_transaction() {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 10300,
@@ -1395,26 +1207,19 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         alice.scan_transaction(&funding_tx);
         assert_eq!(alice.balance(), 10000);
-
-        // Build a transaction — outputs become pending
         let tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-        assert_eq!(alice.balance(), 0); // All pending
-
-        // Cancel the transaction — outputs return to unspent
+        assert_eq!(alice.balance(), 0);
         alice.cancel_transaction(&tx.tx_binding);
-        assert_eq!(alice.balance(), 10000); // Restored
+        assert_eq!(alice.balance(), 10000);
     }
 
     #[test]
     fn scan_records_receive_history() {
         let mut wallet = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 1200,
@@ -1426,7 +1231,6 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         wallet.scan_transaction(&tx);
         assert_eq!(wallet.history().len(), 1);
         assert_eq!(wallet.history()[0].direction, TxDirection::Receive);
@@ -1437,8 +1241,6 @@ mod tests {
     fn build_transaction_records_send_history() {
         let mut alice = Wallet::new();
         let bob = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 10300,
@@ -1450,25 +1252,20 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         alice.scan_transaction(&funding_tx);
         alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-
-        // Should have receive + send
         assert_eq!(alice.history().len(), 2);
         assert_eq!(alice.history()[0].direction, TxDirection::Receive);
         assert_eq!(alice.history()[1].direction, TxDirection::Send);
         assert_eq!(alice.history()[1].amount, 3000);
-        assert_eq!(alice.history()[1].fee, 400); // deterministic: 100 + 100 + 200
+        assert_eq!(alice.history()[1].fee, 400);
     }
 
     #[test]
     fn history_persists_in_wallet_file() {
         let mut wallet = Wallet::new();
-
-        // 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 1200,
@@ -1480,15 +1277,12 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         wallet.scan_transaction(&tx);
         assert_eq!(wallet.history().len(), 1);
-
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.dat");
-        wallet.save_to_file(&path, 0).unwrap();
-
-        let (loaded, _) = Wallet::load_from_file(&path).unwrap();
+        wallet.save_to_file(&path, 0, None).unwrap();
+        let (loaded, _) = Wallet::load_from_file(&path, None).unwrap();
         assert_eq!(loaded.history().len(), 1);
         assert_eq!(loaded.history()[0].direction, TxDirection::Receive);
         assert_eq!(loaded.history()[0].amount, 900);
@@ -1498,78 +1292,57 @@ mod tests {
     fn mnemonic_roundtrip() {
         let (words, entropy) = generate_mnemonic();
         assert_eq!(words.len(), 24);
-
         let recovered_entropy = words_to_entropy(&words).unwrap();
         assert_eq!(recovered_entropy, entropy);
     }
-
     #[test]
     fn mnemonic_invalid_checksum() {
         let (mut words, _) = generate_mnemonic();
-        // Corrupt one word
         words[0] = "abandon".to_string();
         words[1] = "abandon".to_string();
-        // Very unlikely to have valid checksum
-        let result = words_to_entropy(&words);
-        // May or may not fail depending on luck, but at least it shouldn't panic
-        let _ = result;
+        let _ = words_to_entropy(&words);
     }
-
     #[test]
     fn mnemonic_wrong_length() {
         let words: Vec<String> = vec!["abandon".to_string(); 12];
-        let result = words_to_entropy(&words);
-        assert!(result.is_err());
+        assert!(words_to_entropy(&words).is_err());
     }
-
     #[test]
     fn mnemonic_unknown_word() {
         let mut words: Vec<String> = vec!["abandon".to_string(); 24];
         words[5] = "notaword".to_string();
-        let result = words_to_entropy(&words);
-        assert!(result.is_err());
+        assert!(words_to_entropy(&words).is_err());
     }
 
     #[test]
     fn recovery_backup_roundtrip() {
         let wallet = Wallet::new();
         let original_addr = wallet.address().address_id();
-
         let (words, backup) = wallet.create_recovery_backup();
         assert_eq!(words.len(), 24);
         assert!(!backup.is_empty());
-
         let recovered = Wallet::recover_from_backup(&words, &backup).unwrap();
         assert_eq!(recovered.address().address_id(), original_addr);
     }
-
     #[test]
     fn recovery_backup_different_nonces() {
         let wallet = Wallet::new();
         let (_, backup1) = wallet.create_recovery_backup();
         let (_, backup2) = wallet.create_recovery_backup();
-        // Different nonces produce different ciphertext (with overwhelming probability)
         assert_ne!(backup1, backup2);
-        // Nonces (first 24 bytes) should differ
         assert_ne!(&backup1[..24], &backup2[..24]);
     }
-
     #[test]
     fn recovery_wrong_phrase_fails() {
         let wallet = Wallet::new();
         let (_, backup) = wallet.create_recovery_backup();
-
-        // Use a different mnemonic
         let (wrong_words, _) = generate_mnemonic();
-        let result = Wallet::recover_from_backup(&wrong_words, &backup);
-        assert!(result.is_err());
+        assert!(Wallet::recover_from_backup(&wrong_words, &backup).is_err());
     }
 
     #[test]
     fn consolidation_needs_two_outputs() {
         let mut wallet = Wallet::new();
-
-        // Give wallet one output — 1 input, 1 output, no messages → fee = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 1200,
@@ -1581,19 +1354,16 @@ mod tests {
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-
         wallet.scan_transaction(&tx);
         assert_eq!(wallet.unspent_outputs().len(), 1);
-
-        let result = wallet.build_consolidation_tx(None);
-        assert!(matches!(result, Err(WalletError::NothingToConsolidate)));
+        assert!(matches!(
+            wallet.build_consolidation_tx(None),
+            Err(WalletError::NothingToConsolidate)
+        ));
     }
 
-    /// Helper: create a wallet and fund it via a transaction with a given amount.
-    /// 1 input, 1 output, no messages → deterministic fee = 300.
     fn funded_wallet(amount: u64) -> Wallet {
         let mut wallet = Wallet::new();
-        // 1 input, 1 output, no messages → fee = 300
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: amount + 300,
@@ -1613,15 +1383,10 @@ mod tests {
     fn expire_pending_returns_outputs() {
         let mut alice = funded_wallet(10000);
         let bob = Wallet::new();
-        assert_eq!(alice.balance(), 10000);
-
-        // Build a transaction, marking the output as Pending with created_epoch=0
         let _tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
         assert_eq!(alice.balance(), 0);
-
-        // Manually set created_epoch to 5 to control the test
         for output in &mut alice.outputs {
             if let SpendStatus::Pending {
                 ref mut created_epoch,
@@ -1631,24 +1396,20 @@ mod tests {
                 *created_epoch = 5;
             }
         }
-
-        // current_epoch=5+PENDING_EXPIRY_EPOCHS+1 = 16 should expire (> 15)
-        let count = alice.expire_pending(5 + PENDING_EXPIRY_EPOCHS + 1, PENDING_EXPIRY_EPOCHS);
-        assert_eq!(count, 1);
-        assert_eq!(alice.balance(), 10000); // Balance restored
+        assert_eq!(
+            alice.expire_pending(5 + PENDING_EXPIRY_EPOCHS + 1, PENDING_EXPIRY_EPOCHS),
+            1
+        );
+        assert_eq!(alice.balance(), 10000);
     }
 
     #[test]
     fn expire_pending_not_yet_expired() {
         let mut alice = funded_wallet(10000);
         let bob = Wallet::new();
-
         let _tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-        assert_eq!(alice.balance(), 0);
-
-        // Manually set created_epoch to 5
         for output in &mut alice.outputs {
             if let SpendStatus::Pending {
                 ref mut created_epoch,
@@ -1658,23 +1419,17 @@ mod tests {
                 *created_epoch = 5;
             }
         }
-
-        // current_epoch=10 is not enough (5 + 10 = 15, need > 15)
-        let count = alice.expire_pending(10, PENDING_EXPIRY_EPOCHS);
-        assert_eq!(count, 0);
-        assert_eq!(alice.balance(), 0); // Still pending
+        assert_eq!(alice.expire_pending(10, PENDING_EXPIRY_EPOCHS), 0);
+        assert_eq!(alice.balance(), 0);
     }
 
     #[test]
     fn expire_pending_boundary_epoch() {
         let mut alice = funded_wallet(10000);
         let bob = Wallet::new();
-
         let _tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-
-        // Set created_epoch=5, max_age=10 => threshold is created_epoch + max_age = 15
         for output in &mut alice.outputs {
             if let SpendStatus::Pending {
                 ref mut created_epoch,
@@ -1684,54 +1439,39 @@ mod tests {
                 *created_epoch = 5;
             }
         }
-
-        // current_epoch=15: condition is 15 > 5 + 10 = 15, which is false (not strictly greater)
-        let count = alice.expire_pending(15, PENDING_EXPIRY_EPOCHS);
-        assert_eq!(count, 0);
-        assert_eq!(alice.balance(), 0); // Still pending
-
-        // current_epoch=16: condition is 16 > 15, which is true
-        let count = alice.expire_pending(16, PENDING_EXPIRY_EPOCHS);
-        assert_eq!(count, 1);
-        assert_eq!(alice.balance(), 10000); // Restored
+        assert_eq!(alice.expire_pending(15, PENDING_EXPIRY_EPOCHS), 0);
+        assert_eq!(alice.balance(), 0);
+        assert_eq!(alice.expire_pending(16, PENDING_EXPIRY_EPOCHS), 1);
+        assert_eq!(alice.balance(), 10000);
     }
 
     #[test]
     fn build_transaction_insufficient_funds() {
         let mut alice = funded_wallet(5000);
         let bob = Wallet::new();
-
-        // Try to spend more than the balance (amount + deterministic fee > balance)
-        // Fee for 1 input, 2 outputs = 100 + 100 + 200 = 400
-        let result = alice.build_transaction(bob.kem_public_key(), 5000, None);
         assert!(matches!(
-            result,
+            alice.build_transaction(bob.kem_public_key(), 5000, None),
             Err(WalletError::InsufficientFunds {
                 available: 5000,
                 needed: 5400
             })
         ));
     }
-
     #[test]
     fn build_transaction_arithmetic_overflow() {
         let mut alice = funded_wallet(5000);
         let bob = Wallet::new();
-
-        // amount + deterministic fee overflows u64
-        let result = alice.build_transaction(bob.kem_public_key(), u64::MAX, None);
-        assert!(matches!(result, Err(WalletError::ArithmeticOverflow)));
+        assert!(matches!(
+            alice.build_transaction(bob.kem_public_key(), u64::MAX, None),
+            Err(WalletError::ArithmeticOverflow)
+        ));
     }
 
     #[test]
     fn balance_saturating_add() {
         let mut wallet = Wallet::new();
-
-        // Manually insert two outputs whose values sum to more than u64::MAX
         let val1 = u64::MAX / 2 + 1;
         let val2 = u64::MAX / 2 + 1;
-        // val1 + val2 = u64::MAX + 1, which would overflow
-
         let blinding1 = BlindingFactor::random();
         let blinding2 = BlindingFactor::random();
         wallet.outputs.push(OwnedOutput {
@@ -1750,16 +1490,12 @@ mod tests {
             status: SpendStatus::Unspent,
             commitment_index: None,
         });
-
-        // balance() should saturate at u64::MAX, not panic or wrap
         assert_eq!(wallet.balance(), u64::MAX);
     }
 
     #[test]
     fn build_consolidation_tx_success() {
         let mut wallet = Wallet::new();
-
-        // Fund wallet with 3 separate outputs — each: 1 input, 1 output, no messages → fee = 300
         for i in 0..3 {
             let funding_tx = TransactionBuilder::new()
                 .add_input(InputSpec {
@@ -1774,31 +1510,22 @@ mod tests {
                 .unwrap();
             wallet.scan_transaction(&funding_tx);
         }
-
         assert_eq!(wallet.unspent_outputs().len(), 3);
         assert_eq!(wallet.balance(), 3000);
-
-        let history_before = wallet.history().len(); // 3 receives
-
-        // Consolidate (fee is deterministic: 100 + 3*100 + 1*100 = 500)
+        let history_before = wallet.history().len();
         let tx = wallet.build_consolidation_tx(None).unwrap();
         let expected_fee = crate::constants::compute_weight_fee(3, 1, 0);
         assert_eq!(tx.fee, expected_fee);
-        // One output (consolidated amount back to self)
         assert_eq!(tx.outputs.len(), 1);
-
-        // All original outputs should now be Pending
-        let pending_count = wallet
-            .outputs
-            .iter()
-            .filter(|o| matches!(o.status, SpendStatus::Pending { .. }))
-            .count();
-        assert_eq!(pending_count, 3);
-
-        // Balance is 0 (all pending)
+        assert_eq!(
+            wallet
+                .outputs
+                .iter()
+                .filter(|o| matches!(o.status, SpendStatus::Pending { .. }))
+                .count(),
+            3
+        );
         assert_eq!(wallet.balance(), 0);
-
-        // History should have a new Send entry
         assert_eq!(wallet.history().len(), history_before + 1);
         let last_entry = wallet.history().last().unwrap();
         assert_eq!(last_entry.direction, TxDirection::Send);
@@ -1809,11 +1536,6 @@ mod tests {
     #[test]
     fn build_consolidation_tx_fee_exceeds_total() {
         let mut wallet = Wallet::new();
-
-        // Fund wallet with 2 small outputs (total 200)
-        // Deterministic fee for 2 inputs, 1 output = 100 + 200 + 100 = 400
-        // Since 200 <= 400, consolidation should fail with InsufficientFunds
-        // Each funding: 1 input, 1 output, no messages → fee = 300
         for i in 0..2 {
             let funding_tx = TransactionBuilder::new()
                 .add_input(InputSpec {
@@ -1828,18 +1550,13 @@ mod tests {
                 .unwrap();
             wallet.scan_transaction(&funding_tx);
         }
-
         assert_eq!(wallet.balance(), 200);
-        assert_eq!(wallet.unspent_outputs().len(), 2);
-
-        // Deterministic fee (400) exceeds total (200)
         let expected_fee = crate::constants::compute_weight_fee(2, 1, 0);
         let result = wallet.build_consolidation_tx(None);
         assert!(matches!(
             result,
             Err(WalletError::InsufficientFunds { available: 200, .. })
         ));
-        // The needed amount should be the deterministic fee
         if let Err(WalletError::InsufficientFunds { needed, .. }) = result {
             assert_eq!(needed, expected_fee);
         }
@@ -1848,8 +1565,6 @@ mod tests {
     #[test]
     fn push_history_cap() {
         let mut wallet = Wallet::new();
-
-        // Push MAX_HISTORY_ENTRIES + 1 entries
         for i in 0..=MAX_HISTORY_ENTRIES {
             wallet.push_history(TxHistoryEntry {
                 tx_id: [i as u8; 32],
@@ -1859,13 +1574,7 @@ mod tests {
                 epoch: 0,
             });
         }
-
-        // Should be capped at MAX_HISTORY_ENTRIES
         assert_eq!(wallet.history().len(), MAX_HISTORY_ENTRIES);
-
-        // Oldest entry (index 0 with amount=0) should have been drained.
-        // The remaining entries should be the last MAX_HISTORY_ENTRIES ones,
-        // i.e., amount=1 through amount=MAX_HISTORY_ENTRIES.
         assert_eq!(wallet.history()[0].amount, 1);
         assert_eq!(
             wallet.history().last().unwrap().amount,
@@ -1877,20 +1586,12 @@ mod tests {
     fn scan_coinbase_output() {
         let mut wallet = Wallet::new();
         let state = crate::state::ChainState::new();
-
-        // Create a coinbase output for this wallet using the same approach
-        // as ChainState::create_coinbase_output — build a TxOutput addressed
-        // to the wallet's KEM key at output_index=0.
         let amount = 50_000u64;
         let blinding = BlindingFactor::random();
         let commitment = Commitment::commit(amount, &blinding);
-
-        // Generate stealth address at index 0 (coinbase convention)
         let stealth_result =
             crate::crypto::stealth::StealthAddress::generate(wallet.kem_public_key(), 0).unwrap();
         let stealth_address = stealth_result.address;
-
-        // Encode and encrypt note data
         let mut note_data = Vec::with_capacity(40);
         note_data.extend_from_slice(&amount.to_le_bytes());
         note_data.extend_from_slice(&blinding.0);
@@ -1901,23 +1602,78 @@ mod tests {
                 &note_data,
             )
             .unwrap();
-
         let coinbase_output = crate::transaction::TxOutput {
             commitment,
             stealth_address,
             encrypted_note,
         };
-
         assert_eq!(wallet.balance(), 0);
         assert_eq!(wallet.history().len(), 0);
-
         wallet.scan_coinbase_output(&coinbase_output, Some(&state));
-
         assert_eq!(wallet.balance(), amount);
         assert_eq!(wallet.output_count(), 1);
         assert_eq!(wallet.history().len(), 1);
         assert_eq!(wallet.history()[0].direction, TxDirection::Coinbase);
         assert_eq!(wallet.history()[0].amount, amount);
         assert_eq!(wallet.history()[0].fee, 0);
+    }
+
+    #[test]
+    fn wallet_encrypted_save_load_roundtrip() {
+        let wallet = Wallet::new();
+        let original_addr = wallet.address().address_id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 99, Some("hunter2")).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..4], &ENCRYPTED_MAGIC);
+        let (loaded, seq) = Wallet::load_from_file(&path, Some("hunter2")).unwrap();
+        assert_eq!(seq, 99);
+        assert_eq!(loaded.address().address_id(), original_addr);
+    }
+
+    #[test]
+    fn wallet_encrypted_wrong_password_fails() {
+        let wallet = Wallet::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 0, Some("correct")).unwrap();
+        let result = Wallet::load_from_file(&path, Some("wrong"));
+        assert!(result.is_err());
+        match result {
+            Err(e) => assert!(e.to_string().contains("wrong password"), "got: {}", e),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn wallet_encrypted_no_password_fails() {
+        let wallet = Wallet::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 0, Some("secret")).unwrap();
+        let result = Wallet::load_from_file(&path, None);
+        assert!(result.is_err());
+        match result {
+            Err(e) => assert!(e.to_string().contains("password required"), "got: {}", e),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn wallet_unencrypted_backward_compat() {
+        let wallet = Wallet::new();
+        let original_addr = wallet.address().address_id();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 7, None).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert_ne!(&raw[..4], &ENCRYPTED_MAGIC);
+        let (loaded, seq) = Wallet::load_from_file(&path, None).unwrap();
+        assert_eq!(seq, 7);
+        assert_eq!(loaded.address().address_id(), original_addr);
+        let (loaded2, seq2) = Wallet::load_from_file(&path, Some("ignored")).unwrap();
+        assert_eq!(seq2, 7);
+        assert_eq!(loaded2.address().address_id(), original_addr);
     }
 }

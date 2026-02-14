@@ -12,6 +12,7 @@
     Balance: <strong style="color: var(--success);">{{ balance }} units</strong>
   </p>
   <form method="post" action="/send">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="form-group">
       <label for="recipient">Recipient address (hex)</label>
       <textarea id="recipient" name="recipient" rows="4" required placeholder="Paste the recipient's hex-encoded address..."></textarea>

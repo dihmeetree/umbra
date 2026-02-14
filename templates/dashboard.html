@@ -52,6 +52,7 @@
 
 <div class="actions">
   <form method="post" action="/scan">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button type="submit">Scan Chain</button>
   </form>
   <a href="/send" class="btn btn-secondary">Send Transaction</a>

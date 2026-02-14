@@ -350,7 +350,19 @@ impl ChainState {
 
         // Create coinbase output for the proposer
         let coinbase = if total_coinbase > 0 {
-            self.create_coinbase_output(&vertex.id, &vertex.proposer, total_coinbase)
+            let output = self.create_coinbase_output(&vertex.id, &vertex.proposer, total_coinbase);
+            if output.is_none() {
+                // L15: Log when coinbase creation fails despite non-zero reward.
+                // This typically means the proposer has no KEM public key registered,
+                // so the reward is effectively burned.
+                tracing::warn!(
+                    vertex_id = hex::encode(&vertex.id.0[..8]),
+                    total_coinbase,
+                    "coinbase output creation returned None for non-zero reward; \
+                     proposer may lack a registered KEM public key"
+                );
+            }
+            output
         } else {
             None
         };
@@ -490,9 +502,16 @@ impl ChainState {
             } => {
                 let vid = signing_key.fingerprint();
 
+                // M15: Re-check bond requirement at application time to prevent
+                // TOCTOU if total_validators() changed since validation.
+                let bond = crate::constants::required_validator_bond(self.total_validators());
+                let min_fee = bond.saturating_add(crate::constants::MIN_TX_FEE);
+                if tx.fee < min_fee {
+                    return Err(StateError::InsufficientBond);
+                }
+
                 // Escrow bond (scaled by current active validator count), remainder
                 // goes to epoch fees. Compute BEFORE updating active status.
-                let bond = crate::constants::required_validator_bond(self.total_validators());
                 let actual_fee = tx.fee.saturating_sub(bond);
                 self.epoch_fees = self.epoch_fees.saturating_add(actual_fee);
 

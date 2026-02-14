@@ -174,7 +174,7 @@ pub fn cmd_init(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
 
     let wallet = Wallet::new();
-    wallet.save_to_file(&path, 0)?;
+    wallet.save_to_file(&path, 0, None)?;
 
     // Also export address file
     let addr = wallet.address();
@@ -191,7 +191,7 @@ pub fn cmd_init(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// Show wallet address.
 pub fn cmd_address(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (wallet, _) = Wallet::load_from_file(&path)?;
+    let (wallet, _) = Wallet::load_from_file(&path, None)?;
     let addr = wallet.address();
     println!("Address ID: {}", hex::encode(&addr.address_id()[..16]));
     println!("Signing key: {} bytes", addr.signing.0.len());
@@ -212,13 +212,13 @@ pub async fn cmd_balance(
     wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, None)?;
 
     // Scan for new vertices
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
     // Save updated wallet
-    wallet.save_to_file(&path, scanned_to)?;
+    wallet.save_to_file(&path, scanned_to, None)?;
 
     println!("Balance: {} units", wallet.balance());
     println!(
@@ -237,11 +237,11 @@ pub async fn cmd_scan(
     wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, None)?;
 
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
-    wallet.save_to_file(&path, scanned_to)?;
+    wallet.save_to_file(&path, scanned_to, None)?;
 
     println!("Scan complete. Scanned to sequence: {}", scanned_to);
     println!("Balance: {} units", wallet.balance());
@@ -265,7 +265,7 @@ pub async fn cmd_send(
     wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, None)?;
 
     // Scan chain first to have latest balance
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
@@ -294,7 +294,7 @@ pub async fn cmd_send(
     let result = client.submit_tx(&tx_hex).await?;
 
     // Save wallet (outputs now pending)
-    wallet.save_to_file(&path, scanned_to)?;
+    wallet.save_to_file(&path, scanned_to, None)?;
 
     println!("Transaction submitted!");
     println!("TX ID: {}", result.tx_id);
@@ -311,7 +311,7 @@ pub async fn cmd_send(
 /// Show received messages.
 pub fn cmd_messages(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (wallet, _) = Wallet::load_from_file(&path)?;
+    let (wallet, _) = Wallet::load_from_file(&path, None)?;
 
     let messages = wallet.received_messages();
     if messages.is_empty() {
@@ -333,7 +333,7 @@ pub fn cmd_messages(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// Show transaction history.
 pub fn cmd_history(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (wallet, _) = Wallet::load_from_file(&path)?;
+    let (wallet, _) = Wallet::load_from_file(&path, None)?;
 
     let history = wallet.history();
     if history.is_empty() {
@@ -371,7 +371,7 @@ pub async fn cmd_consolidate(
     wallet_tls: Option<&WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path)?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, None)?;
 
     // Scan chain first
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
@@ -396,7 +396,7 @@ pub async fn cmd_consolidate(
     let client = RpcClient::new_maybe_tls(rpc_addr, wallet_tls)?;
     let result = client.submit_tx(&tx_hex).await?;
 
-    wallet.save_to_file(&path, scanned_to)?;
+    wallet.save_to_file(&path, scanned_to, None)?;
 
     println!("Consolidation submitted!");
     println!("TX ID: {}", result.tx_id);
@@ -427,7 +427,7 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
         let _ = std::fs::set_permissions(&recovery_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    wallet.save_to_file(&path, 0)?;
+    wallet.save_to_file(&path, 0, None)?;
 
     // Export address
     let addr = wallet.address();
@@ -445,6 +445,22 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
     println!();
     println!("WARNING: This phrase will NOT be shown again.");
     println!("Both the phrase AND the wallet.recovery file are needed to recover.");
+    println!();
+
+    // L21: Prompt user to confirm they have written down the phrase before
+    // clearing it from the terminal. This reduces the risk of the phrase
+    // being lost if the user did not notice or save it.
+    println!("Have you written down the recovery phrase? (type 'yes' to confirm)");
+    let mut confirmation = String::new();
+    let _ = std::io::stdin().read_line(&mut confirmation);
+    if confirmation.trim().to_lowercase() != "yes" {
+        println!("WARNING: You did not confirm. Make sure to save the phrase above!");
+    }
+
+    // Push the recovery phrase off the visible terminal to reduce shoulder-surfing risk
+    for _ in 0..50 {
+        println!();
+    }
 
     // Zeroize mnemonic words
     use zeroize::Zeroize;
@@ -481,7 +497,7 @@ pub fn cmd_recover(data_dir: &Path, phrase: &str) -> Result<(), Box<dyn std::err
 
     let wallet = Wallet::recover_from_backup(&words, &backup)?;
     std::fs::create_dir_all(data_dir)?;
-    wallet.save_to_file(&path, 0)?;
+    wallet.save_to_file(&path, 0, None)?;
 
     // Export address
     let addr = wallet.address();
@@ -498,7 +514,7 @@ pub fn cmd_recover(data_dir: &Path, phrase: &str) -> Result<(), Box<dyn std::err
 /// Export wallet address to a file for sharing.
 pub fn cmd_export(data_dir: &Path, file: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let wp = wallet_path(data_dir);
-    let (wallet, _) = Wallet::load_from_file(&wp)?;
+    let (wallet, _) = Wallet::load_from_file(&wp, None)?;
     let addr = wallet.address();
     let addr_bytes = crate::serialize(&addr)?;
     let addr_hex = hex::encode(&addr_bytes);
@@ -546,6 +562,19 @@ pub async fn scan_chain(
         }
 
         for entry in &result.vertices {
+            // L20: Check sequence contiguity -- each vertex should have
+            // sequence == previous + 1. A gap may indicate the node skipped
+            // vertices or data was lost.
+            let expected_seq = current_after + 1;
+            if entry.sequence != expected_seq {
+                tracing::warn!(
+                    expected = expected_seq,
+                    actual = entry.sequence,
+                    "sequence gap detected during wallet scan; \
+                     some finalized vertices may have been skipped"
+                );
+            }
+
             // Deserialize vertex from hex
             let vertex_bytes = hex::decode(&entry.vertex_hex)
                 .map_err(|e| WalletError::Rpc(format!("invalid vertex hex: {}", e)))?;
@@ -665,7 +694,7 @@ mod tests {
         cmd_init_with_recovery(dir.path()).unwrap();
 
         // Load the original wallet to get its address
-        let (original_wallet, _) = Wallet::load_from_file(&wallet_path(dir.path())).unwrap();
+        let (original_wallet, _) = Wallet::load_from_file(&wallet_path(dir.path()), None).unwrap();
         let original_addr = original_wallet.address().address_id();
 
         // Read the recovery backup (exists from init)
@@ -686,7 +715,7 @@ mod tests {
         cmd_recover(dir.path(), &phrase).unwrap();
 
         // Verify recovered wallet has same address
-        let (recovered, _) = Wallet::load_from_file(&wallet_path(dir.path())).unwrap();
+        let (recovered, _) = Wallet::load_from_file(&wallet_path(dir.path()), None).unwrap();
         assert_eq!(recovered.address().address_id(), original_addr);
     }
 
@@ -736,7 +765,7 @@ mod tests {
     fn load_wallet_from_nonexistent_path() {
         let dir = tempfile::tempdir().unwrap();
         // Without init, load should fail
-        let result = Wallet::load_from_file(&wallet_path(dir.path()));
+        let result = Wallet::load_from_file(&wallet_path(dir.path()), None);
         assert!(result.is_err());
     }
 

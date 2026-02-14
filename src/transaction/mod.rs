@@ -261,8 +261,17 @@ impl Transaction {
                 }
             }
             TxType::ValidatorDeregister {
-                bond_return_output, ..
+                auth_signature,
+                bond_return_output,
+                ..
             } => {
+                // L14: Validate auth_signature size. The Signature type's
+                // deserialization enforces this for network-received data, but
+                // locally constructed transactions bypass deserialization.
+                let sig_bytes = auth_signature.as_bytes();
+                if !sig_bytes.is_empty() && sig_bytes.len() != 4627 {
+                    return Err(TxValidationError::InvalidBondReturn);
+                }
                 // Bond return output must have a non-zero commitment
                 if bond_return_output.commitment.0 == [0u8; 32] {
                     return Err(TxValidationError::InvalidBondReturn);

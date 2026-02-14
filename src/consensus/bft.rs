@@ -164,6 +164,14 @@ impl Certificate {
             return false;
         }
 
+        // L8: Reject certificates with an unreasonable number of signature entries.
+        // A valid certificate can have at most committee.len() signatures (one per
+        // member). Allow 2x as a generous upper bound to reject obvious spam without
+        // risking false negatives from rounding.
+        if self.signatures.len() > committee.len() * 2 {
+            return false;
+        }
+
         let mut valid_count = 0;
         let mut seen = HashSet::new();
 
@@ -299,6 +307,15 @@ impl BftState {
     }
 
     /// Get the leader for the current round (round-robin among committee).
+    ///
+    /// **L9: Known trade-off -- predictable selection.** Round-robin leader
+    /// rotation is deterministic and predictable: any observer who knows the
+    /// committee order can predict which validator will propose in each round.
+    /// This was chosen for simplicity and guaranteed liveness over unpredictable
+    /// leader election. A VRF-based per-round leader election would improve
+    /// unpredictability but adds complexity and latency. The committee itself
+    /// is already selected via VRF, limiting the window of predictability to
+    /// within a single epoch.
     pub fn leader(&self) -> Option<&Validator> {
         if self.committee.is_empty() {
             return None;
@@ -622,6 +639,11 @@ impl BftState {
 
 /// Select the committee for an epoch using VRF.
 ///
+/// **Testing/simulation only.** This function requires secret keys for all
+/// validators to evaluate VRF proofs locally. In production, use
+/// [`select_committee_from_proofs`] which accepts already-verified VRF
+/// outputs received over the network.
+///
 /// If VRF-based selection produces fewer than `MIN_COMMITTEE_SIZE` members,
 /// all active validators are included (sorted by VRF output) to guarantee
 /// BFT safety.
@@ -667,6 +689,63 @@ pub fn select_committee(
     // Only truncate if we had enough from VRF (not fallback).
     // In fallback mode, all eligible validators must be included to
     // guarantee MIN_COMMITTEE_SIZE for BFT safety.
+    if !used_fallback {
+        candidates.truncate(committee_size);
+    }
+    candidates
+}
+
+/// Select the committee from already-verified VRF proofs.
+///
+/// Unlike [`select_committee`], this function does not require secret keys.
+/// Each caller is responsible for verifying VRF proofs (via
+/// [`VrfOutput::verify`] or [`Vertex::validate_vrf`]) before passing them
+/// in. This is the production-ready API for committee selection from
+/// network-received VRF outputs.
+///
+/// `proofs` contains `(Validator, VrfOutput)` pairs for all validators that
+/// submitted VRF proofs for this epoch. Only active validators whose
+/// activation epoch has passed and whose VRF output selects them will be
+/// included.
+///
+/// If VRF-based selection produces fewer than `MIN_COMMITTEE_SIZE` members,
+/// all eligible validators are included (sorted by VRF output) to guarantee
+/// BFT safety.
+pub fn select_committee_from_proofs(
+    epoch_seed: &EpochSeed,
+    proofs: &[(Validator, VrfOutput)],
+    committee_size: usize,
+) -> Vec<(Validator, VrfOutput)> {
+    let total = proofs.len();
+    let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
+
+    let current_epoch = epoch_seed.epoch;
+    for (validator, vrf_output) in proofs {
+        if !validator.active || validator.activation_epoch > current_epoch {
+            continue;
+        }
+        if vrf_output.is_selected(committee_size, total) {
+            candidates.push((validator.clone(), vrf_output.clone()));
+        }
+    }
+
+    // Ensure minimum committee size for BFT safety
+    let used_fallback = candidates.len() < crate::constants::MIN_COMMITTEE_SIZE;
+    if used_fallback {
+        // Fall back: include all eligible validators sorted by VRF
+        candidates.clear();
+        for (validator, vrf_output) in proofs {
+            if !validator.active || validator.activation_epoch > current_epoch {
+                continue;
+            }
+            candidates.push((validator.clone(), vrf_output.clone()));
+        }
+    }
+
+    // Sort by VRF output to get deterministic ordering
+    candidates.sort_by_key(|(_, vrf)| vrf.sort_key());
+
+    // Only truncate if we had enough from VRF (not fallback).
     if !used_fallback {
         candidates.truncate(committee_size);
     }

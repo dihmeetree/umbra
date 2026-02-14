@@ -97,6 +97,17 @@ pub struct Node {
     /// Peers that failed sync recently (with cooldown timestamp).
     sync_failed_peers: HashMap<crate::network::PeerId, Instant>,
     /// Dandelion++ stem-phase transactions: tx_hash -> (hops_remaining, inserted_at).
+    ///
+    /// **L17: Known limitation -- effectively single-hop stem.** The current
+    /// implementation only stem-forwards from the originating node; receiving
+    /// nodes immediately fluff (broadcast) the transaction rather than
+    /// continuing the stem relay. This means the first peer that receives a
+    /// stem transaction can identify the originator. True multi-hop Dandelion++
+    /// requires each relay node to independently decide (with probability p)
+    /// whether to continue stemming or fluff, which would need protocol-level
+    /// changes to propagate stem/fluff intent between peers. The single-hop
+    /// design was chosen to avoid added latency and complexity while still
+    /// providing some deniability through random peer selection and timing jitter.
     stem_txs: HashMap<Hash, (u8, Instant)>,
     /// Peers recently attempted for discovery (cleared each round).
     recently_attempted: HashSet<SocketAddr>,

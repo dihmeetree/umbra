@@ -13,6 +13,7 @@
     a post-quantum keypair (Dilithium5 + Kyber1024) and save it to disk.
   </p>
   <form method="post" action="/init">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button type="submit">Create Wallet</button>
   </form>
 </div>

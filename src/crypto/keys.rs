@@ -20,7 +20,7 @@ use crate::Hash;
 
 // Expected key sizes for validation
 const DILITHIUM5_PK_BYTES: usize = 2592;
-const DILITHIUM5_SIG_BYTES: usize = 4627;
+pub(crate) const DILITHIUM5_SIG_BYTES: usize = 4627;
 const KYBER1024_PK_BYTES: usize = 1568;
 const KYBER1024_CT_BYTES: usize = 1568;
 
@@ -104,10 +104,18 @@ impl SigningKeypair {
     }
 
     /// Sign a message, producing a detached signature.
+    ///
+    /// If the internal secret key is somehow corrupted, logs an error and
+    /// returns an empty signature instead of panicking. An empty signature
+    /// will always fail verification, so no security property is lost.
     pub fn sign(&self, message: &[u8]) -> Signature {
-        // Safety: secret key was validated at construction (generate or from_bytes)
-        let sk = dilithium5::SecretKey::from_bytes(&self.secret.0)
-            .expect("BUG: SigningKeypair holds invalid secret key");
+        let sk = match dilithium5::SecretKey::from_bytes(&self.secret.0) {
+            Ok(sk) => sk,
+            Err(_) => {
+                tracing::error!("SigningKeypair::sign called with corrupted secret key");
+                return Signature::empty();
+            }
+        };
         let sig = dilithium5::detached_sign(message, &sk);
         Signature(sig.as_bytes().to_vec())
     }

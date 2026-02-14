@@ -37,6 +37,8 @@ pub struct WalletWebState {
     /// Serializes mutating wallet operations (send, consolidate) to prevent
     /// race conditions between concurrent requests.
     wallet_op_lock: Arc<tokio::sync::Mutex<()>>,
+    /// CSRF token for form submissions (hex-encoded 32 random bytes).
+    csrf_token: String,
 }
 
 impl WalletWebState {
@@ -45,13 +47,20 @@ impl WalletWebState {
         rpc_addr: SocketAddr,
         wallet_tls: Option<crate::config::WalletTlsConfig>,
     ) -> Self {
+        let csrf_bytes: [u8; 32] = rand::random();
         WalletWebState {
             data_dir,
             rpc_addr,
             wallet_tls,
             wallet: Arc::new(RwLock::new(None)),
             wallet_op_lock: Arc::new(tokio::sync::Mutex::new(())),
+            csrf_token: hex::encode(csrf_bytes),
         }
+    }
+
+    /// Validate a CSRF token from a form submission.
+    fn validate_csrf(&self, token: &str) -> bool {
+        crate::constant_time_eq(token.as_bytes(), self.csrf_token.as_bytes())
     }
 
     /// Create an RPC client, using mTLS if configured.
@@ -74,7 +83,7 @@ impl WalletWebState {
         if !path.exists() {
             return Ok(None);
         }
-        let result = tokio::task::spawn_blocking(move || Wallet::load_from_file(&path))
+        let result = tokio::task::spawn_blocking(move || Wallet::load_from_file(&path, None))
             .await
             .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))?;
         let (wallet, seq) = result?;
@@ -86,7 +95,7 @@ impl WalletWebState {
     async fn save_wallet(&self, wallet: &Wallet, seq: u64) -> Result<(), WalletError> {
         let path = wallet_cli::wallet_path(&self.data_dir);
         let wallet_clone = wallet.clone();
-        tokio::task::spawn_blocking(move || wallet_clone.save_to_file(&path, seq))
+        tokio::task::spawn_blocking(move || wallet_clone.save_to_file(&path, seq, None))
             .await
             .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))??;
         let mut cache = self.wallet.write().await;
@@ -117,6 +126,7 @@ struct DashboardTemplate {
     chain_state_root: String,
     flash_success: Option<String>,
     flash_error: Option<String>,
+    csrf_token: String,
 }
 
 #[derive(Template, WebTemplate)]
@@ -124,6 +134,7 @@ struct DashboardTemplate {
 struct InitTemplate {
     active_tab: &'static str,
     flash_error: Option<String>,
+    csrf_token: String,
 }
 
 #[derive(Template, WebTemplate)]
@@ -142,6 +153,7 @@ struct SendTemplate {
     active_tab: &'static str,
     balance: u64,
     flash_error: Option<String>,
+    csrf_token: String,
 }
 
 #[derive(Template, WebTemplate)]
@@ -199,7 +211,13 @@ fn error_page(msg: impl Into<String>) -> ErrorTemplate {
 // ── Form types ──
 
 #[derive(Deserialize)]
+pub struct CsrfForm {
+    csrf_token: String,
+}
+
+#[derive(Deserialize)]
 pub struct SendForm {
+    csrf_token: String,
     recipient: String,
     amount: u64,
     message: Option<String>,
@@ -248,6 +266,17 @@ pub async fn serve(
     rpc_addr: SocketAddr,
     wallet_tls: Option<crate::config::WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // M17: Warn when binding to a non-loopback address, since the wallet web
+    // UI has no authentication and exposes spending capabilities.
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            bind_addr = %addr,
+            "Wallet web UI is binding to a non-loopback address. \
+             This exposes wallet operations to the network. \
+             Use 127.0.0.1 unless you understand the risks."
+        );
+    }
+
     let state = WalletWebState::new(data_dir.clone(), rpc_addr, wallet_tls);
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -298,6 +327,7 @@ async fn dashboard(State(state): State<WalletWebState>) -> Response {
         chain_state_root,
         flash_success: None,
         flash_error: None,
+        csrf_token: state.csrf_token.clone(),
     }
     .into_response()
 }
@@ -309,11 +339,21 @@ async fn init_page(State(state): State<WalletWebState>) -> Response {
     InitTemplate {
         active_tab: "",
         flash_error: None,
+        csrf_token: state.csrf_token.clone(),
     }
     .into_response()
 }
 
-async fn init_action(State(state): State<WalletWebState>) -> Response {
+async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfForm>) -> Response {
+    if !state.validate_csrf(&form.csrf_token) {
+        return InitTemplate {
+            active_tab: "",
+            flash_error: Some("Invalid CSRF token. Please reload the page and try again.".into()),
+            csrf_token: state.csrf_token.clone(),
+        }
+        .into_response();
+    }
+
     if state.wallet_exists() {
         return Redirect::to("/").into_response();
     }
@@ -323,15 +363,17 @@ async fn init_action(State(state): State<WalletWebState>) -> Response {
         return InitTemplate {
             active_tab: "",
             flash_error: Some(format!("Failed to create directory: {}", e)),
+            csrf_token: state.csrf_token.clone(),
         }
         .into_response();
     }
 
     let wallet = Wallet::new();
-    if let Err(e) = wallet.save_to_file(&path, 0) {
+    if let Err(e) = wallet.save_to_file(&path, 0, None) {
         return InitTemplate {
             active_tab: "",
             flash_error: Some(format!("Failed to save wallet: {}", e)),
+            csrf_token: state.csrf_token.clone(),
         }
         .into_response();
     }
@@ -425,11 +467,22 @@ async fn send_page(State(state): State<WalletWebState>) -> Response {
         active_tab: "send",
         balance: wallet.balance(),
         flash_error: None,
+        csrf_token: state.csrf_token.clone(),
     }
     .into_response()
 }
 
 async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendForm>) -> Response {
+    if !state.validate_csrf(&form.csrf_token) {
+        return SendTemplate {
+            active_tab: "send",
+            balance: 0,
+            flash_error: Some("Invalid CSRF token. Please reload the page and try again.".into()),
+            csrf_token: state.csrf_token.clone(),
+        }
+        .into_response();
+    }
+
     if !state.wallet_exists() {
         return Redirect::to("/init").into_response();
     }
@@ -460,6 +513,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Scan failed: {}", e)),
+                csrf_token: state.csrf_token.clone(),
             }
             .into_response()
         }
@@ -474,6 +528,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Invalid recipient hex: {}", e)),
+                csrf_token: state.csrf_token.clone(),
             }
             .into_response()
         }
@@ -485,6 +540,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Invalid recipient address: {}", e)),
+                csrf_token: state.csrf_token.clone(),
             }
             .into_response()
         }
@@ -505,6 +561,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                     msg.len(),
                     crate::constants::MAX_MESSAGE_SIZE
                 )),
+                csrf_token: state.csrf_token.clone(),
             }
             .into_response();
         }
@@ -518,6 +575,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Build failed: {}", e)),
+                csrf_token: state.csrf_token.clone(),
             }
             .into_response()
         }
@@ -544,6 +602,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Submission failed: {}", e)),
+                csrf_token: state.csrf_token.clone(),
             }
             .into_response();
         }
@@ -630,7 +689,12 @@ async fn history_page(State(state): State<WalletWebState>) -> Response {
     .into_response()
 }
 
-async fn scan_action(State(state): State<WalletWebState>) -> Response {
+async fn scan_action(State(state): State<WalletWebState>, Form(form): Form<CsrfForm>) -> Response {
+    if !state.validate_csrf(&form.csrf_token) {
+        return error_page("Invalid CSRF token. Please reload the page and try again.")
+            .into_response();
+    }
+
     if !state.wallet_exists() {
         return Redirect::to("/init").into_response();
     }
@@ -687,6 +751,7 @@ async fn scan_action(State(state): State<WalletWebState>) -> Response {
         chain_state_root,
         flash_success: Some("Chain scan complete.".to_string()),
         flash_error: None,
+        csrf_token: state.csrf_token.clone(),
     }
     .into_response()
 }
@@ -729,7 +794,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wallet = Wallet::new();
         let path = wallet_cli::wallet_path(dir.path());
-        wallet.save_to_file(&path, 0).unwrap();
+        wallet.save_to_file(&path, 0, None).unwrap();
         let state = test_state(dir.path());
         assert!(state.wallet_exists());
     }
@@ -774,7 +839,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wallet = Wallet::new();
         let path = wallet_cli::wallet_path(dir.path());
-        wallet.save_to_file(&path, 7).unwrap();
+        wallet.save_to_file(&path, 7, None).unwrap();
 
         let state = test_state(dir.path());
         let result = state.load_wallet().await.unwrap();
@@ -832,7 +897,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wallet = Wallet::new();
         let path = wallet_cli::wallet_path(dir.path());
-        wallet.save_to_file(&path, 0).unwrap();
+        wallet.save_to_file(&path, 0, None).unwrap();
 
         let state = test_state(dir.path());
         let app = router(state);
@@ -845,12 +910,14 @@ mod tests {
     async fn init_action_creates_wallet_and_redirects() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
+        let csrf = state.csrf_token.clone();
         let app = router(state);
+        let body = format!("csrf_token={}", csrf);
         let resp = send_request(
             app,
             Request::post("/init")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::empty())
+                .body(Body::from(body))
                 .unwrap(),
         )
         .await;
@@ -860,6 +927,58 @@ mod tests {
         assert!(wallet_cli::wallet_path(dir.path()).exists());
         // Address file should also exist
         assert!(wallet_cli::address_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn init_action_rejects_invalid_csrf() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let body = "csrf_token=invalid_token_value";
+        let resp = send_request(
+            app,
+            Request::post("/init")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+        // Should return 200 with error page, not redirect
+        assert_eq!(resp.status(), 200);
+        // Wallet file should NOT exist
+        assert!(!wallet_cli::wallet_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn scan_action_rejects_invalid_csrf() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // Create wallet first
+        let wallet = Wallet::new();
+        let path = wallet_cli::wallet_path(dir.path());
+        wallet.save_to_file(&path, 0, None).unwrap();
+
+        let app = router(state);
+        let body = "csrf_token=invalid_token_value";
+        let resp = send_request(
+            app,
+            Request::post("/scan")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[test]
+    fn csrf_token_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let valid_token = state.csrf_token.clone();
+        assert!(state.validate_csrf(&valid_token));
+        assert!(!state.validate_csrf("wrong_token"));
+        assert!(!state.validate_csrf(""));
     }
 
     #[tokio::test]
