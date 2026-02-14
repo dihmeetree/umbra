@@ -151,6 +151,19 @@ pub mod constants {
     /// Maximum distinct protocol versions tracked per epoch (F16).
     pub const MAX_VERSION_SIGNALS: usize = 64;
 
+    // ── DDoS Protection ──
+
+    /// Maximum connections allowed from a single IP address.
+    pub const MAX_CONNECTIONS_PER_IP: usize = 4;
+    /// Maximum inbound connections from the same /16 subnet (eclipse mitigation).
+    pub const MAX_PEERS_PER_SUBNET: usize = 8;
+    /// Maximum number of recently-attempted peer addresses to track.
+    pub const MAX_RECENTLY_ATTEMPTED: usize = 1_000;
+    /// Maximum snapshot chunks (caps buffer allocation: 256 × 4 MiB = 1 GiB).
+    pub const MAX_SNAPSHOT_CHUNKS: u32 = 256;
+    /// Minimum interval between snapshot chunk requests from the same peer (ms).
+    pub const SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS: u64 = 100;
+
     // ── NAT Traversal ──
 
     /// Timeout for UPnP gateway discovery in milliseconds.

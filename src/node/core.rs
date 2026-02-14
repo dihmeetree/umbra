@@ -109,6 +109,8 @@ pub struct Node {
     /// Cached serialized snapshot for serving to peers:
     /// (bytes, total_chunks, meta, created_at).
     snapshot_cache: Option<(Vec<u8>, u32, super::storage::ChainStateMeta, Instant)>,
+    /// Per-peer timestamp of last snapshot chunk request served (DDoS rate limiting).
+    chunk_request_timestamps: HashMap<crate::network::PeerId, Instant>,
     /// UPnP gateway handle for lease renewal and cleanup (None if UPnP is not active).
     upnp_gateway: Option<(crate::network::nat::UpnpGateway, SocketAddr)>,
 }
@@ -449,6 +451,7 @@ impl Node {
             seen_messages_prev: HashSet::new(),
             sync_rounds: 0,
             snapshot_cache: None,
+            chunk_request_timestamps: HashMap::new(),
             upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
         })
     }
@@ -577,6 +580,7 @@ impl Node {
             }
             P2pEvent::PeerDisconnected(peer_id) => {
                 tracing::info!(peer = %hex::encode(&peer_id[..8]), "Peer disconnected");
+                self.chunk_request_timestamps.remove(&peer_id);
                 // If we were syncing from this peer, revert to NeedSync
                 match &self.sync_state {
                     SyncState::Syncing { peer, next_seq, .. } if *peer == peer_id => {
@@ -842,6 +846,10 @@ impl Node {
                 let mut connected = 0;
                 for peer_info in peers.iter().take(crate::constants::MAX_PEERS) {
                     if connected >= crate::constants::PEER_DISCOVERY_MAX {
+                        break;
+                    }
+                    // DDoS: Cap recently_attempted set size
+                    if self.recently_attempted.len() >= crate::constants::MAX_RECENTLY_ATTEMPTED {
                         break;
                     }
                     if let Ok(addr) = peer_info.address.parse::<SocketAddr>() {
@@ -1321,6 +1329,23 @@ impl Node {
             }
 
             Message::GetSnapshotChunk { chunk_index } => {
+                // DDoS: Rate limit chunk requests per peer
+                let now = Instant::now();
+                let min_interval = std::time::Duration::from_millis(
+                    crate::constants::SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS,
+                );
+                if let Some(last) = self.chunk_request_timestamps.get(&from) {
+                    if now.duration_since(*last) < min_interval {
+                        return;
+                    }
+                }
+                self.chunk_request_timestamps.insert(from, now);
+                // Prune stale entries periodically
+                if self.chunk_request_timestamps.len() > crate::constants::MAX_PEERS * 2 {
+                    let cutoff = now - std::time::Duration::from_secs(60);
+                    self.chunk_request_timestamps.retain(|_, t| *t > cutoff);
+                }
+
                 if let Some((ref bytes, total_chunks, _, ref created)) = self.snapshot_cache {
                     let fresh = created.elapsed()
                         < std::time::Duration::from_secs(crate::constants::SNAPSHOT_CACHE_TTL_SECS);
@@ -1361,6 +1386,27 @@ impl Node {
                     }
                     if total_chunks == 0 || meta.epoch == 0 {
                         // Empty or genesis snapshot — fall back to vertex sync
+                        return;
+                    }
+                    // DDoS: Cap chunk count to prevent OOM allocation
+                    if total_chunks > crate::constants::MAX_SNAPSHOT_CHUNKS {
+                        tracing::warn!(
+                            peer = %hex::encode(&from[..8]),
+                            chunks = total_chunks,
+                            "Snapshot manifest exceeds max chunk count, skipping"
+                        );
+                        return;
+                    }
+                    // Validate consistency: chunk count must match snapshot size
+                    let expected_chunks =
+                        snapshot_size.div_ceil(crate::constants::SNAPSHOT_CHUNK_SIZE as u64) as u32;
+                    if total_chunks != expected_chunks {
+                        tracing::warn!(
+                            peer = %hex::encode(&from[..8]),
+                            claimed = total_chunks,
+                            expected = expected_chunks,
+                            "Snapshot manifest chunk count mismatch, skipping"
+                        );
                         return;
                     }
 
@@ -2220,6 +2266,9 @@ mod tests {
     const _: () = assert!(SEEN_MESSAGES_CAPACITY <= 1_000_000);
     const _: () = assert!(MAX_SYNC_ROUNDS >= 100);
     const _: () = assert!(MAX_SYNC_ROUNDS <= 100_000);
+    const _: () = assert!(crate::constants::MAX_CONNECTIONS_PER_IP >= 2);
+    const _: () = assert!(crate::constants::MAX_PEERS_PER_SUBNET >= 2);
+    const _: () = assert!(crate::constants::MAX_SNAPSHOT_CHUNKS <= 1024);
 
     #[test]
     fn node_error_display() {

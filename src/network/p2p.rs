@@ -7,7 +7,7 @@
 //! 4. Encrypted transport — BLAKE3 XOR keystream + keyed-BLAKE3 MAC per message
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -496,6 +496,18 @@ pub async fn start(config: P2pConfig) -> Result<P2pStartResult, P2pError> {
     })
 }
 
+/// Extract the /16 subnet prefix from an IP address.
+/// Returns the first two octets for IPv4; `[0, 0]` for IPv6 (treated as one bucket).
+fn subnet_prefix(ip: IpAddr) -> [u8; 2] {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            [octets[0], octets[1]]
+        }
+        IpAddr::V6(_) => [0, 0],
+    }
+}
+
 /// Main P2P event loop.
 async fn p2p_loop(
     config: P2pConfig,
@@ -507,6 +519,8 @@ async fn p2p_loop(
     let mut reputations: HashMap<PeerId, PeerReputation> = HashMap::new();
     let mut inbound_count: usize = 0;
     let mut outbound_count: usize = 0;
+    let mut connections_per_ip: HashMap<IpAddr, usize> = HashMap::new();
+    let mut inbound_per_subnet: HashMap<[u8; 2], usize> = HashMap::new();
     let max_inbound = config.max_peers / 2;
     let max_outbound = config.max_peers - max_inbound;
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalEvent>(256);
@@ -521,6 +535,18 @@ async fn p2p_loop(
                 if let Ok((stream, addr)) = result {
                     // F8: Connection diversity — enforce inbound slot limit
                     if inbound_count >= max_inbound || peers.len() >= config.max_peers {
+                        continue;
+                    }
+                    // DDoS: Per-IP connection limit
+                    let ip = addr.ip();
+                    let ip_count = connections_per_ip.get(&ip).copied().unwrap_or(0);
+                    if ip_count >= crate::constants::MAX_CONNECTIONS_PER_IP {
+                        continue;
+                    }
+                    // DDoS: Per-subnet limit (eclipse mitigation)
+                    let subnet = subnet_prefix(ip);
+                    let subnet_count = inbound_per_subnet.get(&subnet).copied().unwrap_or(0);
+                    if subnet_count >= crate::constants::MAX_PEERS_PER_SUBNET {
                         continue;
                     }
                     let config_clone = config.clone();
@@ -620,7 +646,11 @@ async fn p2p_loop(
                                 outbound_count += 1;
                             } else {
                                 inbound_count += 1;
+                                // DDoS: Track inbound subnet concentration
+                                *inbound_per_subnet.entry(subnet_prefix(addr.ip())).or_insert(0) += 1;
                             }
+                            // DDoS: Track per-IP connections
+                            *connections_per_ip.entry(addr.ip()).or_insert(0) += 1;
 
                             // Send NatInfo to the new peer (over encrypted channel)
                             let our_ext = nat_state.external_addr().map(|a| a.to_string());
@@ -738,6 +768,16 @@ async fn p2p_loop(
                                 outbound_count = outbound_count.saturating_sub(1);
                             } else {
                                 inbound_count = inbound_count.saturating_sub(1);
+                                let subnet = subnet_prefix(peer.addr.ip());
+                                if let Some(c) = inbound_per_subnet.get_mut(&subnet) {
+                                    *c = c.saturating_sub(1);
+                                    if *c == 0 { inbound_per_subnet.remove(&subnet); }
+                                }
+                            }
+                            let ip = peer.addr.ip();
+                            if let Some(c) = connections_per_ip.get_mut(&ip) {
+                                *c = c.saturating_sub(1);
+                                if *c == 0 { connections_per_ip.remove(&ip); }
                             }
                         }
                         // Remove reputation entry unless the peer is still banned
@@ -769,6 +809,16 @@ async fn p2p_loop(
                                     outbound_count = outbound_count.saturating_sub(1);
                                 } else {
                                     inbound_count = inbound_count.saturating_sub(1);
+                                    let subnet = subnet_prefix(peer.addr.ip());
+                                    if let Some(c) = inbound_per_subnet.get_mut(&subnet) {
+                                        *c = c.saturating_sub(1);
+                                        if *c == 0 { inbound_per_subnet.remove(&subnet); }
+                                    }
+                                }
+                                let ip = peer.addr.ip();
+                                if let Some(c) = connections_per_ip.get_mut(&ip) {
+                                    *c = c.saturating_sub(1);
+                                    if *c == 0 { connections_per_ip.remove(&ip); }
                                 }
                             }
                             let _ = event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await;
@@ -1564,5 +1614,26 @@ mod tests {
         let mut rep = PeerReputation::new();
         rep.penalize(crate::constants::PEER_INITIAL_REPUTATION); // triggers ban
         assert!(rep.is_banned());
+    }
+
+    #[test]
+    fn subnet_prefix_ipv4() {
+        let ip: IpAddr = "192.168.1.100".parse().unwrap();
+        assert_eq!(subnet_prefix(ip), [192, 168]);
+
+        let ip2: IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(subnet_prefix(ip2), [10, 0]);
+
+        let ip3: IpAddr = "203.0.113.5".parse().unwrap();
+        assert_eq!(subnet_prefix(ip3), [203, 0]);
+    }
+
+    #[test]
+    fn subnet_prefix_ipv6() {
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert_eq!(subnet_prefix(ip), [0, 0]);
+
+        let ip2: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(subnet_prefix(ip2), [0, 0]);
     }
 }

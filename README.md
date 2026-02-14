@@ -133,7 +133,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **498 tests**.
+**~28,500 lines of Rust** across 43 source files with **500 tests**.
 
 ## Building
 
@@ -472,6 +472,7 @@ Async TCP transport built on tokio with post-quantum encrypted channels:
   5. Keyed-BLAKE3 MAC on every encrypted frame; counter-based replay protection
   6. Domain-separated session key derivation — initiator and responder derive mirrored send/recv keys from the shared secret
 - **Per-peer rate limiting** — token-bucket rate limiter (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 violations
+- **DDoS protections** — per-IP connection limits (max 4), /16 subnet concentration limits (max 8 inbound) for eclipse attack mitigation, snapshot chunk request rate limiting, bounded peer discovery sets, and snapshot buffer OOM prevention
 - Configurable max peers (default 64) and connection timeout (5 seconds)
 - **NAT traversal** — three-layer external address detection:
   1. Manual configuration via `--external-addr` or config file
@@ -509,7 +510,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 498 tests cover:
+All 500 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -534,7 +535,7 @@ All 498 tests cover:
 - **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty, single-tx edge case, populated pools); byte-limit eviction with total_bytes tracking, fee boundary rejection (equal fee rejected), drain cleans nullifier index, epoch-based expiry on insert, total_bytes accuracy across insert/remove/drain
 - **Storage** — vertex/transaction/nullifier/validator/coinbase persistence and roundtrips, not-found returns None, vertex overwrite, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval, commitment level bulk retrieval, snapshot import tree clearing
 - **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled; apply_vertex (basic state transition, too many transactions, intra-vertex duplicate nullifier, epoch fee accumulation regression); validate_transaction (wrong chain_id, double spend, already registered); record_nullifier Result return type (regression); coinbase output creation (with and without KEM key); eligible_validators activation epoch filtering
-- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; MAC verification failure on corrupted frames; counter replay rejection; self-connection detection
+- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; MAC verification failure on corrupted frames; counter replay rejection; self-connection detection; subnet prefix extraction (IPv4 /16, IPv6 fallback)
 - **Node** — persistent signing + KEM keypair load/save roundtrip, creates data directory, rejects too-short/truncated key files, legacy key file upgrade adds KEM, file permissions restricted (unix), NodeConfig struct fields, NodeError display
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage, snapshot export/import roundtrip with state root verification; genesis coinbase creation and deterministic blinding
 - **Wallet web** — WalletWebState construction and cache behavior, wallet_exists (present/absent), RPC client without TLS, invalidate_cache clears loaded wallet, load_wallet returns None when no file, load_wallet caches on first load, save_wallet updates cache, error_page sets message; HTTP handler tests via axum oneshot: dashboard redirects to init, init page 200/redirect, init action creates wallet+address files, security headers (X-Frame-Options, X-Content-Type-Options, Cache-Control, CSP), send/messages/history/address pages redirect without wallet, 404 for nonexistent routes
@@ -709,6 +710,11 @@ Proves in zero knowledge:
 | `HOLE_PUNCH_TIMEOUT_MS` | 5,000 | TCP hole punch connection timeout |
 | `HOLE_PUNCH_RETRY_DELAY_MS` | 500 | Delay between hole punch retry attempts |
 | `HOLE_PUNCH_MAX_ATTEMPTS` | 3 | Maximum hole punch retry attempts |
+| `MAX_CONNECTIONS_PER_IP` | 4 | Maximum connections from a single IP address |
+| `MAX_PEERS_PER_SUBNET` | 8 | Maximum inbound peers from the same /16 subnet |
+| `MAX_RECENTLY_ATTEMPTED` | 1,000 | Maximum tracked recently-attempted peer addresses |
+| `MAX_SNAPSHOT_CHUNKS` | 256 | Maximum snapshot chunks (caps buffer allocation) |
+| `SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS` | 100 | Minimum interval between chunk requests per peer |
 
 ## Dependencies
 
@@ -862,13 +868,18 @@ All transaction validity is verified via zk-STARKs:
 - **Observed address quorum** — external address detection via peer observation requires 3 independent peers agreeing on the same IP, preventing single-peer address poisoning
 - **NAT info over encrypted channel** — external address claims and observed addresses are exchanged via `NatInfo` messages over the encrypted post-handshake channel, not in the plaintext `Hello`
 - **Hole punch via authenticated peers** — `NatPunchRequest` is only forwarded to already-authenticated peers; the target initiates a full KEM + auth handshake on connect-back, preventing reflection attacks
+- **Per-IP connection limits** — inbound connections from a single IP address are capped at `MAX_CONNECTIONS_PER_IP` (4), preventing Sybil attacks where one attacker fills all inbound slots with multiple peer IDs
+- **Subnet eclipse mitigation** — inbound connections from a single /16 subnet are capped at `MAX_PEERS_PER_SUBNET` (8), limiting an attacker's ability to dominate the peer table from a single network range
+- **Snapshot chunk buffer OOM prevention** — `SnapshotManifest` rejects manifests with more than `MAX_SNAPSHOT_CHUNKS` (256) chunks and validates chunk count consistency against snapshot size, preventing memory exhaustion from malicious manifests
+- **Bounded peer discovery** — the `recently_attempted` set is capped at `MAX_RECENTLY_ATTEMPTED` (1,000 entries), preventing unbounded memory growth from peer discovery gossip
+- **Snapshot chunk rate limiting** — chunk requests from the same peer are throttled to one per `SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS` (100ms), preventing CPU exhaustion from rapid chunk request spam
 
 ## Production Roadmap
 
-Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
+Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 498 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, and formal verification of all 206 AIR constraints; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 500 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, and formal verification of all 206 AIR constraints; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 
