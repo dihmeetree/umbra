@@ -25,7 +25,7 @@ serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 
 # Randomness
-rand = "0.9"
+rand = "0.10"
 
 # Async runtime (for P2P and RPC)
 tokio = { version = "1", features = ["full"] }
