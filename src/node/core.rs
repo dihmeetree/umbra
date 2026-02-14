@@ -216,10 +216,7 @@ pub fn load_or_generate_keypair(
         let keypair = SigningKeypair::from_bytes(pk_bytes, sk_bytes).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid key data")
         })?;
-        tracing::info!(
-            "Loaded validator key: {}",
-            hex::encode(&keypair.public.fingerprint()[..8])
-        );
+        tracing::info!(key = %hex::encode(&keypair.public.fingerprint()[..8]), "Loaded validator key");
         Ok((keypair, kem_kp))
     } else {
         std::fs::create_dir_all(data_dir)?;
@@ -241,10 +238,7 @@ pub fn load_or_generate_keypair(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
-        tracing::info!(
-            "Generated validator key: {}",
-            hex::encode(&keypair.public.fingerprint()[..8])
-        );
+        tracing::info!(key = %hex::encode(&keypair.public.fingerprint()[..8]), "Generated validator key");
         Ok((keypair, kem_kp))
     }
 }
@@ -260,16 +254,16 @@ impl Node {
             Ok(Some(meta)) => match Ledger::restore_from_storage(&storage, &meta) {
                 Ok(l) => {
                     tracing::info!(
-                        "Restored state from storage: epoch={}, commitments={}, nullifiers={}, finalized={}",
-                        meta.epoch,
-                        meta.commitment_count,
-                        meta.nullifier_count,
-                        meta.finalized_count,
+                        epoch = meta.epoch,
+                        commitments = meta.commitment_count,
+                        nullifiers = meta.nullifier_count,
+                        finalized = meta.finalized_count,
+                        "Restored state from storage"
                     );
                     l
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to restore state, starting fresh: {}", e);
+                    tracing::warn!(error = %e, "Failed to restore state, starting fresh");
                     Ledger::new()
                 }
             },
@@ -316,11 +310,11 @@ impl Node {
                 .collect();
 
             if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
-                tracing::info!("Selected for epoch 0 committee via VRF");
+                tracing::info!(epoch = 0, "Selected for committee via VRF");
                 our_vrf_output = Some(vrf.clone());
                 bft.set_our_vrf_proof(vrf);
             } else {
-                tracing::info!("Not selected for epoch 0 committee");
+                tracing::info!(epoch = 0, "Not selected for committee");
             }
 
             // Store genesis vertex in finalized index (sequence 0)
@@ -328,23 +322,21 @@ impl Node {
             let genesis_vid = crate::consensus::dag::Dag::genesis_vertex().id;
             storage
                 .put_finalized_vertex_index(0, &genesis_vid)
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to persist genesis vertex index: {}", e)
-                });
+                .unwrap_or_else(
+                    |e| tracing::warn!(error = %e, "Failed to persist genesis vertex index"),
+                );
 
             // Create genesis coinbase (initial coin distribution)
             if let Some(genesis_cb) = ledger
                 .state
                 .create_genesis_coinbase(&config.kem_keypair.public)
             {
-                storage
-                    .put_coinbase_output(0, &genesis_cb)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Failed to persist genesis coinbase: {}", e)
-                    });
+                storage.put_coinbase_output(0, &genesis_cb).unwrap_or_else(
+                    |e| tracing::warn!(error = %e, "Failed to persist genesis coinbase"),
+                );
                 tracing::info!(
-                    "Genesis coinbase: {} units minted",
-                    crate::constants::GENESIS_MINT
+                    amount = crate::constants::GENESIS_MINT,
+                    "Genesis coinbase minted"
                 );
             }
 
@@ -358,7 +350,7 @@ impl Node {
                     crate::constants::VALIDATOR_BOND,
                     false,
                 )
-                .unwrap_or_else(|e| tracing::warn!("Failed to persist validator: {}", e));
+                .unwrap_or_else(|e| tracing::warn!(error = %e, "Failed to persist validator"));
 
             // Persist commitment tree nodes from genesis coinbase
             for level in 0..=MERKLE_DEPTH {
@@ -380,10 +372,7 @@ impl Node {
             bft.advance_round();
             ledger.dag.advance_round();
 
-            tracing::info!(
-                "Registered as genesis validator: {}",
-                hex::encode(&our_validator_id[..8])
-            );
+            tracing::info!(validator = %hex::encode(&our_validator_id[..8]), "Registered as genesis validator");
         }
 
         // Record our finalized count before storage is moved into NodeState
@@ -400,7 +389,7 @@ impl Node {
         let upnp_gateway = if config.nat_config.upnp && external_addr.is_none() {
             match crate::network::nat::try_upnp_mapping(config.listen_addr).await {
                 Some((addr, gw)) => {
-                    tracing::info!("UPnP external address: {}", addr);
+                    tracing::info!(addr = %addr, "UPnP external address discovered");
                     Some((addr, gw))
                 }
                 None => None,
@@ -525,7 +514,7 @@ impl Node {
                         let mut state = self.state.write().await;
                         let evicted = state.mempool.evict_expired();
                         if evicted > 0 {
-                            tracing::debug!("Periodic eviction: removed {} expired txs", evicted);
+                            tracing::debug!(count = evicted, "Periodic eviction removed expired txs");
                         }
                     }
                     self.try_propose_vertex().await;
@@ -555,7 +544,7 @@ impl Node {
 
         let state = self.state.read().await;
         if let Err(e) = state.storage.flush() {
-            tracing::error!("Failed to flush storage on shutdown: {}", e);
+            tracing::error!(error = %e, "Failed to flush storage on shutdown");
         }
         tracing::info!("Storage flushed, shutting down P2P...");
         drop(state);
@@ -580,14 +569,14 @@ impl Node {
                 self.refresh_vrf_from_bft().await;
             }
             P2pEvent::PeerConnected(peer_id) => {
-                tracing::info!("Peer connected: {}", hex::encode(&peer_id[..8]));
+                tracing::info!(peer = %hex::encode(&peer_id[..8]), "Peer connected");
                 // If we need sync, ask this peer about their state
                 if let SyncState::NeedSync { .. } = &self.sync_state {
                     let _ = self.p2p.send_to(peer_id, Message::GetEpochState).await;
                 }
             }
             P2pEvent::PeerDisconnected(peer_id) => {
-                tracing::info!("Peer disconnected: {}", hex::encode(&peer_id[..8]));
+                tracing::info!(peer = %hex::encode(&peer_id[..8]), "Peer disconnected");
                 // If we were syncing from this peer, revert to NeedSync
                 match &self.sync_state {
                     SyncState::Syncing { peer, next_seq, .. } if *peer == peer_id => {
@@ -645,7 +634,7 @@ impl Node {
                             .await;
                     }
                     Err(e) => {
-                        tracing::debug!("Rejected tx: {}", e);
+                        tracing::debug!(error = %e, "Rejected tx");
                     }
                 }
             }
@@ -678,7 +667,7 @@ impl Node {
                         total_validators,
                         expected_commitment.as_ref(),
                     ) {
-                        tracing::debug!("Rejected vertex (invalid VRF): {}", e);
+                        tracing::debug!(error = %e, "Rejected vertex, invalid VRF");
                         return;
                     }
                     // Register VRF commitment (first-seen binding)
@@ -693,7 +682,7 @@ impl Node {
                 let current_epoch = state.ledger.state.epoch();
                 for tx in &vertex.transactions {
                     if let Err(e) = tx.validate_structure(current_epoch) {
-                        tracing::debug!("Rejected vertex (invalid tx): {}", e);
+                        tracing::debug!(error = %e, "Rejected vertex, invalid tx");
                         return;
                     }
                 }
@@ -732,7 +721,7 @@ impl Node {
                             .await;
                     }
                     Err(e) => {
-                        tracing::debug!("Rejected vertex: {}", e);
+                        tracing::debug!(error = %e, "Rejected vertex");
                     }
                 }
             }
@@ -809,17 +798,17 @@ impl Node {
                 // Verify both signatures independently
                 if !state.bft.verify_equivocation_evidence(&evidence) {
                     tracing::debug!(
-                        "Rejected invalid equivocation evidence for {}",
-                        hex::encode(&evidence.voter_id[..8]),
+                        voter = %hex::encode(&evidence.voter_id[..8]),
+                        "Rejected invalid equivocation evidence"
                     );
                     return;
                 }
                 if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
                     tracing::warn!(
-                        "Slashed validator {} (network evidence, epoch={}, round={})",
-                        hex::encode(&evidence.voter_id[..8]),
-                        evidence.epoch,
-                        evidence.round,
+                        validator = %hex::encode(&evidence.voter_id[..8]),
+                        epoch = evidence.epoch,
+                        round = evidence.round,
+                        "Slashed validator via network evidence",
                     );
                 }
                 drop(state);
@@ -929,7 +918,7 @@ impl Node {
                             .await;
                     }
                     Err(e) => {
-                        tracing::debug!("Failed to serve sync request: {}", e);
+                        tracing::debug!(error = %e, "Failed to serve sync request");
                     }
                 }
             }
@@ -944,8 +933,8 @@ impl Node {
                     // Skip peers on cooldown from recent failures
                     if self.sync_failed_peers.contains_key(&from) {
                         tracing::debug!(
-                            "Skipping sync peer {} (on cooldown)",
-                            hex::encode(&from[..8])
+                            peer = %hex::encode(&from[..8]),
+                            "Skipping sync peer, on cooldown"
                         );
                         return;
                     }
@@ -963,10 +952,10 @@ impl Node {
                         if use_snapshot {
                             // Large gap or fresh node: try snapshot sync first
                             tracing::info!(
-                                "Requesting snapshot from peer {} (our finalized: {}, gap: {})",
-                                hex::encode(&from[..8]),
-                                our_finalized,
-                                gap,
+                                peer = %hex::encode(&from[..8]),
+                                our_finalized = our_finalized,
+                                gap = gap,
+                                "Requesting snapshot from peer"
                             );
                             let _ = self.p2p.send_to(from, Message::GetSnapshot).await;
                             // Stay in NeedSync until SnapshotManifest arrives.
@@ -975,10 +964,10 @@ impl Node {
                         } else {
                             // Small gap: use vertex-by-vertex sync
                             tracing::info!(
-                                "Starting vertex sync from peer {} (our finalized: {}, gap: {})",
-                                hex::encode(&from[..8]),
-                                our_finalized,
-                                gap,
+                                peer = %hex::encode(&from[..8]),
+                                our_finalized = our_finalized,
+                                gap = gap,
+                                "Starting vertex sync from peer"
                             );
                             let start_after = if our_finalized > 0 {
                                 our_finalized - 1
@@ -1037,10 +1026,10 @@ impl Node {
                     let max_reasonable = our_finalized_count + crate::constants::EPOCH_LENGTH * 10;
                     if total_finalized > max_reasonable {
                         tracing::warn!(
-                            "Sync: peer claims {} finalized vertices (our: {}, max reasonable: {}), aborting",
-                            total_finalized,
-                            our_finalized_count,
-                            max_reasonable,
+                            claimed = total_finalized,
+                            ours = our_finalized_count,
+                            max = max_reasonable,
+                            "Sync peer claims unreasonable finalized count, aborting"
                         );
                         let peer_id = from;
                         self.sync_failed_peers.insert(peer_id, Instant::now());
@@ -1054,9 +1043,9 @@ impl Node {
                     self.sync_rounds += 1;
                     if self.sync_rounds > MAX_SYNC_ROUNDS {
                         tracing::warn!(
-                            "Sync: exceeded {} rounds with peer {}, giving up",
-                            MAX_SYNC_ROUNDS,
-                            hex::encode(&from[..8])
+                            rounds = MAX_SYNC_ROUNDS,
+                            peer = %hex::encode(&from[..8]),
+                            "Sync exceeded max rounds, giving up"
                         );
                         let peer_id = from;
                         self.sync_failed_peers.insert(peer_id, Instant::now());
@@ -1074,9 +1063,9 @@ impl Node {
                         // L4: Validate vertex epoch doesn't jump unreasonably
                         if vertex.epoch > target_epoch + 1 {
                             tracing::warn!(
-                                "Sync peer sent vertex with future epoch {} (target: {})",
-                                vertex.epoch,
-                                target_epoch
+                                epoch = vertex.epoch,
+                                target = target_epoch,
+                                "Sync peer sent vertex with future epoch"
                             );
                             break;
                         }
@@ -1142,9 +1131,9 @@ impl Node {
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "Sync: failed to apply vertex at seq {}: {}",
-                                    seq,
-                                    e
+                                    seq = seq,
+                                    error = %e,
+                                    "Sync failed to apply vertex"
                                 );
                                 // Stop syncing on error
                                 self.sync_state = SyncState::NeedSync { our_finalized: seq };
@@ -1163,10 +1152,10 @@ impl Node {
                     }
 
                     tracing::info!(
-                        "Sync: applied {} vertices (up to seq {}), total finalized on peer: {}",
-                        applied,
-                        last_seq,
-                        total_finalized,
+                        applied = applied,
+                        last_seq = last_seq,
+                        peer_finalized = total_finalized,
+                        "Sync applied vertices"
                     );
 
                     if has_more && batch_len > 0 {
@@ -1255,7 +1244,7 @@ impl Node {
                                 total_validators,
                                 expected_commitment.as_ref(),
                             ) {
-                                tracing::warn!("VertexResponse failed VRF validation: {}", e);
+                                tracing::warn!(error = %e, "VertexResponse failed VRF validation");
                                 return;
                             }
                             // Register VRF commitment (first-seen binding)
@@ -1303,13 +1292,13 @@ impl Node {
                             match crate::serialize(&snap) {
                                 Ok(b) => (b, meta, fc),
                                 Err(e) => {
-                                    tracing::warn!("Failed to serialize snapshot: {}", e);
+                                    tracing::warn!(error = %e, "Failed to serialize snapshot");
                                     return;
                                 }
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to build snapshot: {}", e);
+                            tracing::warn!(error = %e, "Failed to build snapshot");
                             return;
                         }
                     }
@@ -1364,9 +1353,9 @@ impl Node {
                     // Validate: reject absurdly large snapshots (> 1 GiB)
                     if snapshot_size > 1_073_741_824 {
                         tracing::warn!(
-                            "Snapshot from {} too large ({} bytes), skipping",
-                            hex::encode(&from[..8]),
-                            snapshot_size,
+                            peer = %hex::encode(&from[..8]),
+                            size = snapshot_size,
+                            "Snapshot too large, skipping"
                         );
                         return;
                     }
@@ -1376,11 +1365,11 @@ impl Node {
                     }
 
                     tracing::info!(
-                        "Received snapshot manifest: epoch={}, finalized={}, {} chunks ({} bytes)",
-                        meta.epoch,
-                        meta.finalized_count,
-                        total_chunks,
-                        snapshot_size,
+                        epoch = meta.epoch,
+                        finalized = meta.finalized_count,
+                        chunks = total_chunks,
+                        size = snapshot_size,
+                        "Received snapshot manifest"
                     );
 
                     self.sync_state = SyncState::SyncingSnapshot {
@@ -1507,15 +1496,15 @@ impl Node {
         };
 
         tracing::info!(
-            "Snapshot fully received ({} bytes), importing...",
-            assembled.len(),
+            size = assembled.len(),
+            "Snapshot fully received, importing..."
         );
 
         // Deserialize
         let snapshot: crate::state::SnapshotData = match crate::deserialize_snapshot(&assembled) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("Failed to deserialize snapshot: {}", e);
+                tracing::error!(error = %e, "Failed to deserialize snapshot");
                 self.sync_failed_peers.insert(peer, Instant::now());
                 self.sync_state = SyncState::NeedSync { our_finalized: 0 };
                 return;
@@ -1526,7 +1515,7 @@ impl Node {
         {
             let state = self.state.read().await;
             if let Err(e) = crate::state::import_snapshot_to_storage(&state.storage, &snapshot) {
-                tracing::error!("Snapshot import failed: {}", e);
+                tracing::error!(error = %e, "Snapshot import failed");
                 self.sync_failed_peers.insert(peer, Instant::now());
                 self.sync_state = SyncState::NeedSync { our_finalized: 0 };
                 return;
@@ -1565,9 +1554,9 @@ impl Node {
                     let computed_root = state.ledger.state.state_root();
                     if computed_root != meta.state_root {
                         tracing::error!(
-                            "Snapshot state_root mismatch: computed {} vs claimed {}",
-                            hex::encode(computed_root),
-                            hex::encode(meta.state_root),
+                            computed = %hex::encode(computed_root),
+                            claimed = %hex::encode(meta.state_root),
+                            "Snapshot state root mismatch"
                         );
                         drop(state);
                         self.sync_failed_peers.insert(peer, Instant::now());
@@ -1576,15 +1565,15 @@ impl Node {
                     }
 
                     tracing::info!(
-                        "Snapshot imported: epoch={}, commitments={}, nullifiers={}, finalized={}",
-                        epoch,
-                        meta.commitment_count,
-                        meta.nullifier_count,
-                        meta.finalized_count,
+                        epoch = epoch,
+                        commitments = meta.commitment_count,
+                        nullifiers = meta.nullifier_count,
+                        finalized = meta.finalized_count,
+                        "Snapshot imported"
                     );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to restore ledger from snapshot: {}", e);
+                    tracing::error!(error = %e, "Failed to restore ledger from snapshot");
                     drop(state);
                     self.sync_failed_peers.insert(peer, Instant::now());
                     self.sync_state = SyncState::NeedSync { our_finalized: 0 };
@@ -1599,8 +1588,8 @@ impl Node {
         // Transition to vertex sync to catch up any remaining vertices
         let finalized_count = meta.finalized_count;
         tracing::info!(
-            "Snapshot sync complete, resuming vertex sync from seq {}",
-            finalized_count,
+            seq = finalized_count,
+            "Snapshot sync complete, resuming vertex sync"
         );
         self.sync_state = SyncState::NeedSync {
             our_finalized: finalized_count,
@@ -1697,9 +1686,9 @@ impl Node {
                 for evidence in &evidence_to_broadcast {
                     if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
                         tracing::warn!(
-                            "Slashed validator {} for equivocation in round {}",
-                            hex::encode(&evidence.voter_id[..8]),
-                            evidence.round
+                            validator = %hex::encode(&evidence.voter_id[..8]),
+                            round = evidence.round,
+                            "Slashed validator for equivocation"
                         );
                     }
                 }
@@ -1731,11 +1720,7 @@ impl Node {
                 let dag_epoch = state.ledger.dag.epoch();
                 if dag_epoch > state.bft.epoch {
                     let (fees, new_seed) = state.ledger.state.advance_epoch();
-                    tracing::info!(
-                        "Epoch advanced to {} (fees collected: {})",
-                        new_seed.epoch,
-                        fees
-                    );
+                    tracing::info!(epoch = new_seed.epoch, fees = fees, "Epoch advanced");
 
                     // Re-evaluate our VRF for the new epoch
                     let total_validators = state.ledger.state.total_validators();
@@ -1756,25 +1741,25 @@ impl Node {
                         .collect();
 
                     if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
-                        tracing::info!("Selected for epoch {} committee via VRF", dag_epoch);
+                        tracing::info!(epoch = dag_epoch, "Selected for committee via VRF");
                         state.bft.set_our_vrf_proof(vrf);
                     } else {
-                        tracing::info!("Not selected for epoch {} committee", dag_epoch);
+                        tracing::info!(epoch = dag_epoch, "Not selected for committee");
                     }
 
                     // Update mempool epoch and evict expired transactions
                     state.mempool.set_epoch(dag_epoch);
                     let evicted = state.mempool.evict_expired();
                     if evicted > 0 {
-                        tracing::info!("Evicted {} expired txs on epoch transition", evicted);
+                        tracing::info!(count = evicted, "Evicted expired txs on epoch transition");
                     }
 
                     let eligible = state.ledger.state.eligible_validators(dag_epoch);
                     tracing::info!(
-                        "Epoch {}: {} eligible validators of {} active",
-                        dag_epoch,
-                        eligible.len(),
-                        total_validators,
+                        epoch = dag_epoch,
+                        eligible = eligible.len(),
+                        active = total_validators,
+                        "Epoch validator summary"
                     );
 
                     // F16: Check protocol upgrade signals
@@ -1786,8 +1771,11 @@ impl Node {
                                     > total_signals * crate::constants::UPGRADE_THRESHOLD_NUM
                             {
                                 tracing::warn!(
-                                    "Protocol upgrade signaled: version {} has {}/{} signals (>75%), effective epoch {}",
-                                    ver, count, total_signals, dag_epoch + 2
+                                    version = ver,
+                                    count = count,
+                                    total = total_signals,
+                                    effective_epoch = dag_epoch + 2,
+                                    "Protocol upgrade signaled"
                                 );
                             }
                         }
@@ -1799,15 +1787,15 @@ impl Node {
                         let before = dag_epoch - crate::constants::PRUNING_RETAIN_EPOCHS;
                         let pruned = state.ledger.dag.prune_finalized(before);
                         if pruned > 0 {
-                            tracing::info!("Pruned {} old vertices from DAG memory", pruned);
+                            tracing::info!(count = pruned, "Pruned old vertices from DAG memory");
                         }
                     }
                 }
 
-                tracing::info!("Finalized vertex {}", hex::encode(&vertex_id.0[..8]));
+                tracing::info!(vertex = %hex::encode(&vertex_id.0[..8]), "Finalized vertex");
             }
             Err(e) => {
-                tracing::debug!("Failed to finalize vertex: {}", e);
+                tracing::debug!(error = %e, "Failed to finalize vertex");
             }
         }
     }
@@ -1830,9 +1818,9 @@ impl Node {
             if elapsed > std::time::Duration::from_millis(crate::constants::SYNC_REQUEST_TIMEOUT_MS)
             {
                 tracing::warn!(
-                    "Sync timeout: peer {} unresponsive for {}ms, retrying",
-                    hex::encode(&peer[..8]),
-                    elapsed.as_millis()
+                    peer = %hex::encode(&peer[..8]),
+                    elapsed_ms = %elapsed.as_millis(),
+                    "Sync timeout, retrying"
                 );
                 let peer_id = *peer;
                 let seq = *next_seq;
@@ -1854,9 +1842,9 @@ impl Node {
             if elapsed > std::time::Duration::from_millis(crate::constants::SYNC_REQUEST_TIMEOUT_MS)
             {
                 tracing::warn!(
-                    "Snapshot sync timeout: peer {} unresponsive for {}ms",
-                    hex::encode(&peer[..8]),
-                    elapsed.as_millis()
+                    peer = %hex::encode(&peer[..8]),
+                    elapsed_ms = %elapsed.as_millis(),
+                    "Snapshot sync timeout"
                 );
                 let peer_id = *peer;
                 self.sync_failed_peers.insert(peer_id, Instant::now());
@@ -1890,10 +1878,10 @@ impl Node {
 
             if stale || peer_round > our_round + crate::constants::MAX_ROUND_LAG {
                 tracing::warn!(
-                    "View change: stale={}, our_round={}, peer_round={}. Broadcasting GetTips.",
-                    stale,
-                    our_round,
-                    peer_round
+                    stale = stale,
+                    our_round = our_round,
+                    peer_round = peer_round,
+                    "View change detected, broadcasting GetTips"
                 );
                 let _ = self.p2p.broadcast(Message::GetTips, None).await;
                 let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
@@ -2073,11 +2061,7 @@ impl Node {
         vertex.signature = self.keypair.sign(&vertex.id.0);
 
         let vertex_id = vertex.id;
-        tracing::info!(
-            "Proposing vertex {} with {} txs",
-            hex::encode(&vertex_id.0[..8]),
-            vertex.transactions.len()
-        );
+        tracing::info!(vertex = %hex::encode(&vertex_id.0[..8]), txs = vertex.transactions.len(), "Proposing vertex");
 
         // Insert into local DAG
         match state.ledger.insert_vertex(vertex.clone()) {
@@ -2109,7 +2093,7 @@ impl Node {
                 let _ = self.p2p.broadcast(Message::BftVote(vote), None).await;
             }
             Err(e) => {
-                tracing::warn!("Failed to insert own vertex: {}", e);
+                tracing::warn!(error = %e, "Failed to insert own vertex");
             }
         }
     }

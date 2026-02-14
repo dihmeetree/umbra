@@ -102,7 +102,7 @@ pub async fn try_upnp_mapping(local_addr: SocketAddr) -> Option<(SocketAddr, Upn
     let gateway: UpnpGateway = match igd_next::aio::tokio::search_gateway(search_opts).await {
         Ok(gw) => gw,
         Err(e) => {
-            tracing::debug!("UPnP gateway discovery failed: {}", e);
+            tracing::debug!(error = %e, "UPnP gateway discovery failed");
             return None;
         }
     };
@@ -123,16 +123,16 @@ pub async fn try_upnp_mapping(local_addr: SocketAddr) -> Option<(SocketAddr, Upn
         Ok(()) => match gateway.get_external_ip().await {
             Ok(ext_ip) => {
                 let ext_addr = SocketAddr::new(ext_ip, local_port);
-                tracing::info!("UPnP mapped {}:{} -> {}", local_ip, local_port, ext_addr);
+                tracing::info!(local = %local_ip, port = local_port, external = %ext_addr, "UPnP port mapped");
                 Some((ext_addr, gateway))
             }
             Err(e) => {
-                tracing::warn!("UPnP port mapped but failed to get external IP: {}", e);
+                tracing::warn!(error = %e, "UPnP port mapped but failed to get external IP");
                 None
             }
         },
         Err(e) => {
-            tracing::debug!("UPnP port mapping failed: {}", e);
+            tracing::debug!(error = %e, "UPnP port mapping failed");
             None
         }
     }
@@ -151,11 +151,11 @@ pub async fn renew_upnp_mapping(gateway: &UpnpGateway, local_addr: SocketAddr) -
         .await
     {
         Ok(()) => {
-            tracing::debug!("UPnP lease renewed for port {}", local_addr.port());
+            tracing::debug!(port = local_addr.port(), "UPnP lease renewed");
             true
         }
         Err(e) => {
-            tracing::warn!("UPnP lease renewal failed: {}", e);
+            tracing::warn!(port = local_addr.port(), error = %e, "UPnP lease renewal failed");
             false
         }
     }
@@ -167,8 +167,8 @@ pub async fn remove_upnp_mapping(gateway: &UpnpGateway, port: u16) {
         .remove_port(igd_next::PortMappingProtocol::TCP, port)
         .await
     {
-        Ok(()) => tracing::debug!("UPnP mapping removed for port {}", port),
-        Err(e) => tracing::debug!("UPnP mapping removal failed (may have expired): {}", e),
+        Ok(()) => tracing::debug!(port = port, "UPnP mapping removed"),
+        Err(e) => tracing::debug!(port = port, error = %e, "UPnP mapping removal failed"),
     }
 }
 

@@ -168,14 +168,14 @@ impl UmbraConfig {
         match std::fs::read_to_string(&config_path) {
             Ok(contents) => match toml::from_str(&contents) {
                 Ok(config) => {
-                    tracing::info!("Loaded config from {}", config_path.display());
+                    tracing::info!(path = %config_path.display(), "Loaded config");
                     config
                 }
                 Err(e) => {
                     tracing::error!(
-                        "CRITICAL: Failed to parse {}: {} — running with DEFAULT configuration! Check your config file.",
-                        config_path.display(),
-                        e
+                        path = %config_path.display(),
+                        error = %e,
+                        "Failed to parse config, running with defaults"
                     );
                     Self::default()
                 }
@@ -192,7 +192,7 @@ impl UmbraConfig {
             .filter_map(|s| match s.parse() {
                 Ok(addr) => Some(addr),
                 Err(_) => {
-                    tracing::warn!("Ignoring unparseable bootstrap peer address: {}", s);
+                    tracing::warn!(address = %s, "Ignoring unparseable bootstrap peer");
                     None
                 }
             })

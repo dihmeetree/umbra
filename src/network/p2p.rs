@@ -532,7 +532,7 @@ async fn p2p_loop(
                             Err(_) => return,
                         };
                         if let Err(e) = handle_inbound(stream, addr, &config_clone, internal_tx_clone).await {
-                            tracing::debug!("Inbound connection from {} failed: {}", addr, e);
+                            tracing::debug!(addr = %addr, error = %e, "Inbound connection failed");
                         }
                     });
                 }
@@ -554,7 +554,7 @@ async fn p2p_loop(
                                 Err(_) => return,
                             };
                             if let Err(e) = handle_outbound(addr, &config_clone, internal_tx_clone).await {
-                                tracing::debug!("Outbound connection to {} failed: {}", addr, e);
+                                tracing::debug!(addr = %addr, error = %e, "Outbound connection failed");
                             }
                         });
                     }
@@ -610,7 +610,7 @@ async fn p2p_loop(
                         // F7: Check if peer is banned
                         if let Some(rep) = reputations.get(&peer_id) {
                             if rep.is_banned() {
-                                tracing::debug!("Rejected banned peer {}", hex::encode(&peer_id[..8]));
+                                tracing::debug!(peer = %hex::encode(&peer_id[..8]), "Rejected banned peer");
                                 continue;
                             }
                         }
@@ -663,8 +663,8 @@ async fn p2p_loop(
                                     let changed = nat_state.record_observed_addr(from, observed.ip());
                                     if changed {
                                         tracing::info!(
-                                            "NAT: observed external addr established via peer quorum: {}",
-                                            nat_state.external_addr().map(|a| a.to_string()).unwrap_or_default()
+                                            addr = %nat_state.external_addr().map(|a| a.to_string()).unwrap_or_default(),
+                                            "Observed external address established via peer quorum"
                                         );
                                     }
                                 }
@@ -678,9 +678,9 @@ async fn p2p_loop(
                                         requester_external_addr: requester_external_addr.clone(),
                                     });
                                     tracing::debug!(
-                                        "NAT: relayed punch request from {} to {}",
-                                        hex::encode(&from[..8]),
-                                        hex::encode(&target_peer_id[..8])
+                                        from = %hex::encode(&from[..8]),
+                                        to = %hex::encode(&target_peer_id[..8]),
+                                        "Relayed punch request"
                                     );
                                 }
                                 continue;
@@ -701,19 +701,19 @@ async fn p2p_loop(
                                             match handle_outbound(addr, &config_clone, internal_tx_clone.clone()).await {
                                                 Ok(()) => {
                                                     tracing::debug!(
-                                                        "NAT: hole punch to {} succeeded on attempt {}",
-                                                        hex::encode(&req_id[..8]),
-                                                        attempt
+                                                        peer = %hex::encode(&req_id[..8]),
+                                                        attempt = attempt,
+                                                        "Hole punch succeeded"
                                                     );
                                                     return;
                                                 }
                                                 Err(e) => {
                                                     tracing::debug!(
-                                                        "NAT: hole punch attempt {}/{} to {} failed: {}",
-                                                        attempt,
-                                                        crate::constants::HOLE_PUNCH_MAX_ATTEMPTS,
-                                                        addr,
-                                                        e
+                                                        attempt = attempt,
+                                                        max = crate::constants::HOLE_PUNCH_MAX_ATTEMPTS,
+                                                        addr = %addr,
+                                                        error = %e,
+                                                        "Hole punch attempt failed"
                                                     );
                                                 }
                                             }
@@ -758,10 +758,10 @@ async fn p2p_loop(
                         rep.penalize(penalty);
                         if rep.is_banned() {
                             tracing::warn!(
-                                "Banning peer {} (score={}, violations={})",
-                                hex::encode(&peer_id[..8]),
-                                rep.score,
-                                rep.violations,
+                                peer = %hex::encode(&peer_id[..8]),
+                                score = rep.score,
+                                violations = rep.violations,
+                                "Banning peer"
                             );
                             // Disconnect the banned peer
                             if let Some(peer) = peers.remove(&peer_id) {
@@ -1024,10 +1024,10 @@ async fn spawn_encrypted_connection_tasks(
                     if !rate_limiter.try_consume() {
                         violations += 1;
                         tracing::warn!(
-                            "Rate limit exceeded for peer {} ({}/{})",
-                            hex::encode(&peer_id[..8]),
-                            violations,
-                            crate::constants::PEER_RATE_LIMIT_STRIKES
+                            peer = %hex::encode(&peer_id[..8]),
+                            violations = violations,
+                            max = crate::constants::PEER_RATE_LIMIT_STRIKES,
+                            "Rate limit exceeded"
                         );
                         // Report misbehavior for rate limit violation
                         let _ = internal_tx_read
@@ -1038,8 +1038,8 @@ async fn spawn_encrypted_connection_tasks(
                             .await;
                         if violations >= crate::constants::PEER_RATE_LIMIT_STRIKES {
                             tracing::warn!(
-                                "Disconnecting peer {} for repeated rate violations",
-                                hex::encode(&peer_id[..8])
+                                peer = %hex::encode(&peer_id[..8]),
+                                "Disconnecting peer for repeated rate violations"
                             );
                             let _ = internal_tx_read
                                 .send(InternalEvent::Disconnected(peer_id))

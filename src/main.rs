@@ -305,10 +305,7 @@ async fn run_node(
     tls_config: Option<TlsConfig>,
     nat_config: NatConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Starting Umbra node...");
-    tracing::info!("P2P: {}", listen_addr);
-    tracing::info!("RPC: {}", rpc_addr);
-    tracing::info!("Data: {}", data_dir.display());
+    tracing::info!(p2p = %listen_addr, rpc = %rpc_addr, data = %data_dir.display(), "Starting Umbra node...");
 
     // Safety check: refuse to expose RPC on non-loopback without TLS
     let is_loopback = matches!(rpc_addr.ip(),
@@ -331,7 +328,7 @@ async fn run_node(
                 .map_err(|e| format!("TLS config error: {}", e))?;
             let loaded =
                 umbra::node::rpc::load_tls(tls).map_err(|e| -> Box<dyn std::error::Error> { e })?;
-            tracing::info!("mTLS enabled for RPC (cert: {})", tls.cert_file.display());
+            tracing::info!(cert = %tls.cert_file.display(), "mTLS enabled for RPC");
             Some(loaded)
         }
         None => None,
@@ -363,7 +360,7 @@ async fn run_node(
     let shutdown_signal = shutdown.clone();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("Ctrl+C received, shutting down...");
+        tracing::info!("Ctrl-C received, shutting down...");
         shutdown_signal.cancel();
     });
     node.run(shutdown).await;

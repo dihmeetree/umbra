@@ -145,14 +145,14 @@ pub async fn serve(
     let app = router(rpc_state);
     match tls {
         Some(loaded) => {
-            tracing::info!("RPC server listening on {} (mTLS enabled)", addr);
+            tracing::info!(addr = %addr, tls = true, "RPC server listening");
             axum_server::bind_rustls(addr, loaded.config)
                 .serve(app.into_make_service())
                 .await?;
         }
         None => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            tracing::info!("RPC server listening on {} (plain HTTP)", addr);
+            tracing::info!(addr = %addr, tls = false, "RPC server listening");
             axum::serve(listener, app).await?;
         }
     }
@@ -212,7 +212,7 @@ async fn submit_tx(
                 .send_to(peer_id, crate::network::Message::NewTransaction(tx))
                 .await
             {
-                tracing::warn!("Failed to stem-send transaction: {}", e);
+                tracing::warn!(error = %e, "Failed to stem-send transaction");
             }
         }
         None => {
@@ -473,7 +473,7 @@ async fn get_finalized_vertices(
                 })
             }
             Err(e) => {
-                tracing::error!("Failed to serialize vertex at seq {}: {}", seq, e);
+                tracing::error!(seq = seq, error = %e, "Failed to serialize vertex");
                 None
             }
         })
