@@ -11,7 +11,7 @@
 ## Cryptography & Privacy
 
 - [ ] **External security audit** — independent cryptographer review of custom BLAKE3 AEAD, Rescue Prime parameters, and STARK AIR constraints
-- [ ] **Formal verification of AIR constraints** — prove that the 154 balance and 52 spend constraints are sufficient for soundness
+- [x] **Formal verification of AIR constraints** — prove that the 154 balance and 52 spend constraints are sufficient for soundness
 - [ ] **Tor/I2P integration** — route P2P traffic through an anonymity network for real sender privacy beyond Dandelion++
 
 ## Operations & Infrastructure

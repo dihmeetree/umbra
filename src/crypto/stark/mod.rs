@@ -20,6 +20,9 @@ pub mod spend_air;
 pub mod spend_prover;
 pub mod verify;
 
+#[cfg(test)]
+mod formal_verification;
+
 use winterfell::crypto::hashers::Rp64_256;
 use winterfell::crypto::DefaultRandomCoin;
 use winterfell::crypto::MerkleTree;
