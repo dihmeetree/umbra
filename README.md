@@ -119,7 +119,7 @@ spectra/
     error.html              Error display
 ```
 
-**~22,000 lines of Rust** across 37 source files with **314 tests**.
+**~23,000 lines of Rust** across 37 source files with **314 tests**.
 
 ## Building
 
@@ -436,19 +436,17 @@ cargo run --release --bin simulator
 
 ### What It Tests
 
-The simulator runs 6 phases with 23 automated checks:
+The simulator runs 6 phases with 41 automated checks:
 
 1. **Bootstrap Network** — starts 3 validator nodes on localhost with real P2P connections and BFT consensus
 2. **Genesis Funding** — creates wallets for Alice and Bob, funds each with 10M coins from the genesis coinbase via proper transactions with full zk-STARK proofs
 3. **Normal Traffic** — 5 rounds of Alice/Bob transactions with balance conservation verification after each round
-4. **Chaos Agent (Mallory)** — 7 attack scenarios, each verified to be rejected:
-   - Corrupted zk-STARK proof bytes
-   - Wrong chain ID
-   - Overflow fee (exceeds `MAX_TX_FEE`)
-   - Zero fee (below `MIN_TX_FEE`)
-   - Empty transaction (no inputs/outputs)
-   - Duplicate nullifier within a single transaction
-   - Oversized encrypted message
+4. **Chaos Agent (Mallory)** — 25 attack scenarios across 5 categories, each verified to be rejected:
+   - **Transaction structure**: corrupted proof, wrong chain ID, overflow fee, zero fee, empty transaction, duplicate nullifier, oversized message, too many inputs, too many outputs, too many messages, duplicate output commitments, invalid tx_binding, expired transaction
+   - **Proof manipulation**: proof transplant (swap proofs between txs), proof_link tampering, nullifier tampering
+   - **Validator operations**: insufficient bond, invalid key sizes, zero bond return in deregister
+   - **Double-spend & replay**: mempool nullifier conflict, duplicate transaction, cross-chain replay via state validation, state-level double-spend with already-spent nullifier
+   - **Timing & resilience**: mempool expiry eviction, no-expiry tx survives eviction
 5. **State Integrity** — verifies chain state is uncorrupted after all attacks
 6. **Monitoring** — checks node health, epoch state, commitment tree, validator set, mempool, and validator health across all nodes
 

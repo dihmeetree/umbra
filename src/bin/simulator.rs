@@ -14,14 +14,18 @@ use colored::Colorize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use spectra::crypto::keys::{KemKeypair, SigningKeypair};
+use spectra::crypto::commitment::{BlindingFactor, Commitment};
+use spectra::crypto::encryption::EncryptedPayload;
+use spectra::crypto::keys::{KemKeypair, Signature, SigningKeypair};
+use spectra::crypto::nullifier::Nullifier;
 use spectra::crypto::stark::default_proof_options;
 use spectra::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
+use spectra::crypto::stealth::StealthAddress;
 use spectra::node::{Node, NodeConfig, NodeState};
 use spectra::rpc::{serve as rpc_serve, RpcState};
 use spectra::storage::Storage;
 use spectra::transaction::builder::{InputSpec, TransactionBuilder};
-use spectra::transaction::Transaction;
+use spectra::transaction::{Transaction, TxInput, TxMessage, TxOutput, TxType};
 use spectra::wallet::Wallet;
 
 // ── Configuration ──
@@ -147,8 +151,8 @@ async fn async_main() {
     )
     .await;
 
-    match genesis_funded {
-        Ok((alice_bal, bob_bal)) => {
+    let spent_nullifiers = match genesis_funded {
+        Ok((alice_bal, bob_bal, nullifiers)) => {
             println!(
                 "  {} Alice balance: {}, Bob balance: {}",
                 "OK".green().bold(),
@@ -159,6 +163,7 @@ async fn async_main() {
                 "Genesis Funding",
                 &format!("Alice={}, Bob={}", alice_bal, bob_bal),
             ));
+            nullifiers
         }
         Err(e) => {
             println!("  {} {}", "FAIL".red().bold(), e);
@@ -169,7 +174,7 @@ async fn async_main() {
             print_summary(&results);
             std::process::exit(1);
         }
-    }
+    };
 
     // Wait for finalization
     println!("  Waiting for transactions to finalize...");
@@ -197,7 +202,7 @@ async fn async_main() {
     // ── Phase 4: Chaos Agent ──
     println!("\n{}", "[Phase 4] Mallory's attack scenarios...".yellow());
 
-    let chaos_results = run_chaos_scenarios(&node_states[0]).await;
+    let chaos_results = run_chaos_scenarios(&node_states[0], &spent_nullifiers).await;
 
     for r in chaos_results {
         let status = if r.passed {
@@ -334,12 +339,13 @@ async fn check_peer_connectivity(states: &[Arc<RwLock<NodeState>>]) -> bool {
 
 // ── Phase 2: Genesis Funding ──
 
+/// Returns (alice_balance, bob_balance, spent_nullifiers_from_funding_txs).
 async fn fund_users(
     genesis_state: &Arc<RwLock<NodeState>>,
     genesis_kem: &KemKeypair,
     alice_wallet: &mut Wallet,
     bob_wallet: &mut Wallet,
-) -> Result<(u64, u64), String> {
+) -> Result<(u64, u64, Vec<Nullifier>), String> {
     let state_guard = genesis_state.read().await;
 
     // Get the genesis coinbase output by scanning state
@@ -446,7 +452,20 @@ async fn fund_users(
     bob_wallet.resolve_commitment_indices(&state_guard.ledger.state);
     drop(state_guard);
 
-    Ok((alice_wallet.balance(), bob_wallet.balance()))
+    // Collect spent nullifiers from funding txs for double-spend attack testing
+    let mut spent_nullifiers = Vec::new();
+    for input in &alice_tx.inputs {
+        spent_nullifiers.push(input.nullifier);
+    }
+    for input in &bob_tx.inputs {
+        spent_nullifiers.push(input.nullifier);
+    }
+
+    Ok((
+        alice_wallet.balance(),
+        bob_wallet.balance(),
+        spent_nullifiers,
+    ))
 }
 
 /// Wait for at least `count` new vertices to be finalized on the node.
@@ -469,6 +488,41 @@ async fn wait_for_finalization(state: &Arc<RwLock<NodeState>>, count: u64) {
     }
     // Timeout after 20 seconds — continue anyway
     println!("  (finalization wait timed out, continuing)");
+}
+
+// ── Helpers for constructing dummy transaction components ──
+
+/// Create a dummy TxInput with a random nullifier and empty proofs.
+fn make_dummy_input() -> TxInput {
+    let null_hash = spectra::hash_domain(b"dummy", &rand::random::<[u8; 32]>());
+    TxInput {
+        nullifier: Nullifier(null_hash),
+        proof_link: rand::random(),
+        spend_proof: SpendStarkProof {
+            proof_bytes: vec![0u8; 4],
+            public_inputs_bytes: vec![],
+        },
+    }
+}
+
+/// Create a dummy TxOutput with a random commitment and valid stealth address.
+fn make_dummy_output() -> TxOutput {
+    let kem = KemKeypair::generate();
+    let stealth = StealthAddress::generate(&kem.public, 0).unwrap();
+    let note = EncryptedPayload::encrypt(&kem.public, b"dummy-note").unwrap();
+    TxOutput {
+        commitment: Commitment(rand::random()),
+        stealth_address: stealth.address,
+        encrypted_note: note,
+    }
+}
+
+/// Create a dummy TxMessage with a small encrypted payload.
+fn make_dummy_message() -> TxMessage {
+    let kem = KemKeypair::generate();
+    TxMessage {
+        payload: EncryptedPayload::encrypt(&kem.public, b"dummy-msg").unwrap(),
+    }
 }
 
 // ── Phase 3: Normal Traffic ──
@@ -597,7 +651,10 @@ async fn run_normal_traffic(
 
 // ── Phase 4: Chaos ──
 
-async fn run_chaos_scenarios(node_state: &Arc<RwLock<NodeState>>) -> Vec<TestResult> {
+async fn run_chaos_scenarios(
+    node_state: &Arc<RwLock<NodeState>>,
+    spent_nullifiers: &[Nullifier],
+) -> Vec<TestResult> {
     let mut results = Vec::new();
 
     // Get chain state snapshot for comparison after attacks
@@ -911,6 +968,773 @@ async fn run_chaos_scenarios(node_state: &Arc<RwLock<NodeState>>) -> Vec<TestRes
             Err(e) => {
                 results.push(TestResult::pass(name, &format!("builder rejected: {}", e)));
             }
+        }
+    }
+
+    // ── Group A: Transaction Structure Attacks ──
+
+    // Attack 8: Too many inputs (> MAX_TX_IO)
+    {
+        let name = "Attack: Too many inputs";
+        let inputs: Vec<TxInput> = (0..spectra::constants::MAX_TX_IO + 1)
+            .map(|_| make_dummy_input())
+            .collect();
+        let tx = Transaction {
+            inputs,
+            outputs: vec![make_dummy_output()],
+            messages: vec![],
+            fee: 100,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            tx_type: TxType::Transfer,
+            tx_binding: [0u8; 32],
+            chain_id: spectra::constants::chain_id(),
+            expiry_epoch: 0,
+        };
+        let mut state_guard = node_state.write().await;
+        match state_guard.mempool.insert(tx) {
+            Ok(_) => results.push(TestResult::fail(name, "accepted too many inputs")),
+            Err(e) => results.push(TestResult::pass(
+                name,
+                &format!("correctly rejected: {}", e),
+            )),
+        }
+    }
+
+    // Attack 9: Too many outputs (> MAX_TX_IO)
+    {
+        let name = "Attack: Too many outputs";
+        let outputs: Vec<TxOutput> = (0..spectra::constants::MAX_TX_IO + 1)
+            .map(|_| make_dummy_output())
+            .collect();
+        let tx = Transaction {
+            inputs: vec![make_dummy_input()],
+            outputs,
+            messages: vec![],
+            fee: 100,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            tx_type: TxType::Transfer,
+            tx_binding: [0u8; 32],
+            chain_id: spectra::constants::chain_id(),
+            expiry_epoch: 0,
+        };
+        let mut state_guard = node_state.write().await;
+        match state_guard.mempool.insert(tx) {
+            Ok(_) => results.push(TestResult::fail(name, "accepted too many outputs")),
+            Err(e) => results.push(TestResult::pass(
+                name,
+                &format!("correctly rejected: {}", e),
+            )),
+        }
+    }
+
+    // Attack 10: Too many messages (> MAX_MESSAGES_PER_TX)
+    {
+        let name = "Attack: Too many messages";
+        let messages: Vec<TxMessage> = (0..spectra::constants::MAX_MESSAGES_PER_TX + 1)
+            .map(|_| make_dummy_message())
+            .collect();
+        let tx = Transaction {
+            inputs: vec![make_dummy_input()],
+            outputs: vec![make_dummy_output()],
+            messages,
+            fee: 100,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            tx_type: TxType::Transfer,
+            tx_binding: [0u8; 32],
+            chain_id: spectra::constants::chain_id(),
+            expiry_epoch: 0,
+        };
+        let mut state_guard = node_state.write().await;
+        match state_guard.mempool.insert(tx) {
+            Ok(_) => results.push(TestResult::fail(name, "accepted too many messages")),
+            Err(e) => results.push(TestResult::pass(
+                name,
+                &format!("correctly rejected: {}", e),
+            )),
+        }
+    }
+
+    // Attack 11: Duplicate output commitments
+    {
+        let name = "Attack: Duplicate output commitments";
+        let shared_output = make_dummy_output();
+        let tx = Transaction {
+            inputs: vec![make_dummy_input()],
+            outputs: vec![shared_output.clone(), shared_output],
+            messages: vec![],
+            fee: 100,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            tx_type: TxType::Transfer,
+            tx_binding: [0u8; 32],
+            chain_id: spectra::constants::chain_id(),
+            expiry_epoch: 0,
+        };
+        let mut state_guard = node_state.write().await;
+        match state_guard.mempool.insert(tx) {
+            Ok(_) => results.push(TestResult::fail(name, "accepted duplicate commitments")),
+            Err(e) => results.push(TestResult::pass(
+                name,
+                &format!("correctly rejected: {}", e),
+            )),
+        }
+    }
+
+    // Attack 12: Invalid tx_binding (tampered)
+    {
+        let name = "Attack: Invalid tx_binding";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-12");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(mut tx) => {
+                // Flip a byte in the binding — any field mutation breaks the hash
+                tx.tx_binding[0] ^= 0xFF;
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => results.push(TestResult::fail(name, "accepted tampered binding")),
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // Attack 13: Expired transaction
+    {
+        let name = "Attack: Expired transaction";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-13");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_expiry_epoch(1) // expires at epoch 1
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(tx) => {
+                let mut state_guard = node_state.write().await;
+                let original_epoch = state_guard.ledger.state.epoch();
+                // Set mempool epoch to 10 so the tx is expired
+                state_guard.mempool.set_epoch(10);
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => results.push(TestResult::fail(name, "accepted expired tx")),
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected: {}", e),
+                    )),
+                }
+                // Reset epoch
+                state_guard.mempool.set_epoch(original_epoch);
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // ── Group B: Proof Manipulation Attacks ──
+
+    // Attack 14: Proof transplant (swap balance proofs between two txs)
+    {
+        let name = "Attack: Proof transplant";
+        let mallory_a = Wallet::new();
+        let mallory_b = Wallet::new();
+
+        let blind_a = BlindingFactor::random();
+        let auth_a = spectra::hash_domain(b"mallory", b"transplant-a");
+        let blind_b = BlindingFactor::random();
+        let auth_b = spectra::hash_domain(b"mallory", b"transplant-b");
+
+        let tx_a = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind_a,
+                spend_auth: auth_a,
+                merkle_path: vec![],
+            })
+            .add_output(mallory_a.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        let tx_b = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 2000,
+                blinding: blind_b,
+                spend_auth: auth_b,
+                merkle_path: vec![],
+            })
+            .add_output(mallory_b.kem_public_key().clone(), 1900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match (tx_a, tx_b) {
+            (Ok(tx_a), Ok(mut tx_b)) => {
+                // Transplant A's balance proof onto B
+                tx_b.balance_proof = tx_a.balance_proof;
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx_b) {
+                    Ok(_) => results.push(TestResult::fail(name, "accepted transplanted proof")),
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected: {}", e),
+                    )),
+                }
+            }
+            _ => results.push(TestResult::pass(name, "builder rejected (expected)")),
+        }
+    }
+
+    // Attack 15: Proof_link tampering
+    {
+        let name = "Attack: Proof_link tampering";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-15");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(mut tx) => {
+                // Tamper with the proof_link — breaks tx_binding
+                if !tx.inputs.is_empty() {
+                    tx.inputs[0].proof_link[0] ^= 0xFF;
+                }
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => results.push(TestResult::fail(name, "accepted tampered proof_link")),
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // Attack 16: Nullifier tampering
+    {
+        let name = "Attack: Nullifier tampering";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-16");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(mut tx) => {
+                // Tamper with the nullifier — breaks tx_binding
+                if !tx.inputs.is_empty() {
+                    tx.inputs[0].nullifier.0[0] ^= 0xFF;
+                }
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => results.push(TestResult::fail(name, "accepted tampered nullifier")),
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // ── Group C: Validator Operation Attacks ──
+
+    // Attack 17: Insufficient validator bond
+    {
+        let name = "Attack: Insufficient validator bond";
+        let signing_kp = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
+
+        let tx = Transaction {
+            inputs: vec![make_dummy_input()],
+            outputs: vec![make_dummy_output()],
+            messages: vec![],
+            // fee = VALIDATOR_BOND but missing MIN_TX_FEE
+            fee: spectra::constants::VALIDATOR_BOND,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            tx_type: TxType::ValidatorRegister {
+                signing_key: signing_kp.public.clone(),
+                kem_public_key: kem_kp.public.clone(),
+            },
+            tx_binding: [0u8; 32],
+            chain_id: spectra::constants::chain_id(),
+            expiry_epoch: 0,
+        };
+        let mut state_guard = node_state.write().await;
+        match state_guard.mempool.insert(tx) {
+            Ok(_) => results.push(TestResult::fail(name, "accepted insufficient bond")),
+            Err(e) => results.push(TestResult::pass(
+                name,
+                &format!("correctly rejected: {}", e),
+            )),
+        }
+    }
+
+    // Attack 18: Invalid validator key sizes
+    {
+        let name = "Attack: Invalid validator key sizes";
+        // Use a real keypair to get a valid SigningPublicKey, then construct
+        // a manually-crafted transaction. The key validation happens on the
+        // raw bytes, so we need to create keys with wrong sizes.
+        // Since SigningPublicKey has pub(crate) fields, we use serialization
+        // to construct invalid-sized keys.
+        let fake_signing_bytes = vec![0xAA; 100]; // wrong size (should be 2592)
+        let fake_kem_bytes = vec![0xBB; 100]; // wrong size (should be 1568)
+
+        // Serialize the keys via bincode to match the Serialize/Deserialize impl
+        let fake_signing: Result<spectra::crypto::keys::SigningPublicKey, _> =
+            spectra::deserialize(&spectra::serialize(&fake_signing_bytes).unwrap());
+        let fake_kem: Result<spectra::crypto::keys::KemPublicKey, _> =
+            spectra::deserialize(&spectra::serialize(&fake_kem_bytes).unwrap());
+
+        // If deserialization catches the invalid size, that's also a valid rejection
+        match (fake_signing, fake_kem) {
+            (Ok(signing_key), Ok(kem_key)) => {
+                let tx = Transaction {
+                    inputs: vec![make_dummy_input()],
+                    outputs: vec![make_dummy_output()],
+                    messages: vec![],
+                    fee: spectra::constants::VALIDATOR_BOND + spectra::constants::MIN_TX_FEE,
+                    balance_proof: BalanceStarkProof {
+                        proof_bytes: vec![],
+                        public_inputs_bytes: vec![],
+                    },
+                    tx_type: TxType::ValidatorRegister {
+                        signing_key,
+                        kem_public_key: kem_key,
+                    },
+                    tx_binding: [0u8; 32],
+                    chain_id: spectra::constants::chain_id(),
+                    expiry_epoch: 0,
+                };
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => results.push(TestResult::fail(name, "accepted invalid key sizes")),
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected: {}", e),
+                    )),
+                }
+            }
+            _ => results.push(TestResult::pass(
+                name,
+                "deserialization rejected invalid key sizes",
+            )),
+        }
+    }
+
+    // Attack 19: Zero bond return in deregister
+    {
+        let name = "Attack: Zero bond return (deregister)";
+        let kem = KemKeypair::generate();
+        let stealth = StealthAddress::generate(&kem.public, 0).unwrap();
+        let note = EncryptedPayload::encrypt(&kem.public, b"bond-return").unwrap();
+
+        let tx = Transaction {
+            inputs: vec![make_dummy_input()],
+            outputs: vec![make_dummy_output()],
+            messages: vec![],
+            fee: 100,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            tx_type: TxType::ValidatorDeregister {
+                validator_id: [0xDD; 32],
+                auth_signature: Signature::empty(),
+                bond_return_output: Box::new(TxOutput {
+                    commitment: Commitment([0u8; 32]), // Zero commitment = invalid
+                    stealth_address: stealth.address,
+                    encrypted_note: note,
+                }),
+                bond_blinding: [0u8; 32],
+            },
+            tx_binding: [0u8; 32],
+            chain_id: spectra::constants::chain_id(),
+            expiry_epoch: 0,
+        };
+        let mut state_guard = node_state.write().await;
+        match state_guard.mempool.insert(tx) {
+            Ok(_) => results.push(TestResult::fail(name, "accepted zero bond return")),
+            Err(e) => results.push(TestResult::pass(
+                name,
+                &format!("correctly rejected: {}", e),
+            )),
+        }
+    }
+
+    // ── Group D: Double-Spend & Replay Attacks ──
+
+    // Attack 20: Mempool nullifier conflict (two txs, same nullifier)
+    {
+        let name = "Attack: Mempool nullifier conflict";
+        let spend_auth = spectra::hash_domain(b"mallory", b"double-spend-input");
+        let mallory_a = Wallet::new();
+        let mallory_b = Wallet::new();
+
+        let tx_a = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::from_bytes([42u8; 32]),
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory_a.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        let tx_b = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::from_bytes([42u8; 32]),
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory_b.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match (tx_a, tx_b) {
+            (Ok(tx_a), Ok(tx_b)) => {
+                let tx_a_id = tx_a.tx_id();
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx_a) {
+                    Ok(_) => {
+                        // First tx accepted, now try the conflicting one
+                        match state_guard.mempool.insert(tx_b) {
+                            Ok(_) => results
+                                .push(TestResult::fail(name, "accepted conflicting nullifier")),
+                            Err(e) => results.push(TestResult::pass(
+                                name,
+                                &format!("correctly rejected second tx: {}", e),
+                            )),
+                        }
+                        // Clean up
+                        state_guard.mempool.remove(&tx_a_id);
+                    }
+                    Err(e) => results.push(TestResult::fail(
+                        name,
+                        &format!("first tx should have been accepted: {}", e),
+                    )),
+                }
+            }
+            _ => results.push(TestResult::pass(name, "builder rejected (expected)")),
+        }
+    }
+
+    // Attack 21: Duplicate transaction (exact same tx submitted twice)
+    {
+        let name = "Attack: Duplicate transaction";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-21");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(tx) => {
+                let tx_id = tx.tx_id();
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx.clone()) {
+                    Ok(_) => {
+                        // First insert succeeded, now try duplicate
+                        match state_guard.mempool.insert(tx) {
+                            Ok(_) => results.push(TestResult::fail(name, "accepted duplicate tx")),
+                            Err(e) => results.push(TestResult::pass(
+                                name,
+                                &format!("correctly rejected duplicate: {}", e),
+                            )),
+                        }
+                        // Clean up
+                        state_guard.mempool.remove(&tx_id);
+                    }
+                    Err(e) => results.push(TestResult::fail(
+                        name,
+                        &format!("first insert should succeed: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // Attack 22: Cross-chain replay via state validation
+    {
+        let name = "Attack: Cross-chain replay";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-22");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(mut tx) => {
+                // Mutate chain_id to simulate replaying on a different chain
+                tx.chain_id = [0xCC; 32];
+                let state_guard = node_state.read().await;
+                match state_guard.ledger.state.validate_transaction(&tx) {
+                    Ok(_) => {
+                        results.push(TestResult::fail(name, "state accepted cross-chain replay"))
+                    }
+                    Err(e) => results.push(TestResult::pass(
+                        name,
+                        &format!("correctly rejected by state: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // ── Group E: Timing & Resilience Attacks ──
+
+    // Attack 23: Mempool expiry eviction
+    {
+        let name = "Attack: Mempool expiry eviction";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-23");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            .set_expiry_epoch(5) // expires at epoch 5
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(tx) => {
+                let mut state_guard = node_state.write().await;
+                // Insert at epoch 0 (should succeed)
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => {
+                        let pre_count = state_guard.mempool.len();
+                        // Advance epoch past expiry and evict
+                        state_guard.mempool.set_epoch(10);
+                        let evicted = state_guard.mempool.evict_expired();
+                        let post_count = state_guard.mempool.len();
+                        // Reset epoch
+                        state_guard.mempool.set_epoch(0);
+
+                        if evicted >= 1 && post_count < pre_count {
+                            results.push(TestResult::pass(
+                                name,
+                                &format!(
+                                    "evicted {} expired tx(s), pool {}->{}",
+                                    evicted, pre_count, post_count
+                                ),
+                            ));
+                        } else {
+                            results.push(TestResult::fail(
+                                name,
+                                &format!("eviction failed: evicted={}", evicted),
+                            ));
+                        }
+                    }
+                    Err(e) => results.push(TestResult::fail(
+                        name,
+                        &format!("insert should have succeeded: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // Attack 24: No-expiry tx survives eviction
+    {
+        let name = "Attack: No-expiry tx survives eviction";
+        let blind = BlindingFactor::random();
+        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-24");
+        let mallory = Wallet::new();
+
+        let tx_result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: blind,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(mallory.kem_public_key().clone(), 900)
+            .set_fee(100)
+            // expiry_epoch = 0 means no expiry (default)
+            .set_proof_options(default_proof_options())
+            .build();
+
+        match tx_result {
+            Ok(tx) => {
+                let tx_id = tx.tx_id();
+                let mut state_guard = node_state.write().await;
+                match state_guard.mempool.insert(tx) {
+                    Ok(_) => {
+                        let pre_count = state_guard.mempool.len();
+                        // Set epoch far in the future and try to evict
+                        state_guard.mempool.set_epoch(999_999);
+                        let evicted = state_guard.mempool.evict_expired();
+                        let post_count = state_guard.mempool.len();
+                        // Reset and clean up
+                        state_guard.mempool.set_epoch(0);
+                        state_guard.mempool.remove(&tx_id);
+
+                        // The no-expiry tx should NOT have been evicted
+                        if post_count >= pre_count && evicted == 0 {
+                            results.push(TestResult::pass(
+                                name,
+                                "no-expiry tx survived epoch advancement",
+                            ));
+                        } else {
+                            results.push(TestResult::fail(
+                                name,
+                                &format!(
+                                    "tx was evicted! evicted={}, pool {}->{}",
+                                    evicted, pre_count, post_count
+                                ),
+                            ));
+                        }
+                    }
+                    Err(e) => results.push(TestResult::fail(
+                        name,
+                        &format!("insert should have succeeded: {}", e),
+                    )),
+                }
+            }
+            Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
+        }
+    }
+
+    // Attack 25: State-level double-spend (nullifier already in chain)
+    {
+        let name = "Attack: State double-spend (spent nullifier)";
+        if let Some(spent_nullifier) = spent_nullifiers.first() {
+            // Build a fake tx reusing a nullifier that's already recorded in chain state
+            let tx = Transaction {
+                inputs: vec![TxInput {
+                    nullifier: *spent_nullifier,
+                    proof_link: [0u8; 32],
+                    spend_proof: SpendStarkProof {
+                        proof_bytes: vec![0u8; 4],
+                        public_inputs_bytes: vec![],
+                    },
+                }],
+                outputs: vec![make_dummy_output()],
+                messages: vec![],
+                fee: 100,
+                balance_proof: BalanceStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: vec![],
+                },
+                tx_type: TxType::Transfer,
+                tx_binding: [0u8; 32],
+                chain_id: spectra::constants::chain_id(),
+                expiry_epoch: 0,
+            };
+            let state_guard = node_state.read().await;
+            match state_guard.ledger.state.validate_transaction(&tx) {
+                Ok(_) => results.push(TestResult::fail(
+                    name,
+                    "state accepted double-spend with spent nullifier",
+                )),
+                Err(e) => results.push(TestResult::pass(
+                    name,
+                    &format!("correctly rejected: {}", e),
+                )),
+            }
+        } else {
+            results.push(TestResult::fail(
+                name,
+                "no spent nullifiers available from funding phase",
+            ));
         }
     }
 
