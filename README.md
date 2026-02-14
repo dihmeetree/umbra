@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/umbra-header.jpg" alt="Umbra" width="600" />
+</p>
+
 # Umbra
 
 A post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust.
