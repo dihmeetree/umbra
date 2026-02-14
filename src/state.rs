@@ -406,6 +406,13 @@ impl ChainState {
                 if self.slashed_validators.contains(&vid) {
                     return Err(StateError::ValidatorSlashed);
                 }
+                // Dynamic bond check: the required bond scales with active validator count
+                let required_bond =
+                    crate::constants::required_validator_bond(self.total_validators());
+                let min_fee = required_bond.saturating_add(crate::constants::MIN_TX_FEE);
+                if tx.fee < min_fee {
+                    return Err(StateError::InsufficientBond);
+                }
             }
             TxType::ValidatorDeregister {
                 validator_id,
@@ -429,7 +436,7 @@ impl ChainState {
                 if !validator.public_key.verify(&sign_data, auth_signature) {
                     return Err(StateError::InvalidDeregisterAuth);
                 }
-                // C4: Verify that the bond return commitment opens to exactly VALIDATOR_BOND
+                // C4: Verify that the bond return commitment opens to the escrowed bond amount
                 let bond = self
                     .validator_bonds
                     .get(validator_id)
@@ -483,8 +490,9 @@ impl ChainState {
             } => {
                 let vid = signing_key.fingerprint();
 
-                // Escrow bond, remainder goes to epoch fees
-                let bond = crate::constants::VALIDATOR_BOND;
+                // Escrow bond (scaled by current active validator count), remainder
+                // goes to epoch fees. Compute BEFORE updating active status.
+                let bond = crate::constants::required_validator_bond(self.total_validators());
                 let actual_fee = tx.fee.saturating_sub(bond);
                 self.epoch_fees = self.epoch_fees.saturating_add(actual_fee);
 
@@ -606,7 +614,7 @@ impl ChainState {
     pub fn register_genesis_validator(&mut self, validator: Validator) {
         let id = validator.id;
         self.validator_bonds
-            .insert(id, crate::constants::VALIDATOR_BOND);
+            .insert(id, crate::constants::VALIDATOR_BASE_BOND);
         self.validators.insert(id, validator);
     }
 
@@ -1501,7 +1509,7 @@ mod tests {
         assert!(restored.is_active_validator(&vid));
         assert_eq!(
             restored.validator_bond(&vid),
-            Some(crate::constants::VALIDATOR_BOND)
+            Some(crate::constants::VALIDATOR_BASE_BOND)
         );
         assert_eq!(restored.epoch(), 1);
         assert_eq!(restored.state_root(), original_root);
@@ -1550,7 +1558,7 @@ mod tests {
         assert_eq!(state.total_validators(), 1);
         assert_eq!(
             state.validator_bond(&vid),
-            Some(crate::constants::VALIDATOR_BOND)
+            Some(crate::constants::VALIDATOR_BASE_BOND)
         );
     }
 
@@ -1568,7 +1576,7 @@ mod tests {
 
         assert!(state.is_slashed(&vid));
         assert!(!state.is_active_validator(&vid));
-        assert_eq!(state.epoch_fees(), crate::constants::VALIDATOR_BOND);
+        assert_eq!(state.epoch_fees(), crate::constants::VALIDATOR_BASE_BOND);
         assert_eq!(state.validator_bond(&vid), None); // Bond forfeited
     }
 
@@ -1589,7 +1597,7 @@ mod tests {
 
         let (fees, _new_seed) = state.advance_epoch();
 
-        assert_eq!(fees, crate::constants::VALIDATOR_BOND);
+        assert_eq!(fees, crate::constants::VALIDATOR_BASE_BOND);
         assert_eq!(state.epoch(), 1);
         assert_eq!(state.epoch_fees(), 0);
         assert_ne!(state.epoch_seed().seed, seed_before.seed);
@@ -1900,7 +1908,7 @@ mod tests {
         // The validate_transaction chain_id check passes, then validate_structure
         // runs, then the ValidatorAlreadyRegistered check happens.
         // We need a transaction that passes validate_structure first.
-        let bond = crate::constants::VALIDATOR_BOND;
+        let bond = crate::constants::VALIDATOR_BASE_BOND;
         let min_fee = bond + crate::constants::MIN_TX_FEE;
         let total_input = min_fee + 100; // enough for output + fee
 
@@ -2214,7 +2222,7 @@ mod tests {
         assert!(!state.is_active_validator(&vid));
 
         // Build a ValidatorRegister transaction for the same key
-        let bond = crate::constants::VALIDATOR_BOND;
+        let bond = crate::constants::VALIDATOR_BASE_BOND;
         let min_fee = bond + crate::constants::MIN_TX_FEE;
         let total_input = min_fee + 100;
 
@@ -2264,7 +2272,7 @@ mod tests {
         // Validator is still active — re-registration should be rejected
         assert!(state.is_active_validator(&val_kp.public.fingerprint()));
 
-        let bond = crate::constants::VALIDATOR_BOND;
+        let bond = crate::constants::VALIDATOR_BASE_BOND;
         let min_fee = bond + crate::constants::MIN_TX_FEE;
         let total_input = min_fee + 100;
 
@@ -2315,7 +2323,7 @@ mod tests {
         state.slash_validator(&vid).unwrap();
         assert!(state.is_slashed(&vid));
 
-        let bond = crate::constants::VALIDATOR_BOND;
+        let bond = crate::constants::VALIDATOR_BASE_BOND;
         let min_fee = bond + crate::constants::MIN_TX_FEE;
         let total_input = min_fee + 100;
 
@@ -2462,5 +2470,86 @@ mod tests {
         assert!(restored.is_spent(&n1));
         assert!(restored.is_spent(&n2));
         assert!(restored.is_active_validator(&validator.id));
+    }
+
+    #[test]
+    fn dynamic_bond_rejects_insufficient_fee() {
+        // Register 10 genesis validators so the required bond increases.
+        let mut state = ChainState::new();
+        for _ in 0..10 {
+            let kp = SigningKeypair::generate();
+            let kem = KemKeypair::generate();
+            let v = Validator::with_kem(kp.public.clone(), kem.public.clone());
+            state.register_genesis_validator(v);
+        }
+        assert_eq!(state.total_validators(), 10);
+
+        // At 10 active validators: required_bond = 1M + 1M * 10/100 = 1.1M
+        let required = crate::constants::required_validator_bond(10);
+        assert_eq!(required, 1_100_000);
+
+        // Build a tx with only the base bond (1M + 1), which passes structural
+        // validation but should fail the state-level dynamic bond check.
+        let base_fee = crate::constants::VALIDATOR_BASE_BOND + crate::constants::MIN_TX_FEE;
+        let total_input = base_fee + 100;
+
+        let blinding = BlindingFactor::from_bytes([77u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[77u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let new_kp = SigningKeypair::generate();
+        let new_kem = KemKeypair::generate();
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(base_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: new_kp.public.clone(),
+                kem_public_key: new_kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::InsufficientBond)),
+            "expected InsufficientBond, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn dynamic_bond_stored_per_validator() {
+        // Genesis validators get base bond
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+        state.register_genesis_validator(v);
+
+        assert_eq!(
+            state.validator_bond(&vid),
+            Some(crate::constants::VALIDATOR_BASE_BOND)
+        );
+
+        // Verify the bond formula gives higher amounts with more validators
+        let bond_at_0 = crate::constants::required_validator_bond(0);
+        let bond_at_1 = crate::constants::required_validator_bond(1);
+        let bond_at_100 = crate::constants::required_validator_bond(100);
+
+        assert_eq!(bond_at_0, crate::constants::VALIDATOR_BASE_BOND);
+        assert!(bond_at_1 > bond_at_0);
+        assert!(bond_at_100 > bond_at_1);
+        assert_eq!(bond_at_100, 2_000_000);
     }
 }

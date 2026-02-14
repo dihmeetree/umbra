@@ -46,7 +46,7 @@ No trusted setup is required. All proofs are transparent. The P2P transport laye
 
 A novel consensus mechanism that is **neither Proof of Work nor Proof of Stake**:
 
-1. **Equal participation** — validators post an identical constant bond. Consensus power is *not* proportional to wealth. The bond exists solely for Sybil resistance.
+1. **Superlinear Sybil resistance** — validator bonds scale with network size (`required_bond = BASE_BOND * (1 + n / SCALING_FACTOR)`), making mass registration superlinearly expensive while keeping initial entry affordable. Consensus power is *not* proportional to wealth.
 2. **VRF committee selection** — each epoch, a committee of 21 validators is selected uniformly at random via a Verifiable Random Function. Selection is unbiased and unpredictable.
 3. **DAG structure** — the ledger is a Directed Acyclic Graph, not a linear chain. Multiple vertices can be produced in parallel, enabling high throughput.
 4. **Instant finality** — the committee runs asynchronous BFT. Once 2/3+1 members certify a vertex, it is irreversibly final. No probabilistic finality, no confirmation delays.
@@ -133,7 +133,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **500 tests**.
+**~28,500 lines of Rust** across 43 source files with **504 tests**.
 
 ## Building
 
@@ -608,7 +608,7 @@ Transaction {
 - **tx_binding** — the hash of all transaction content, included in proof challenges. Any modification to inputs, outputs, fee, chain_id, or expiry_epoch invalidates the balance proof.
 - **Messages** are Kyber-encrypted payloads (with 24-byte nonce + BLAKE3 MAC) that only the recipient can decrypt.
 - **Transaction types** — in addition to regular transfers, transactions can carry validator registration or deregistration operations:
-  - `ValidatorRegister` — includes the validator's Dilithium5 signing key and Kyber1024 KEM public key (required for receiving coinbase rewards). The fee must be at least `VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state, and only the remainder goes to epoch fees. No zk-STARK modifications are needed — the bond is carried through the existing fee field.
+  - `ValidatorRegister` — includes the validator's Dilithium5 signing key and Kyber1024 KEM public key (required for receiving coinbase rewards). The fee must be at least `required_validator_bond(active_count) + MIN_TX_FEE`; the bond is escrowed in chain state, and only the remainder goes to epoch fees. The bond scales superlinearly with the number of active validators for Sybil resistance. No zk-STARK modifications are needed — the bond is carried through the existing fee field.
   - `ValidatorDeregister` — includes the validator ID, an auth signature proving ownership, and a `TxOutput` that receives the returned bond (added to the commitment tree). The bond return is secured by the STARK system: if the validator creates a wrong commitment, it will fail verification when they try to spend.
 
 ## Zero-Knowledge Proof System
@@ -663,7 +663,8 @@ Proves in zero knowledge:
 | `MAX_MESSAGE_SIZE` | 64 KiB | Max encrypted message per transaction |
 | `MAX_ENCRYPT_PLAINTEXT` | 1 MiB | Max plaintext for Kyber encryption |
 | `MAX_NETWORK_MESSAGE_BYTES` | 16 MiB | Max serialized network message |
-| `VALIDATOR_BOND` | 1,000,000 | Constant bond for validator registration |
+| `VALIDATOR_BASE_BOND` | 1,000,000 | Base bond for validator registration (scales with network size) |
+| `BOND_SCALING_FACTOR` | 100 | Scaling factor for superlinear bonding curve |
 | `MERKLE_DEPTH` | 20 | Canonical commitment tree depth (~1M outputs) |
 | `RANGE_BITS` | 59 | Bit width for value range proofs |
 | `MAX_TX_IO` | 16 | Max inputs or outputs per transaction (range-proof safe) |
@@ -799,7 +800,7 @@ All transaction validity is verified via zk-STARKs:
 - **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` and automatic expiry after `PENDING_EXPIRY_EPOCHS` to prevent double-spend of outputs in unconfirmed transactions and recover stuck funds
 - **VRF commitment verification** — `VrfOutput::verify()` requires a pre-registered proof commitment, enforcing the commit-reveal anti-grinding scheme; `verify_locally()` is available for self-checks only
 - **VRF-proven vertices and votes** — every non-genesis vertex and BFT vote must include a VRF proof demonstrating the proposer/voter was selected for the epoch's committee; vertices and votes without valid VRF proofs are rejected
-- **Validator bond escrow** — registration requires `fee >= VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state and only the remainder goes to epoch fees. Prevents unbonded validators from participating
+- **Superlinear validator bond** — registration requires `fee >= required_validator_bond(active_count) + MIN_TX_FEE`, where the bond scales as `BASE_BOND * (1 + n / SCALING_FACTOR)`. Makes Sybil attacks superlinearly expensive (e.g., adding 500 validators to a 100-validator network costs ~2.25B vs 150M for the first 100). Each validator's actual bond is escrowed and returned on deregistration
 - **Slashing** — equivocation evidence (voting for conflicting vertices in the same round) triggers automatic bond forfeiture to epoch fees and permanent validator exclusion
 - **Deregistration auth** — validator deregistration requires a signature over `"umbra.validator.deregister" || chain_id || validator_id || tx_content_hash`, preventing unauthorized bond withdrawal
 - **Two-phase vertex finalization** — vertices are inserted into the DAG (unfinalized) first, then finalized only after BFT quorum certification, preventing premature state application

@@ -349,7 +349,7 @@ impl Node {
                         config.keypair.public.clone(),
                         config.kem_keypair.public.clone(),
                     ),
-                    crate::constants::VALIDATOR_BOND,
+                    crate::constants::VALIDATOR_BASE_BOND,
                     false,
                 )
                 .unwrap_or_else(|e| tracing::warn!(error = %e, "Failed to persist validator"));

@@ -26,8 +26,13 @@ pub mod constants {
     pub const COMMITTEE_SIZE: usize = 21;
     /// Minimum committee size for BFT safety (need at least 4 for f=1)
     pub const MIN_COMMITTEE_SIZE: usize = 4;
-    /// Minimum bond required to become a validator (in base units)
-    pub const VALIDATOR_BOND: u64 = 1_000_000;
+    /// Base bond for validator registration (in base units).
+    /// The actual required bond scales with the number of active validators
+    /// via [`required_validator_bond`].
+    pub const VALIDATOR_BASE_BOND: u64 = 1_000_000;
+    /// Scaling factor for the superlinear validator bonding curve.
+    /// required_bond(n) = BASE_BOND * (1 + n / SCALING_FACTOR)
+    pub const BOND_SCALING_FACTOR: u64 = 100;
     /// Maximum transactions per DAG vertex
     pub const MAX_TXS_PER_VERTEX: usize = 10_000;
     /// Target vertex interval in milliseconds
@@ -214,6 +219,18 @@ pub mod constants {
         INITIAL_BLOCK_REWARD >> halvings as u32
     }
 
+    /// Compute the required validator bond given the current active validator count.
+    ///
+    /// Formula: `BASE_BOND * (1 + n / SCALING_FACTOR)`
+    ///
+    /// This creates a superlinear cost curve for mass validator registration,
+    /// making Sybil attacks expensive while keeping initial entry costs low.
+    pub fn required_validator_bond(active_count: usize) -> u64 {
+        let n = active_count as u64;
+        VALIDATOR_BASE_BOND
+            .saturating_add(VALIDATOR_BASE_BOND.saturating_mul(n) / BOND_SCALING_FACTOR)
+    }
+
     /// Compute the chain ID for mainnet.
     pub fn chain_id() -> crate::Hash {
         crate::hash_domain(b"umbra.chain_id", b"umbra-mainnet-v1")
@@ -363,5 +380,37 @@ mod tests {
             !debug_str.contains("42"),
             "BlindingFactor debug output should not contain secret bytes"
         );
+    }
+
+    #[test]
+    fn required_bond_scales_correctly() {
+        use constants::*;
+
+        // First validator pays base bond
+        assert_eq!(required_validator_bond(0), VALIDATOR_BASE_BOND);
+
+        // 10 validators: 1M + 1M * 10/100 = 1.1M
+        assert_eq!(required_validator_bond(10), 1_100_000);
+
+        // 100 validators: 1M + 1M * 100/100 = 2M
+        assert_eq!(required_validator_bond(100), 2_000_000);
+
+        // 500 validators: 1M + 1M * 500/100 = 6M
+        assert_eq!(required_validator_bond(500), 6_000_000);
+
+        // Verify monotonic increase
+        for n in 0..1000 {
+            assert!(required_validator_bond(n) <= required_validator_bond(n + 1));
+        }
+    }
+
+    #[test]
+    fn required_bond_no_overflow_at_extreme_count() {
+        // At extreme counts, saturating arithmetic prevents wrapping
+        let bond = constants::required_validator_bond(usize::MAX);
+        // Should be a very large value, not wrapped to something small
+        assert!(bond > constants::VALIDATOR_BASE_BOND);
+        // u64::MAX / 100 + BASE_BOND
+        assert!(bond > u64::MAX / 200);
     }
 }

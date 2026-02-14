@@ -1310,8 +1310,8 @@ async fn run_chaos_scenarios(
             inputs: vec![make_dummy_input()],
             outputs: vec![make_dummy_output()],
             messages: vec![],
-            // fee = VALIDATOR_BOND but missing MIN_TX_FEE
-            fee: umbra::constants::VALIDATOR_BOND,
+            // fee = VALIDATOR_BASE_BOND but missing MIN_TX_FEE
+            fee: umbra::constants::VALIDATOR_BASE_BOND,
             balance_proof: BalanceStarkProof {
                 proof_bytes: vec![],
                 public_inputs_bytes: vec![],
@@ -1358,7 +1358,7 @@ async fn run_chaos_scenarios(
                     inputs: vec![make_dummy_input()],
                     outputs: vec![make_dummy_output()],
                     messages: vec![],
-                    fee: umbra::constants::VALIDATOR_BOND + umbra::constants::MIN_TX_FEE,
+                    fee: umbra::constants::VALIDATOR_BASE_BOND + umbra::constants::MIN_TX_FEE,
                     balance_proof: BalanceStarkProof {
                         proof_bytes: vec![],
                         public_inputs_bytes: vec![],

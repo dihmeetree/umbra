@@ -80,7 +80,7 @@ pub enum TxType {
     #[default]
     Transfer,
     /// Register a new validator. The transaction fee must be at least
-    /// `VALIDATOR_BOND + MIN_TX_FEE`; the bond portion is escrowed.
+    /// `required_validator_bond(n) + MIN_TX_FEE`; the bond portion is escrowed.
     ValidatorRegister {
         /// The validator's Dilithium5 signing public key.
         signing_key: SigningPublicKey,
@@ -96,7 +96,7 @@ pub enum TxType {
         /// Output that receives the returned bond (added to commitment tree).
         bond_return_output: Box<TxOutput>,
         /// Blinding factor for the bond return commitment, so the chain can verify
-        /// the commitment opens to exactly VALIDATOR_BOND.
+        /// the commitment opens to exactly the escrowed bond amount.
         bond_blinding: [u8; 32],
     },
 }
@@ -220,9 +220,11 @@ impl Transaction {
                 signing_key,
                 kem_public_key,
             } => {
-                // Bond must be included in the fee
-                let min_fee =
-                    crate::constants::VALIDATOR_BOND.saturating_add(crate::constants::MIN_TX_FEE);
+                // Early check: fee must at least cover the base bond + MIN_TX_FEE.
+                // The actual required bond (which scales with active validator count)
+                // is checked in state validation (validate_transaction in state.rs).
+                let min_fee = crate::constants::VALIDATOR_BASE_BOND
+                    .saturating_add(crate::constants::MIN_TX_FEE);
                 if self.fee < min_fee {
                     return Err(TxValidationError::InsufficientBond);
                 }
@@ -745,8 +747,8 @@ mod tests {
     #[test]
     fn validate_rejects_register_insufficient_bond() {
         // Build a valid TX, then change its type to ValidatorRegister.
-        // The fee (100) is far below VALIDATOR_BOND + MIN_TX_FEE (1_000_001).
-        // The InsufficientBond check (line 209) runs before the binding check (line 245),
+        // The fee (100) is far below VALIDATOR_BASE_BOND + MIN_TX_FEE (1_000_001).
+        // The InsufficientBond check runs before the binding check,
         // so it will trigger first.
         let mut tx = make_test_tx();
         let kp = FullKeypair::generate();
@@ -754,8 +756,8 @@ mod tests {
             signing_key: kp.signing.public.clone(),
             kem_public_key: kp.kem.public.clone(),
         };
-        // tx.fee is 100, which is below VALIDATOR_BOND (1_000_000) + MIN_TX_FEE (1)
-        assert!(tx.fee < crate::constants::VALIDATOR_BOND + crate::constants::MIN_TX_FEE);
+        // tx.fee is 100, which is below VALIDATOR_BASE_BOND (1_000_000) + MIN_TX_FEE (1)
+        assert!(tx.fee < crate::constants::VALIDATOR_BASE_BOND + crate::constants::MIN_TX_FEE);
         assert!(matches!(
             tx.validate_structure(0),
             Err(TxValidationError::InsufficientBond)
@@ -768,7 +770,7 @@ mod tests {
         // A signing key of 100 bytes is not a valid Dilithium5 public key (2592 bytes).
         // The InvalidValidatorKey check runs before the binding check.
         let mut tx = make_test_tx();
-        tx.fee = crate::constants::VALIDATOR_BOND + crate::constants::MIN_TX_FEE;
+        tx.fee = crate::constants::VALIDATOR_BASE_BOND + crate::constants::MIN_TX_FEE;
         let kp = FullKeypair::generate();
         tx.tx_type = TxType::ValidatorRegister {
             signing_key: SigningPublicKey(vec![0xAB; 100]), // wrong size: 100 != 2592
@@ -784,7 +786,7 @@ mod tests {
     fn validate_rejects_register_invalid_kem_key_size() {
         // A KEM key of 200 bytes is not a valid Kyber1024 public key (1568 bytes).
         let mut tx = make_test_tx();
-        tx.fee = crate::constants::VALIDATOR_BOND + crate::constants::MIN_TX_FEE;
+        tx.fee = crate::constants::VALIDATOR_BASE_BOND + crate::constants::MIN_TX_FEE;
         let kp = FullKeypair::generate();
         tx.tx_type = TxType::ValidatorRegister {
             signing_key: kp.signing.public.clone(),        // valid size
