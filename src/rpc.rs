@@ -1,4 +1,4 @@
-//! JSON HTTP RPC API for the Spectra node.
+//! JSON HTTP RPC API for the Umbra node.
 //!
 //! Provides endpoints for submitting transactions, querying state,
 //! and inspecting the mempool and peer list.
@@ -440,24 +440,24 @@ async fn get_metrics(
     let epoch = node.ledger.state.epoch();
 
     let body = format!(
-        "# HELP spectra_uptime_seconds Node uptime in seconds\n\
-         # TYPE spectra_uptime_seconds gauge\n\
-         spectra_uptime_seconds {uptime}\n\
-         # HELP spectra_peer_count Number of connected peers\n\
-         # TYPE spectra_peer_count gauge\n\
-         spectra_peer_count {peer_count}\n\
-         # HELP spectra_epoch Current epoch number\n\
-         # TYPE spectra_epoch gauge\n\
-         spectra_epoch {epoch}\n\
-         # HELP spectra_finalized_vertices Total finalized vertices\n\
-         # TYPE spectra_finalized_vertices counter\n\
-         spectra_finalized_vertices {finalized_count}\n\
-         # HELP spectra_mempool_txs Current mempool transaction count\n\
-         # TYPE spectra_mempool_txs gauge\n\
-         spectra_mempool_txs {mempool_txs}\n\
-         # HELP spectra_mempool_bytes Current mempool size in bytes\n\
-         # TYPE spectra_mempool_bytes gauge\n\
-         spectra_mempool_bytes {mempool_bytes}\n"
+        "# HELP umbra_uptime_seconds Node uptime in seconds\n\
+         # TYPE umbra_uptime_seconds gauge\n\
+         umbra_uptime_seconds {uptime}\n\
+         # HELP umbra_peer_count Number of connected peers\n\
+         # TYPE umbra_peer_count gauge\n\
+         umbra_peer_count {peer_count}\n\
+         # HELP umbra_epoch Current epoch number\n\
+         # TYPE umbra_epoch gauge\n\
+         umbra_epoch {epoch}\n\
+         # HELP umbra_finalized_vertices Total finalized vertices\n\
+         # TYPE umbra_finalized_vertices counter\n\
+         umbra_finalized_vertices {finalized_count}\n\
+         # HELP umbra_mempool_txs Current mempool transaction count\n\
+         # TYPE umbra_mempool_txs gauge\n\
+         umbra_mempool_txs {mempool_txs}\n\
+         # HELP umbra_mempool_bytes Current mempool size in bytes\n\
+         # TYPE umbra_mempool_bytes gauge\n\
+         umbra_mempool_bytes {mempool_bytes}\n"
     );
     (
         StatusCode::OK,
@@ -806,8 +806,8 @@ mod tests {
         assert!(ct.contains("text/plain"));
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("spectra_uptime_seconds"));
-        assert!(text.contains("spectra_epoch"));
+        assert!(text.contains("umbra_uptime_seconds"));
+        assert!(text.contains("umbra_epoch"));
     }
 
     #[tokio::test]

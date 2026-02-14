@@ -1,4 +1,4 @@
-//! Wallet for managing Spectra keys, scanning for outputs, and building transactions.
+//! Wallet for managing Umbra keys, scanning for outputs, and building transactions.
 //!
 //! The wallet:
 //! - Generates and stores post-quantum key material
@@ -93,7 +93,7 @@ pub struct ReceivedMessage {
     pub content: Vec<u8>,
 }
 
-/// The Spectra wallet.
+/// The Umbra wallet.
 #[derive(Clone)]
 pub struct Wallet {
     /// Our identity keypair
@@ -647,7 +647,7 @@ impl Wallet {
         let (words, mut entropy) = generate_mnemonic();
 
         // Derive encryption key from entropy
-        let mut key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+        let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
 
         // Serialize key material
@@ -685,7 +685,7 @@ impl Wallet {
         encrypted_backup: &[u8],
     ) -> Result<Self, WalletError> {
         let mut entropy = words_to_entropy(words)?;
-        let mut key = blake3::derive_key("spectra.wallet.recovery", &entropy);
+        let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
 
         if encrypted_backup.len() < 32 {
@@ -763,7 +763,7 @@ fn xor_keystream(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
         let mut block_input = Vec::with_capacity(40);
         block_input.extend_from_slice(key);
         block_input.extend_from_slice(&block_idx.to_le_bytes());
-        let block = blake3::derive_key("spectra.recovery.stream", &block_input);
+        let block = blake3::derive_key("umbra.recovery.stream", &block_input);
         let end = std::cmp::min(offset + 32, data.len());
         for i in offset..end {
             result.push(data[i] ^ block[i - offset]);

@@ -144,18 +144,18 @@ fn derive_keys(ss: &SharedSecret, nonce: &[u8; NONCE_SIZE]) -> ([u8; 32], [u8; 3
     let mut enc_input = [0u8; 56]; // 32 + 24
     enc_input[..32].copy_from_slice(&ss.0);
     enc_input[32..].copy_from_slice(nonce);
-    let enc_key = crate::hash_domain(b"spectra.encrypt.key", &enc_input);
+    let enc_key = crate::hash_domain(b"umbra.encrypt.key", &enc_input);
 
     let mut mac_input = [0u8; 56];
     mac_input[..32].copy_from_slice(&ss.0);
     mac_input[32..].copy_from_slice(nonce);
-    let mac_key = crate::hash_domain(b"spectra.encrypt.mac", &mac_input);
+    let mac_key = crate::hash_domain(b"umbra.encrypt.mac", &mac_input);
 
     (enc_key, mac_key)
 }
 
 /// XOR-based stream cipher using BLAKE3 as the keystream generator.
-/// Keystream block i = H("spectra.keystream" || key || nonce || counter_i).
+/// Keystream block i = H("umbra.keystream" || key || nonce || counter_i).
 fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(data.len());
     let mut counter = 0u64;
@@ -166,7 +166,7 @@ fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u
         block_input.extend_from_slice(key);
         block_input.extend_from_slice(nonce);
         block_input.extend_from_slice(&counter.to_le_bytes());
-        let block = crate::hash_domain(b"spectra.keystream", &block_input);
+        let block = crate::hash_domain(b"umbra.keystream", &block_input);
 
         let remaining = data.len() - pos;
         let take = remaining.min(32);
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let kp = KemKeypair::generate();
-        let msg = b"hello spectra! this is an encrypted transaction message.";
+        let msg = b"hello umbra! this is an encrypted transaction message.";
         let encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
         let decrypted = encrypted.decrypt(&kp).unwrap();
         assert_eq!(decrypted, msg);

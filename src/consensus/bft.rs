@@ -682,7 +682,7 @@ fn vote_sign_data(
         VoteType::Reject => 0u8,
     };
     let mut data = Vec::with_capacity(93);
-    data.extend_from_slice(b"spectra.vote");
+    data.extend_from_slice(b"umbra.vote");
     data.extend_from_slice(chain_id);
     data.extend_from_slice(&epoch.to_le_bytes());
     data.extend_from_slice(&vertex_id.0);
@@ -709,7 +709,7 @@ mod tests {
     }
 
     fn test_chain_id() -> crate::Hash {
-        crate::hash_domain(b"spectra.chain_id", b"spectra-test")
+        crate::hash_domain(b"umbra.chain_id", b"umbra-test")
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! Spectra Network Simulator
+//! Umbra Network Simulator
 //!
-//! A standalone binary that spins up real Spectra nodes with P2P networking,
+//! A standalone binary that spins up real Umbra nodes with P2P networking,
 //! runs validators for DAG-BFT consensus, sends transactions between wallets,
 //! and tests attack scenarios from a malicious actor.
 //!
@@ -14,19 +14,19 @@ use colored::Colorize;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use spectra::crypto::commitment::{BlindingFactor, Commitment};
-use spectra::crypto::encryption::EncryptedPayload;
-use spectra::crypto::keys::{KemKeypair, Signature, SigningKeypair};
-use spectra::crypto::nullifier::Nullifier;
-use spectra::crypto::stark::default_proof_options;
-use spectra::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
-use spectra::crypto::stealth::StealthAddress;
-use spectra::node::{Node, NodeConfig, NodeState};
-use spectra::rpc::{serve as rpc_serve, RpcState};
-use spectra::storage::Storage;
-use spectra::transaction::builder::{InputSpec, TransactionBuilder};
-use spectra::transaction::{Transaction, TxInput, TxMessage, TxOutput, TxType};
-use spectra::wallet::Wallet;
+use umbra::crypto::commitment::{BlindingFactor, Commitment};
+use umbra::crypto::encryption::EncryptedPayload;
+use umbra::crypto::keys::{KemKeypair, Signature, SigningKeypair};
+use umbra::crypto::nullifier::Nullifier;
+use umbra::crypto::stark::default_proof_options;
+use umbra::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
+use umbra::crypto::stealth::StealthAddress;
+use umbra::node::{Node, NodeConfig, NodeState};
+use umbra::rpc::{serve as rpc_serve, RpcState};
+use umbra::storage::Storage;
+use umbra::transaction::builder::{InputSpec, TransactionBuilder};
+use umbra::transaction::{Transaction, TxInput, TxMessage, TxOutput, TxType};
+use umbra::wallet::Wallet;
 
 // ── Configuration ──
 
@@ -76,7 +76,7 @@ async fn async_main() {
         "\n{}",
         "========================================".bright_cyan()
     );
-    println!("{}", "    SPECTRA NETWORK SIMULATOR".bright_cyan().bold());
+    println!("{}", "    UMBRA NETWORK SIMULATOR".bright_cyan().bold());
     println!(
         "{}\n",
         "========================================".bright_cyan()
@@ -356,7 +356,7 @@ async fn fund_users(
         .ok_or("no genesis coinbase found")?;
 
     // Create a wallet from the genesis KEM keypair to claim the coinbase
-    let genesis_keys = spectra::crypto::keys::FullKeypair {
+    let genesis_keys = umbra::crypto::keys::FullKeypair {
         signing: SigningKeypair::generate(), // signing key doesn't matter for scanning
         kem: genesis_kem.clone(),
     };
@@ -494,7 +494,7 @@ async fn wait_for_finalization(state: &Arc<RwLock<NodeState>>, count: u64) {
 
 /// Create a dummy TxInput with a random nullifier and empty proofs.
 fn make_dummy_input() -> TxInput {
-    let null_hash = spectra::hash_domain(b"dummy", &rand::random::<[u8; 32]>());
+    let null_hash = umbra::hash_domain(b"dummy", &rand::random::<[u8; 32]>());
     TxInput {
         nullifier: Nullifier(null_hash),
         proof_link: rand::random(),
@@ -673,8 +673,8 @@ async fn run_chaos_scenarios(
         let mallory = Wallet::new();
 
         // Build a valid-looking tx structure but with garbage proof
-        let blind = spectra::crypto::commitment::BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth");
+        let blind = umbra::crypto::commitment::BlindingFactor::random();
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth");
 
         let tx_result = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -722,8 +722,8 @@ async fn run_chaos_scenarios(
     // ChainState::validate_transaction which is the path used by apply_vertex.
     {
         let name = "Attack: Wrong chain ID";
-        let blind = spectra::crypto::commitment::BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-2");
+        let blind = umbra::crypto::commitment::BlindingFactor::random();
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-2");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -764,8 +764,8 @@ async fn run_chaos_scenarios(
     // Attack 3: Overflow fee (> MAX_TX_FEE)
     {
         let name = "Attack: Overflow fee";
-        let blind = spectra::crypto::commitment::BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-3");
+        let blind = umbra::crypto::commitment::BlindingFactor::random();
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-3");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -776,7 +776,7 @@ async fn run_chaos_scenarios(
                 merkle_path: vec![],
             })
             .add_output(mallory.kem_public_key().clone(), 1)
-            .set_fee(spectra::constants::MAX_TX_FEE + 1)
+            .set_fee(umbra::constants::MAX_TX_FEE + 1)
             .set_proof_options(default_proof_options())
             .build();
 
@@ -804,8 +804,8 @@ async fn run_chaos_scenarios(
     // Attack 4: Zero fee (below minimum)
     {
         let name = "Attack: Zero fee";
-        let blind = spectra::crypto::commitment::BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-4");
+        let blind = umbra::crypto::commitment::BlindingFactor::random();
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-4");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -853,9 +853,9 @@ async fn run_chaos_scenarios(
                 proof_bytes: vec![],
                 public_inputs_bytes: vec![],
             },
-            tx_type: spectra::transaction::TxType::Transfer,
+            tx_type: umbra::transaction::TxType::Transfer,
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
 
@@ -876,14 +876,14 @@ async fn run_chaos_scenarios(
     // Attack 6: Duplicate nullifier (replay attack)
     {
         let name = "Attack: Duplicate nullifier";
-        let nullifier = spectra::crypto::nullifier::Nullifier(spectra::hash_domain(
+        let nullifier = umbra::crypto::nullifier::Nullifier(umbra::hash_domain(
             b"mallory",
             b"replay-nullifier",
         ));
 
         let tx = Transaction {
             inputs: vec![
-                spectra::transaction::TxInput {
+                umbra::transaction::TxInput {
                     nullifier,
                     spend_proof: SpendStarkProof {
                         proof_bytes: vec![1, 2, 3],
@@ -891,7 +891,7 @@ async fn run_chaos_scenarios(
                     },
                     proof_link: [0u8; 32],
                 },
-                spectra::transaction::TxInput {
+                umbra::transaction::TxInput {
                     nullifier, // Same nullifier = duplicate
                     spend_proof: SpendStarkProof {
                         proof_bytes: vec![4, 5, 6],
@@ -907,9 +907,9 @@ async fn run_chaos_scenarios(
                 proof_bytes: vec![],
                 public_inputs_bytes: vec![],
             },
-            tx_type: spectra::transaction::TxType::Transfer,
+            tx_type: umbra::transaction::TxType::Transfer,
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
 
@@ -930,12 +930,12 @@ async fn run_chaos_scenarios(
     // Attack 7: Oversized message
     {
         let name = "Attack: Oversized message";
-        let blind = spectra::crypto::commitment::BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-7");
+        let blind = umbra::crypto::commitment::BlindingFactor::random();
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-7");
         let mallory = Wallet::new();
 
         // Try building a tx with a message exceeding MAX_MESSAGE_SIZE
-        let huge_msg = vec![0xAA; spectra::constants::MAX_MESSAGE_SIZE + 1];
+        let huge_msg = vec![0xAA; umbra::constants::MAX_MESSAGE_SIZE + 1];
 
         let tx_result = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -976,7 +976,7 @@ async fn run_chaos_scenarios(
     // Attack 8: Too many inputs (> MAX_TX_IO)
     {
         let name = "Attack: Too many inputs";
-        let inputs: Vec<TxInput> = (0..spectra::constants::MAX_TX_IO + 1)
+        let inputs: Vec<TxInput> = (0..umbra::constants::MAX_TX_IO + 1)
             .map(|_| make_dummy_input())
             .collect();
         let tx = Transaction {
@@ -990,7 +990,7 @@ async fn run_chaos_scenarios(
             },
             tx_type: TxType::Transfer,
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
@@ -1006,7 +1006,7 @@ async fn run_chaos_scenarios(
     // Attack 9: Too many outputs (> MAX_TX_IO)
     {
         let name = "Attack: Too many outputs";
-        let outputs: Vec<TxOutput> = (0..spectra::constants::MAX_TX_IO + 1)
+        let outputs: Vec<TxOutput> = (0..umbra::constants::MAX_TX_IO + 1)
             .map(|_| make_dummy_output())
             .collect();
         let tx = Transaction {
@@ -1020,7 +1020,7 @@ async fn run_chaos_scenarios(
             },
             tx_type: TxType::Transfer,
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
@@ -1036,7 +1036,7 @@ async fn run_chaos_scenarios(
     // Attack 10: Too many messages (> MAX_MESSAGES_PER_TX)
     {
         let name = "Attack: Too many messages";
-        let messages: Vec<TxMessage> = (0..spectra::constants::MAX_MESSAGES_PER_TX + 1)
+        let messages: Vec<TxMessage> = (0..umbra::constants::MAX_MESSAGES_PER_TX + 1)
             .map(|_| make_dummy_message())
             .collect();
         let tx = Transaction {
@@ -1050,7 +1050,7 @@ async fn run_chaos_scenarios(
             },
             tx_type: TxType::Transfer,
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
@@ -1078,7 +1078,7 @@ async fn run_chaos_scenarios(
             },
             tx_type: TxType::Transfer,
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
@@ -1095,7 +1095,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Invalid tx_binding";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-12");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-12");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1131,7 +1131,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Expired transaction";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-13");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-13");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1176,9 +1176,9 @@ async fn run_chaos_scenarios(
         let mallory_b = Wallet::new();
 
         let blind_a = BlindingFactor::random();
-        let auth_a = spectra::hash_domain(b"mallory", b"transplant-a");
+        let auth_a = umbra::hash_domain(b"mallory", b"transplant-a");
         let blind_b = BlindingFactor::random();
-        let auth_b = spectra::hash_domain(b"mallory", b"transplant-b");
+        let auth_b = umbra::hash_domain(b"mallory", b"transplant-b");
 
         let tx_a = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -1225,7 +1225,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Proof_link tampering";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-15");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-15");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1263,7 +1263,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Nullifier tampering";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-16");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-16");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1310,7 +1310,7 @@ async fn run_chaos_scenarios(
             outputs: vec![make_dummy_output()],
             messages: vec![],
             // fee = VALIDATOR_BOND but missing MIN_TX_FEE
-            fee: spectra::constants::VALIDATOR_BOND,
+            fee: umbra::constants::VALIDATOR_BOND,
             balance_proof: BalanceStarkProof {
                 proof_bytes: vec![],
                 public_inputs_bytes: vec![],
@@ -1320,7 +1320,7 @@ async fn run_chaos_scenarios(
                 kem_public_key: kem_kp.public.clone(),
             },
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
@@ -1345,10 +1345,10 @@ async fn run_chaos_scenarios(
         let fake_kem_bytes = vec![0xBB; 100]; // wrong size (should be 1568)
 
         // Serialize the keys via bincode to match the Serialize/Deserialize impl
-        let fake_signing: Result<spectra::crypto::keys::SigningPublicKey, _> =
-            spectra::deserialize(&spectra::serialize(&fake_signing_bytes).unwrap());
-        let fake_kem: Result<spectra::crypto::keys::KemPublicKey, _> =
-            spectra::deserialize(&spectra::serialize(&fake_kem_bytes).unwrap());
+        let fake_signing: Result<umbra::crypto::keys::SigningPublicKey, _> =
+            umbra::deserialize(&umbra::serialize(&fake_signing_bytes).unwrap());
+        let fake_kem: Result<umbra::crypto::keys::KemPublicKey, _> =
+            umbra::deserialize(&umbra::serialize(&fake_kem_bytes).unwrap());
 
         // If deserialization catches the invalid size, that's also a valid rejection
         match (fake_signing, fake_kem) {
@@ -1357,7 +1357,7 @@ async fn run_chaos_scenarios(
                     inputs: vec![make_dummy_input()],
                     outputs: vec![make_dummy_output()],
                     messages: vec![],
-                    fee: spectra::constants::VALIDATOR_BOND + spectra::constants::MIN_TX_FEE,
+                    fee: umbra::constants::VALIDATOR_BOND + umbra::constants::MIN_TX_FEE,
                     balance_proof: BalanceStarkProof {
                         proof_bytes: vec![],
                         public_inputs_bytes: vec![],
@@ -1367,7 +1367,7 @@ async fn run_chaos_scenarios(
                         kem_public_key: kem_key,
                     },
                     tx_binding: [0u8; 32],
-                    chain_id: spectra::constants::chain_id(),
+                    chain_id: umbra::constants::chain_id(),
                     expiry_epoch: 0,
                 };
                 let mut state_guard = node_state.write().await;
@@ -1413,7 +1413,7 @@ async fn run_chaos_scenarios(
                 bond_blinding: [0u8; 32],
             },
             tx_binding: [0u8; 32],
-            chain_id: spectra::constants::chain_id(),
+            chain_id: umbra::constants::chain_id(),
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
@@ -1431,7 +1431,7 @@ async fn run_chaos_scenarios(
     // Attack 20: Mempool nullifier conflict (two txs, same nullifier)
     {
         let name = "Attack: Mempool nullifier conflict";
-        let spend_auth = spectra::hash_domain(b"mallory", b"double-spend-input");
+        let spend_auth = umbra::hash_domain(b"mallory", b"double-spend-input");
         let mallory_a = Wallet::new();
         let mallory_b = Wallet::new();
 
@@ -1491,7 +1491,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Duplicate transaction";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-21");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-21");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1537,7 +1537,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Cross-chain replay";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-22");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-22");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1577,7 +1577,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: Mempool expiry eviction";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-23");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-23");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1636,7 +1636,7 @@ async fn run_chaos_scenarios(
     {
         let name = "Attack: No-expiry tx survives eviction";
         let blind = BlindingFactor::random();
-        let spend_auth = spectra::hash_domain(b"mallory", b"fake-auth-24");
+        let spend_auth = umbra::hash_domain(b"mallory", b"fake-auth-24");
         let mallory = Wallet::new();
 
         let tx_result = TransactionBuilder::new()
@@ -1716,7 +1716,7 @@ async fn run_chaos_scenarios(
                 },
                 tx_type: TxType::Transfer,
                 tx_binding: [0u8; 32],
-                chain_id: spectra::constants::chain_id(),
+                chain_id: umbra::constants::chain_id(),
                 expiry_epoch: 0,
             };
             let state_guard = node_state.read().await;

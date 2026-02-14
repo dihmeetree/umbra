@@ -69,10 +69,10 @@ struct SessionKeys {
 
 impl SessionKeys {
     fn derive(shared_secret: &[u8; 32], is_initiator: bool) -> Self {
-        let init_send = crate::hash_domain(b"spectra.p2p.init.send", shared_secret);
-        let resp_send = crate::hash_domain(b"spectra.p2p.resp.send", shared_secret);
-        let init_mac = crate::hash_domain(b"spectra.p2p.init.mac", shared_secret);
-        let resp_mac = crate::hash_domain(b"spectra.p2p.resp.mac", shared_secret);
+        let init_send = crate::hash_domain(b"umbra.p2p.init.send", shared_secret);
+        let resp_send = crate::hash_domain(b"umbra.p2p.resp.send", shared_secret);
+        let init_mac = crate::hash_domain(b"umbra.p2p.init.mac", shared_secret);
+        let resp_mac = crate::hash_domain(b"umbra.p2p.resp.mac", shared_secret);
         if is_initiator {
             SessionKeys {
                 send_key: init_send,
@@ -108,7 +108,7 @@ fn xor_keystream(key: &[u8; 32], nonce: &[u8; TRANSPORT_NONCE_SIZE], data: &[u8]
         block_input.extend_from_slice(key);
         block_input.extend_from_slice(nonce);
         block_input.extend_from_slice(&block_counter.to_le_bytes());
-        let block = crate::hash_domain(b"spectra.keystream", &block_input);
+        let block = crate::hash_domain(b"umbra.keystream", &block_input);
         let remaining = data.len() - pos;
         let take = remaining.min(32);
         for i in 0..take {
@@ -136,7 +136,7 @@ fn compute_transcript_hash(initiator_id: &Hash, responder_id: &Hash, kem_ct: &[u
     buf.extend_from_slice(initiator_id);
     buf.extend_from_slice(responder_id);
     buf.extend_from_slice(kem_ct);
-    crate::hash_domain(b"spectra.p2p.transcript", &buf)
+    crate::hash_domain(b"umbra.p2p.transcript", &buf)
 }
 
 /// Write an encrypted + authenticated message frame.

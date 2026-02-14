@@ -1,6 +1,6 @@
-//! Configuration file support for the Spectra node.
+//! Configuration file support for the Umbra node.
 //!
-//! Loads optional `spectra.toml` from the data directory. CLI flags override
+//! Loads optional `umbra.toml` from the data directory. CLI flags override
 //! config file values. If no config file exists, defaults are used.
 
 use serde::Deserialize;
@@ -10,7 +10,7 @@ use std::path::Path;
 /// Top-level configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct SpectraConfig {
+pub struct UmbraConfig {
     pub node: NodeConfig,
     pub wallet: WalletConfig,
 }
@@ -36,7 +36,7 @@ impl Default for NodeConfig {
             p2p_port: crate::constants::DEFAULT_P2P_PORT,
             rpc_host: "127.0.0.1".into(),
             rpc_port: crate::constants::DEFAULT_RPC_PORT,
-            data_dir: "./spectra-data".into(),
+            data_dir: "./umbra-data".into(),
             bootstrap_peers: vec![],
             genesis_validator: false,
             max_peers: crate::constants::MAX_PEERS,
@@ -61,11 +61,11 @@ impl Default for WalletConfig {
     }
 }
 
-impl SpectraConfig {
-    /// Load configuration from `spectra.toml` in the given directory.
+impl UmbraConfig {
+    /// Load configuration from `umbra.toml` in the given directory.
     /// Returns `Default` if the file doesn't exist.
     pub fn load(data_dir: &Path) -> Self {
-        let config_path = data_dir.join("spectra.toml");
+        let config_path = data_dir.join("umbra.toml");
         match std::fs::read_to_string(&config_path) {
             Ok(contents) => match toml::from_str(&contents) {
                 Ok(config) => {
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn default_config_valid() {
-        let config = SpectraConfig::default();
+        let config = UmbraConfig::default();
         assert_eq!(config.node.p2p_port, crate::constants::DEFAULT_P2P_PORT);
         assert_eq!(config.node.rpc_port, crate::constants::DEFAULT_RPC_PORT);
         assert!(!config.node.genesis_validator);
@@ -124,7 +124,7 @@ bootstrap_peers = ["1.2.3.4:9732", "5.6.7.8:9732"]
 [wallet]
 web_port = 8080
 "#;
-        let config: SpectraConfig = toml::from_str(toml_str).unwrap();
+        let config: UmbraConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.node.p2p_port, 9999);
         assert_eq!(config.node.rpc_host, "0.0.0.0");
         assert_eq!(config.node.bootstrap_peers.len(), 2);
@@ -134,13 +134,13 @@ web_port = 8080
     #[test]
     fn missing_config_returns_default() {
         let dir = tempfile::tempdir().unwrap();
-        let config = SpectraConfig::load(dir.path());
+        let config = UmbraConfig::load(dir.path());
         assert_eq!(config.node.p2p_port, crate::constants::DEFAULT_P2P_PORT);
     }
 
     #[test]
     fn parse_bootstrap_peers() {
-        let mut config = SpectraConfig::default();
+        let mut config = UmbraConfig::default();
         config.node.bootstrap_peers = vec!["1.2.3.4:9732".into(), "bad-addr".into()];
         let peers = config.parse_bootstrap_peers();
         assert_eq!(peers.len(), 1);

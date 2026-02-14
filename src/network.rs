@@ -1,4 +1,4 @@
-//! Network protocol message definitions for Spectra P2P communication.
+//! Network protocol message definitions for Umbra P2P communication.
 //!
 //! Defines the wire protocol messages exchanged between nodes.
 //!

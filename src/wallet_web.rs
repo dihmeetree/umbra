@@ -388,7 +388,7 @@ async fn address_export(State(state): State<WalletWebState>) -> Response {
             (header::CONTENT_TYPE, "application/octet-stream"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=\"wallet.spectra-address\"",
+                "attachment; filename=\"wallet.umbra-address\"",
             ),
         ],
         addr_hex,

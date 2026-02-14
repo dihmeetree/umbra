@@ -1,6 +1,6 @@
-//! DAG (Directed Acyclic Graph) data structure for the Spectra ledger.
+//! DAG (Directed Acyclic Graph) data structure for the Umbra ledger.
 //!
-//! Unlike a blockchain (linear chain of blocks), Spectra uses a DAG where
+//! Unlike a blockchain (linear chain of blocks), Umbra uses a DAG where
 //! each vertex can reference multiple parent vertices. This enables:
 //! - Parallel transaction processing
 //! - Higher throughput (multiple vertices per time slot)
@@ -19,7 +19,7 @@ use crate::Hash;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VertexId(pub Hash);
 
-/// A vertex in the DAG — the Spectra equivalent of a "block".
+/// A vertex in the DAG — the Umbra equivalent of a "block".
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Vertex {
     /// Unique vertex identifier (hash of header fields)
@@ -63,7 +63,7 @@ impl Vertex {
         tx_root: &Hash,
         vrf_value: Option<&Hash>,
     ) -> VertexId {
-        let mut hasher = blake3::Hasher::new_derive_key("spectra.vertex.id");
+        let mut hasher = blake3::Hasher::new_derive_key("umbra.vertex.id");
         for p in parents {
             hasher.update(&p.0);
         }
@@ -220,7 +220,7 @@ impl Dag {
 
     /// Create a genesis vertex.
     pub fn genesis_vertex() -> Vertex {
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
         Vertex {
             id: genesis_id,
             parents: vec![],

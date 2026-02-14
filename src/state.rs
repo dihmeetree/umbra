@@ -474,7 +474,7 @@ impl ChainState {
         self.nullifiers.insert(nullifier);
         // Update incremental hash: new = H(old || nullifier)
         self.nullifier_hash =
-            crate::hash_concat(&[b"spectra.nullifier_acc", &self.nullifier_hash, &nullifier.0]);
+            crate::hash_concat(&[b"umbra.nullifier_acc", &self.nullifier_hash, &nullifier.0]);
         Ok(())
     }
 
@@ -638,7 +638,7 @@ impl ChainState {
         let root = self.commitment_tree.root();
         let validator_hash = self.validator_set_hash();
         crate::hash_concat(&[
-            b"spectra.state_root",
+            b"umbra.state_root",
             &root,
             &self.nullifier_hash,
             &self.epoch.to_le_bytes(),
@@ -658,7 +658,7 @@ impl ChainState {
         sorted_ids.sort();
 
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"spectra.validator_set");
+        hasher.update(b"umbra.validator_set");
         hasher.update(&(sorted_ids.len() as u64).to_le_bytes());
         for vid in sorted_ids {
             hasher.update(vid);
@@ -771,7 +771,7 @@ impl ChainState {
         let mut data = Vec::with_capacity(40);
         data.extend_from_slice(&vertex_id.0);
         data.extend_from_slice(&epoch.to_le_bytes());
-        let hash = crate::hash_domain(b"spectra.coinbase.blinding", &data);
+        let hash = crate::hash_domain(b"umbra.coinbase.blinding", &data);
         BlindingFactor::from_bytes(hash)
     }
 
@@ -840,7 +840,7 @@ impl ChainState {
         let amount = crate::constants::GENESIS_MINT;
 
         // Deterministic blinding for genesis (no vertex ID, use a fixed domain)
-        let hash = crate::hash_domain(b"spectra.genesis.blinding", b"genesis-coinbase");
+        let hash = crate::hash_domain(b"umbra.genesis.blinding", b"genesis-coinbase");
         let blinding = BlindingFactor::from_bytes(hash);
         let commitment = Commitment::commit(amount, &blinding);
 
@@ -1596,7 +1596,7 @@ mod tests {
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
         state.register_genesis_validator(validator);
 
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Build a valid transaction against the current state
         let fee = 50;
@@ -1636,7 +1636,7 @@ mod tests {
         let mut state = ChainState::new();
 
         let kp = SigningKeypair::generate();
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Create a vertex with MAX_TXS_PER_VERTEX + 1 dummy transactions
         let dummy_txs: Vec<Transaction> = (0..crate::constants::MAX_TXS_PER_VERTEX + 1)
@@ -1663,7 +1663,7 @@ mod tests {
         let mut state = ChainState::new();
 
         let kp = SigningKeypair::generate();
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Create two dummy transactions sharing the same nullifier
         let shared_nullifier = Nullifier::derive(&[42u8; 32], &[43u8; 32]);
@@ -1690,7 +1690,7 @@ mod tests {
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
         state.register_genesis_validator(validator);
 
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Build and apply first vertex with fee=30
         let fee1 = 30;
@@ -1723,7 +1723,7 @@ mod tests {
 
         // Build a valid transaction but with a wrong chain_id
         let recipient = FullKeypair::generate();
-        let wrong_chain_id = crate::hash_domain(b"wrong.chain", b"not-spectra");
+        let wrong_chain_id = crate::hash_domain(b"wrong.chain", b"not-umbra");
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 200,
@@ -1919,7 +1919,7 @@ mod tests {
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
         state.register_genesis_validator(validator);
 
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Create a vertex with epoch=5 while state is at epoch=0 (mismatch)
         let vertex = make_test_vertex(vec![genesis_id], 1, 5, &val_signing.public, vec![]);
@@ -1947,7 +1947,7 @@ mod tests {
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
         state.register_genesis_validator(validator);
 
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Apply a vertex at epoch=0, round=1 (matching chain epoch)
         let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![]);
@@ -1976,7 +1976,7 @@ mod tests {
         let vid = validator.id;
         ledger.state.register_genesis_validator(validator.clone());
 
-        let genesis_id = VertexId(crate::hash_domain(b"spectra.genesis", b"spectra-mainnet"));
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Insert a vertex into the DAG
         let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![]);

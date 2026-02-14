@@ -58,16 +58,16 @@ impl VrfOutput {
     /// validator is bound to the first proof they committed to.
     pub fn evaluate(keypair: &SigningKeypair, input: &[u8]) -> Self {
         // Tag the input to avoid domain confusion
-        let tagged_input = crate::hash_concat(&[b"spectra.vrf.input", input]);
+        let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
         // Sign the tagged input
         let signature = keypair.sign(&tagged_input);
 
         // Derive the VRF output from the signature
-        let value = crate::hash_domain(b"spectra.vrf.output", &signature.0);
+        let value = crate::hash_domain(b"umbra.vrf.output", &signature.0);
 
         // Compute the proof commitment (anti-grinding)
-        let proof_commitment = crate::hash_domain(b"spectra.vrf.proof_commitment", &signature.0);
+        let proof_commitment = crate::hash_domain(b"umbra.vrf.proof_commitment", &signature.0);
 
         VrfOutput {
             value,
@@ -88,7 +88,7 @@ impl VrfOutput {
         input: &[u8],
         expected_commitment: &Hash,
     ) -> bool {
-        let tagged_input = crate::hash_concat(&[b"spectra.vrf.input", input]);
+        let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
         // Verify the signature proof
         let sig = super::keys::Signature(self.proof.clone());
@@ -97,13 +97,13 @@ impl VrfOutput {
         }
 
         // Verify the output is correctly derived from the proof
-        let expected_value = crate::hash_domain(b"spectra.vrf.output", &self.proof);
+        let expected_value = crate::hash_domain(b"umbra.vrf.output", &self.proof);
         if !crate::constant_time_eq(&self.value, &expected_value) {
             return false;
         }
 
         // Verify proof commitment matches (anti-grinding)
-        let computed_commitment = crate::hash_domain(b"spectra.vrf.proof_commitment", &self.proof);
+        let computed_commitment = crate::hash_domain(b"umbra.vrf.proof_commitment", &self.proof);
         if !crate::constant_time_eq(&self.proof_commitment, &computed_commitment) {
             return false;
         }
@@ -121,19 +121,19 @@ impl VrfOutput {
     /// `evaluate()`). For on-chain verification, always use `verify()` with
     /// the pre-registered commitment.
     pub fn verify_locally(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
-        let tagged_input = crate::hash_concat(&[b"spectra.vrf.input", input]);
+        let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
         let sig = super::keys::Signature(self.proof.clone());
         if !public_key.verify(&tagged_input, &sig) {
             return false;
         }
 
-        let expected_value = crate::hash_domain(b"spectra.vrf.output", &self.proof);
+        let expected_value = crate::hash_domain(b"umbra.vrf.output", &self.proof);
         if !crate::constant_time_eq(&self.value, &expected_value) {
             return false;
         }
 
-        let computed_commitment = crate::hash_domain(b"spectra.vrf.proof_commitment", &self.proof);
+        let computed_commitment = crate::hash_domain(b"umbra.vrf.proof_commitment", &self.proof);
         if !crate::constant_time_eq(&self.proof_commitment, &computed_commitment) {
             return false;
         }
@@ -180,7 +180,7 @@ impl EpochSeed {
     pub fn genesis() -> Self {
         EpochSeed {
             epoch: 0,
-            seed: crate::hash_domain(b"spectra.epoch.genesis", b"spectra"),
+            seed: crate::hash_domain(b"umbra.epoch.genesis", b"umbra"),
         }
     }
 
@@ -189,7 +189,7 @@ impl EpochSeed {
         EpochSeed {
             epoch: self.epoch + 1,
             seed: crate::hash_concat(&[
-                b"spectra.epoch.seed",
+                b"umbra.epoch.seed",
                 &self.epoch.to_le_bytes(),
                 &self.seed,
                 epoch_final_hash,
@@ -200,7 +200,7 @@ impl EpochSeed {
     /// Build the VRF input for a specific validator in this epoch.
     pub fn vrf_input(&self, validator_id: &Hash) -> Vec<u8> {
         crate::hash_concat(&[
-            b"spectra.vrf.epoch_input",
+            b"umbra.vrf.epoch_input",
             &self.epoch.to_le_bytes(),
             &self.seed,
             validator_id,

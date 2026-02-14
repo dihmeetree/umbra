@@ -15,9 +15,9 @@ use crate::wallet::{TxDirection, Wallet, WalletError};
 const WALLET_FILENAME: &str = "wallet.dat";
 
 /// Default address export file name.
-const ADDRESS_FILENAME: &str = "wallet.spectra-address";
+const ADDRESS_FILENAME: &str = "wallet.umbra-address";
 
-/// Simple RPC client for communicating with a Spectra node.
+/// Simple RPC client for communicating with a Umbra node.
 pub struct RpcClient {
     base_url: String,
     client: reqwest::Client,
@@ -575,7 +575,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cmd_init(dir.path()).unwrap();
 
-        let export_path = dir.path().join("exported.spectra-address");
+        let export_path = dir.path().join("exported.umbra-address");
         cmd_export(dir.path(), &export_path).unwrap();
         assert!(export_path.exists());
 

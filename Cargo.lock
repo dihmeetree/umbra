@@ -1736,41 +1736,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spectra"
-version = "0.1.0"
-dependencies = [
- "askama",
- "askama_web",
- "axum",
- "bincode",
- "blake3",
- "clap",
- "colored",
- "hex",
- "http-body-util",
- "pqcrypto-dilithium",
- "pqcrypto-kyber",
- "pqcrypto-traits",
- "rand",
- "rayon",
- "reqwest",
- "serde",
- "serde_json",
- "sled",
- "subtle",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml",
- "tower",
- "tracing",
- "tracing-subscriber",
- "winterfell",
- "zeroize",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2112,6 +2077,41 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "umbra"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "askama_web",
+ "axum",
+ "bincode",
+ "blake3",
+ "clap",
+ "colored",
+ "hex",
+ "http-body-util",
+ "pqcrypto-dilithium",
+ "pqcrypto-kyber",
+ "pqcrypto-traits",
+ "rand",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sled",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "winterfell",
+ "zeroize",
+]
 
 [[package]]
 name = "unicode-ident"

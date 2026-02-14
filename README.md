@@ -1,8 +1,8 @@
-# Spectra
+# Umbra
 
 A post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust.
 
-Spectra is designed from the ground up to be **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final** — with no trusted setup required.
+Umbra is designed from the ground up to be **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final** — with no trusted setup required.
 
 ## Key Features
 
@@ -34,7 +34,7 @@ No trusted setup is required. All proofs are transparent. The P2P transport laye
 - **Block rewards** — each finalized vertex creates new coins for the proposer via a coinbase output (commitment + stealth address + encrypted note), the same format as any other output in the commitment tree
 - **Halving schedule** — initial reward of 50,000 units per vertex, halving every 500 epochs (~500,000 vertices per phase), reaching zero after 63 halvings
 - **Fee distribution** — transaction fees go to the vertex proposer via coinbase output and also accumulate in epoch-level accounting, added on top of the block reward
-- **Deterministic blinding** — coinbase blinding factors are derived from `hash_domain("spectra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while maintaining consistent commitment tree format
+- **Deterministic blinding** — coinbase blinding factors are derived from `hash_domain("umbra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while maintaining consistent commitment tree format
 - **Total supply tracking** — `total_minted` is tracked in the chain state and included in the state root hash, enabling consensus-verifiable supply accounting
 
 ### Consensus: Proof of Verifiable Participation (PoVP)
@@ -64,10 +64,10 @@ Epoch N:
 ## Project Structure
 
 ```
-spectra/
+umbra/
   src/
     lib.rs                  Protocol constants, hashing utilities
-    config.rs               TOML config file support (spectra.toml)
+    config.rs               TOML config file support (umbra.toml)
     bip39_words.rs          BIP39 English wordlist (2048 words) for wallet recovery
     crypto/
       keys.rs               Dilithium5 signing + Kyber1024 KEM keypairs
@@ -137,10 +137,10 @@ cargo run --release -- node [OPTIONS]
 
 ### Configuration
 
-The node loads `spectra.toml` from the data directory if present. CLI flags override config file values. If no config file exists, defaults are used.
+The node loads `umbra.toml` from the data directory if present. CLI flags override config file values. If no config file exists, defaults are used.
 
 ```toml
-# spectra.toml (optional)
+# umbra.toml (optional)
 [node]
 p2p_host = "0.0.0.0"
 p2p_port = 9732
@@ -163,12 +163,12 @@ The binary uses subcommands (`node`, `wallet`). Running without a subcommand def
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--data-dir` | `./spectra-data` | Data directory for persistent storage |
+| `--data-dir` | `./umbra-data` | Data directory for persistent storage |
 | `--rpc-host` | `127.0.0.1` | RPC listen host (localhost by default for safety) |
 | `--rpc-port` | `9733` | RPC listen port |
 | `--demo` | *(off)* | Run the protocol demo walkthrough instead |
 
-**Node flags** (`spectra node`):
+**Node flags** (`umbra node`):
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -226,10 +226,10 @@ cargo run --release -- wallet init
 cargo run --release -- wallet balance
 
 # Send 1000 units to a recipient
-cargo run --release -- wallet send --to ./bob.spectra-address --amount 1000 --fee 10
+cargo run --release -- wallet send --to ./bob.umbra-address --amount 1000 --fee 10
 
 # Send with an encrypted message
-cargo run --release -- wallet send --to ./bob.spectra-address --amount 500 --fee 10 --message "Payment for services"
+cargo run --release -- wallet send --to ./bob.umbra-address --amount 500 --fee 10 --message "Payment for services"
 
 # View received messages
 cargo run --release -- wallet messages
@@ -244,7 +244,7 @@ cargo run --release -- wallet consolidate --fee 10
 cargo run --release -- wallet recover --phrase "abandon ability able about ..."
 
 # Export address for sharing
-cargo run --release -- wallet export --file ./my-address.spectra-address
+cargo run --release -- wallet export --file ./my-address.umbra-address
 
 # Use a custom data directory
 cargo run --release -- --data-dir ./my-wallet wallet balance
@@ -252,7 +252,7 @@ cargo run --release -- --data-dir ./my-wallet wallet balance
 
 ### Address Exchange
 
-Wallets exchange addresses via `.spectra-address` files (hex-encoded bincode-serialized `PublicAddress`). The `init` and `address` commands automatically export this file to the data directory. Use `export` to save it elsewhere for sharing.
+Wallets exchange addresses via `.umbra-address` files (hex-encoded bincode-serialized `PublicAddress`). The `init` and `address` commands automatically export this file to the data directory. Use `export` to save it elsewhere for sharing.
 
 ## Wallet Web UI
 
@@ -428,7 +428,7 @@ All 314 tests cover:
 
 ## Network Simulator
 
-A standalone binary that exercises the full Spectra stack end-to-end with real nodes, real P2P networking, DAG-BFT consensus, wallet transactions, and adversarial attack scenarios.
+A standalone binary that exercises the full Umbra stack end-to-end with real nodes, real P2P networking, DAG-BFT consensus, wallet transactions, and adversarial attack scenarios.
 
 ```bash
 cargo run --release --bin simulator
@@ -471,7 +471,7 @@ Runs an end-to-end demonstration:
 
 ## Transaction Model
 
-Spectra uses a UTXO model with full zero-knowledge privacy:
+Umbra uses a UTXO model with full zero-knowledge privacy:
 
 ```
 Transaction {
@@ -499,7 +499,7 @@ Transaction {
 
 ## Zero-Knowledge Proof System
 
-Spectra uses **zk-STARKs** (via the [winterfell](https://github.com/facebook/winterfell) library) for all transaction validity proofs:
+Umbra uses **zk-STARKs** (via the [winterfell](https://github.com/facebook/winterfell) library) for all transaction validity proofs:
 
 ### Dual Hash Design
 
@@ -668,10 +668,10 @@ All transaction validity is verified via zk-STARKs:
 - **VRF-proven vertices and votes** — every non-genesis vertex and BFT vote must include a VRF proof demonstrating the proposer/voter was selected for the epoch's committee; vertices and votes without valid VRF proofs are rejected
 - **Validator bond escrow** — registration requires `fee >= VALIDATOR_BOND + MIN_TX_FEE`; the bond is escrowed in chain state and only the remainder goes to epoch fees. Prevents unbonded validators from participating
 - **Slashing** — equivocation evidence (voting for conflicting vertices in the same round) triggers automatic bond forfeiture to epoch fees and permanent validator exclusion
-- **Deregistration auth** — validator deregistration requires a signature over `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`, preventing unauthorized bond withdrawal
+- **Deregistration auth** — validator deregistration requires a signature over `"umbra.validator.deregister" || chain_id || validator_id || tx_content_hash`, preventing unauthorized bond withdrawal
 - **Two-phase vertex finalization** — vertices are inserted into the DAG (unfinalized) first, then finalized only after BFT quorum certification, preventing premature state application
 - **Persistent validator keypair** — the validator's Dilithium5 signing and Kyber1024 KEM keypairs are persisted to disk with raw byte serialization and validated on load, preventing key loss across restarts
-- **Deterministic coinbase blinding** — coinbase output blinding factors are derived from `hash_domain("spectra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while using the same commitment format as private outputs
+- **Deterministic coinbase blinding** — coinbase output blinding factors are derived from `hash_domain("umbra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while using the same commitment format as private outputs
 - **Consensus-verifiable supply** — `total_minted` is included in the state root hash, so any disagreement on emission is detected by state root divergence
 - **Fee redirection fallback** — if a vertex proposer lacks a KEM key (cannot receive coinbase), fees are returned to the epoch fee pool rather than being lost
 - **Post-quantum encrypted transport** — all P2P connections use Kyber1024 KEM for key exchange and Dilithium5 for mutual authentication, followed by BLAKE3-based XOR keystream encryption with keyed-BLAKE3 MACs, providing quantum-resistant confidentiality and integrity for all inter-node communication
@@ -726,7 +726,7 @@ All transaction validity is verified via zk-STARKs:
 
 ## Production Roadmap
 
-Spectra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
+Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
 - **External security audit** — independent cryptographic protocol review and penetration testing (three internal audits have been completed, addressing 47+ findings across all severity levels and expanding test coverage from 226 to 314 tests with targeted state correctness, validation bypass, and regression tests; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)

@@ -1,33 +1,33 @@
-//! Spectra node and wallet binary.
+//! Umbra node and wallet binary.
 //!
-//! Runs a full Spectra node with P2P networking, mempool, persistent storage,
+//! Runs a full Umbra node with P2P networking, mempool, persistent storage,
 //! and JSON RPC API. Also provides a wallet CLI for key management, balance
 //! queries, and sending transactions.
 //!
 //! Usage:
-//!   spectra                         # run node (default)
-//!   spectra node                    # run node (explicit)
-//!   spectra --demo                  # run protocol demo
-//!   spectra wallet init             # create a new wallet
-//!   spectra wallet balance           # scan chain + show balance
-//!   spectra wallet send --to <file> --amount N --fee N
-//!   spectra wallet messages          # show received messages
+//!   umbra                         # run node (default)
+//!   umbra node                    # run node (explicit)
+//!   umbra --demo                  # run protocol demo
+//!   umbra wallet init             # create a new wallet
+//!   umbra wallet balance           # scan chain + show balance
+//!   umbra wallet send --to <file> --amount N --fee N
+//!   umbra wallet messages          # show received messages
 
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
-/// Spectra post-quantum cryptocurrency node and wallet.
+/// Umbra post-quantum cryptocurrency node and wallet.
 #[derive(Parser, Debug)]
 #[command(
-    name = "spectra",
+    name = "umbra",
     version,
-    about = "Spectra post-quantum private cryptocurrency"
+    about = "Umbra post-quantum private cryptocurrency"
 )]
 struct Cli {
     /// Data directory for persistent storage.
-    #[arg(long, default_value = "./spectra-data", global = true)]
+    #[arg(long, default_value = "./umbra-data", global = true)]
     data_dir: PathBuf,
 
     /// RPC host for node/wallet communication.
@@ -48,7 +48,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run the Spectra node.
+    /// Run the Umbra node.
     Node {
         /// P2P listen host.
         #[arg(long, default_value = "0.0.0.0")]
@@ -67,7 +67,7 @@ enum Command {
         genesis_validator: bool,
     },
 
-    /// Manage the Spectra wallet.
+    /// Manage the Umbra wallet.
     Wallet {
         #[command(subcommand)]
         action: WalletAction,
@@ -90,7 +90,7 @@ enum WalletAction {
 
     /// Send a transaction.
     Send {
-        /// Path to recipient's .spectra-address file.
+        /// Path to recipient's .umbra-address file.
         #[arg(long)]
         to: PathBuf,
 
@@ -157,8 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Load config file (spectra.toml) — CLI flags override config values
-    let config = spectra::config::SpectraConfig::load(&cli.data_dir);
+    // Load config file (umbra.toml) — CLI flags override config values
+    let config = umbra::config::UmbraConfig::load(&cli.data_dir);
 
     let rpc_addr: SocketAddr = format!("{}:{}", cli.rpc_host, cli.rpc_port).parse()?;
 
@@ -218,14 +218,14 @@ async fn run_node(
     peers: Vec<SocketAddr>,
     genesis_validator: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Starting Spectra node...");
+    tracing::info!("Starting Umbra node...");
     tracing::info!("P2P: {}", listen_addr);
     tracing::info!("RPC: {}", rpc_addr);
     tracing::info!("Data: {}", data_dir.display());
 
-    let (keypair, kem_keypair) = spectra::node::load_or_generate_keypair(&data_dir)?;
+    let (keypair, kem_keypair) = umbra::node::load_or_generate_keypair(&data_dir)?;
 
-    let config = spectra::node::NodeConfig {
+    let config = umbra::node::NodeConfig {
         listen_addr,
         bootstrap_peers: peers,
         data_dir,
@@ -236,13 +236,13 @@ async fn run_node(
     };
 
     let rpc_addr = config.rpc_addr;
-    let mut node = spectra::node::Node::new(config).await?;
+    let mut node = umbra::node::Node::new(config).await?;
 
-    let rpc_state = spectra::rpc::RpcState {
+    let rpc_state = umbra::rpc::RpcState {
         node: node.state(),
         p2p: node.p2p_handle(),
     };
-    tokio::spawn(spectra::rpc::serve(rpc_addr, rpc_state));
+    tokio::spawn(umbra::rpc::serve(rpc_addr, rpc_state));
 
     let shutdown = CancellationToken::new();
     let shutdown_signal = shutdown.clone();
@@ -260,7 +260,7 @@ async fn run_wallet_command(
     data_dir: &std::path::Path,
     rpc_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use spectra::wallet_cli;
+    use umbra::wallet_cli;
 
     match action {
         WalletAction::Init => wallet_cli::cmd_init_with_recovery(data_dir),
@@ -282,23 +282,23 @@ async fn run_wallet_command(
         WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
         WalletAction::Web { host, port } => {
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
-            spectra::wallet_web::serve(addr, data_dir.to_path_buf(), rpc_addr).await
+            umbra::wallet_web::serve(addr, data_dir.to_path_buf(), rpc_addr).await
         }
     }
 }
 
 /// Run the original protocol demonstration.
 fn run_demo() {
-    use spectra::consensus::bft::{select_committee, Validator};
-    use spectra::consensus::dag::{Dag, Vertex, VertexId};
-    use spectra::crypto::commitment::BlindingFactor;
-    use spectra::crypto::keys::{Signature, SigningKeypair};
-    use spectra::crypto::vrf::EpochSeed;
-    use spectra::state::ChainState;
-    use spectra::transaction::builder::{InputSpec, TransactionBuilder};
-    use spectra::wallet::Wallet;
+    use umbra::consensus::bft::{select_committee, Validator};
+    use umbra::consensus::dag::{Dag, Vertex, VertexId};
+    use umbra::crypto::commitment::BlindingFactor;
+    use umbra::crypto::keys::{Signature, SigningKeypair};
+    use umbra::crypto::vrf::EpochSeed;
+    use umbra::state::ChainState;
+    use umbra::transaction::builder::{InputSpec, TransactionBuilder};
+    use umbra::wallet::Wallet;
 
-    println!("=== SPECTRA: Post-Quantum Private Cryptocurrency ===\n");
+    println!("=== UMBRA: Post-Quantum Private Cryptocurrency ===\n");
 
     // ────────────────────────────────────────────────────────
     // 1. KEY GENERATION (Post-Quantum)
@@ -335,7 +335,7 @@ fn run_demo() {
     println!("    Generating zk-STARK proofs (balance + spend)...");
 
     let coinbase_blind = BlindingFactor::random();
-    let coinbase_auth = spectra::hash_domain(b"coinbase", b"genesis-auth");
+    let coinbase_auth = umbra::hash_domain(b"coinbase", b"genesis-auth");
 
     let funding_tx = TransactionBuilder::new()
         .add_input(InputSpec {
@@ -475,7 +475,7 @@ fn run_demo() {
     let committee = select_committee(
         &epoch_seed,
         &validator_pairs,
-        spectra::constants::COMMITTEE_SIZE,
+        umbra::constants::COMMITTEE_SIZE,
     );
     println!(
         "\n    Epoch 0 committee selected via VRF: {} members",
@@ -497,7 +497,7 @@ fn run_demo() {
     println!("\n    Genesis vertex: {}", hex::encode(&genesis_id.0[..16]));
 
     // Add vertices with our transaction
-    let v1_id = VertexId(spectra::hash_domain(b"demo.vertex", b"v1"));
+    let v1_id = VertexId(umbra::hash_domain(b"demo.vertex", b"v1"));
     let v1 = Vertex {
         id: v1_id,
         parents: vec![genesis_id],
@@ -512,13 +512,13 @@ fn run_demo() {
         state_root: [0u8; 32],
         signature: Signature::empty(),
         vrf_proof: None,
-        protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
+        protocol_version: umbra::constants::PROTOCOL_VERSION_ID,
     };
     dag.insert_unchecked(v1).unwrap();
     dag.finalize(&v1_id);
 
     // Parallel vertex (different validator, same parent)
-    let v2_id = VertexId(spectra::hash_domain(b"demo.vertex", b"v2"));
+    let v2_id = VertexId(umbra::hash_domain(b"demo.vertex", b"v2"));
     let v2 = Vertex {
         id: v2_id,
         parents: vec![genesis_id],
@@ -533,13 +533,13 @@ fn run_demo() {
         state_root: [0u8; 32],
         signature: Signature::empty(),
         vrf_proof: None,
-        protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
+        protocol_version: umbra::constants::PROTOCOL_VERSION_ID,
     };
     dag.insert_unchecked(v2).unwrap();
     dag.finalize(&v2_id);
 
     // Diamond merge: v3 references both v1 and v2
-    let v3_id = VertexId(spectra::hash_domain(b"demo.vertex", b"v3"));
+    let v3_id = VertexId(umbra::hash_domain(b"demo.vertex", b"v3"));
     let v3 = Vertex {
         id: v3_id,
         parents: vec![v1_id, v2_id],
@@ -554,7 +554,7 @@ fn run_demo() {
         state_root: [0u8; 32],
         signature: Signature::empty(),
         vrf_proof: None,
-        protocol_version: spectra::constants::PROTOCOL_VERSION_ID,
+        protocol_version: umbra::constants::PROTOCOL_VERSION_ID,
     };
     dag.insert_unchecked(v3).unwrap();
     dag.finalize(&v3_id);
@@ -606,7 +606,7 @@ fn run_demo() {
     // 7. SUMMARY
     // ────────────────────────────────────────────────────────
     println!("\n========================================");
-    println!("             SPECTRA SUMMARY            ");
+    println!("             UMBRA SUMMARY            ");
     println!("========================================");
     println!();
     println!("  Privacy (Full Zero-Knowledge):");

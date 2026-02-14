@@ -144,7 +144,7 @@ impl SigningPublicKey {
 
     /// Derive a compact fingerprint (BLAKE3 hash of the public key).
     pub fn fingerprint(&self) -> Hash {
-        crate::hash_domain(b"spectra.signing.fingerprint", &self.0)
+        crate::hash_domain(b"umbra.signing.fingerprint", &self.0)
     }
 
     /// Check if this public key has the correct size.
@@ -290,7 +290,7 @@ impl KemPublicKey {
 
     /// Derive a compact fingerprint (BLAKE3 hash of the public key).
     pub fn fingerprint(&self) -> Hash {
-        crate::hash_domain(b"spectra.kem.fingerprint", &self.0)
+        crate::hash_domain(b"umbra.kem.fingerprint", &self.0)
     }
 
     /// Check if this public key has the correct size.
@@ -322,7 +322,7 @@ impl<'de> Deserialize<'de> for KemPublicKey {
 
 // ── Full Identity ──
 
-/// A complete Spectra identity: signing key + KEM key.
+/// A complete Umbra identity: signing key + KEM key.
 /// The signing key authorizes spends; the KEM key receives encrypted data.
 #[derive(Clone)]
 pub struct FullKeypair {
@@ -330,7 +330,7 @@ pub struct FullKeypair {
     pub kem: KemKeypair,
 }
 
-/// The public half of a Spectra identity, used as an address.
+/// The public half of a Umbra identity, used as an address.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicAddress {
     pub signing: SigningPublicKey,
@@ -361,7 +361,7 @@ impl PublicAddress {
         let mut combined = Vec::with_capacity(self.signing.0.len() + self.kem.0.len());
         combined.extend_from_slice(&self.signing.0);
         combined.extend_from_slice(&self.kem.0);
-        crate::hash_domain(b"spectra.address_id", &combined)
+        crate::hash_domain(b"umbra.address_id", &combined)
     }
 }
 
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn sign_and_verify() {
         let kp = SigningKeypair::generate();
-        let msg = b"spectra test message";
+        let msg = b"umbra test message";
         let sig = kp.sign(msg);
         assert!(kp.public.verify(msg, &sig));
         assert!(!kp.public.verify(b"wrong message", &sig));

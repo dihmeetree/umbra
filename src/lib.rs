@@ -1,4 +1,4 @@
-//! # Spectra
+//! # Umbra
 //!
 //! A post-quantum private cryptocurrency with:
 //! - **DAG-BFT consensus** — not PoW, not PoS; instant deterministic finality
@@ -172,7 +172,7 @@ pub mod constants {
 
     /// Compute the chain ID for mainnet.
     pub fn chain_id() -> crate::Hash {
-        crate::hash_domain(b"spectra.chain_id", b"spectra-mainnet-v1")
+        crate::hash_domain(b"umbra.chain_id", b"umbra-mainnet-v1")
     }
 }
 
@@ -182,7 +182,7 @@ pub type Hash = [u8; 32];
 /// Compute a domain-separated BLAKE3 hash.
 ///
 /// L1: Takes `&[u8]` rather than `&str` for ergonomics with `b""` literals.
-/// The domain MUST be valid UTF-8 (all Spectra domains use ASCII).
+/// The domain MUST be valid UTF-8 (all Umbra domains use ASCII).
 /// Panics at runtime if domain is not valid UTF-8 — this is a programming error.
 pub fn hash_domain(domain: &[u8], data: &[u8]) -> Hash {
     let domain_str = std::str::from_utf8(domain).expect("hash_domain: domain must be valid UTF-8");
@@ -210,7 +210,7 @@ pub fn hash_concat(parts: &[&[u8]]) -> Hash {
 /// Uses the `subtle` crate's audited constant-time operations.
 ///
 /// Note: The length comparison is NOT constant-time (leaks whether lengths match).
-/// This is acceptable because all Spectra uses compare fixed-size 32-byte hashes.
+/// This is acceptable because all Umbra uses compare fixed-size 32-byte hashes.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     if a.len() != b.len() {
@@ -244,15 +244,15 @@ mod tests {
 
     #[test]
     fn hash_domain_deterministic() {
-        let a = hash_domain(b"spectra.test", b"hello");
-        let b = hash_domain(b"spectra.test", b"hello");
+        let a = hash_domain(b"umbra.test", b"hello");
+        let b = hash_domain(b"umbra.test", b"hello");
         assert_eq!(a, b);
     }
 
     #[test]
     fn hash_domain_different_domains() {
-        let a = hash_domain(b"spectra.domain_a", b"data");
-        let b = hash_domain(b"spectra.domain_b", b"data");
+        let a = hash_domain(b"umbra.domain_a", b"data");
+        let b = hash_domain(b"umbra.domain_b", b"data");
         assert_ne!(a, b);
     }
 

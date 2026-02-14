@@ -1,11 +1,11 @@
-//! Transaction builder for constructing valid Spectra transactions.
+//! Transaction builder for constructing valid Umbra transactions.
 //!
 //! Usage:
 //! ```ignore
 //! let tx = TransactionBuilder::new()
 //!     .add_input(input_spec)
 //!     .add_output(recipient_kem_pk, amount)
-//!     .add_message(recipient_kem_pk, "hello from spectra!")
+//!     .add_message(recipient_kem_pk, "hello from umbra!")
 //!     .set_fee(100)
 //!     .build()?;
 //! ```
@@ -454,7 +454,7 @@ mod tests {
             .add_output(recipient.kem.public.clone(), 450)
             .add_message(
                 recipient.kem.public.clone(),
-                b"Hello from Spectra! This is a private message.".to_vec(),
+                b"Hello from Umbra! This is a private message.".to_vec(),
             )
             .set_fee(50)
             .set_proof_options(test_proof_options())
@@ -465,7 +465,7 @@ mod tests {
 
         // Recipient can decrypt the message
         let decrypted = tx.messages[0].payload.decrypt(&recipient.kem).unwrap();
-        assert_eq!(decrypted, b"Hello from Spectra! This is a private message.");
+        assert_eq!(decrypted, b"Hello from Umbra! This is a private message.");
     }
 
     #[test]

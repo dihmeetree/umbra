@@ -1,4 +1,4 @@
-//! zk-STARK proof system for Spectra.
+//! zk-STARK proof system for Umbra.
 //!
 //! Uses the winterfell library with Rescue Prime (Rp64_256) over the Goldilocks
 //! field (p = 2^64 - 2^32 + 1) to provide zero-knowledge proofs with:

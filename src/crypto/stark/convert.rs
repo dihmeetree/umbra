@@ -1,4 +1,4 @@
-//! Conversion utilities between Spectra's `Hash` type and Goldilocks field elements.
+//! Conversion utilities between Umbra's `Hash` type and Goldilocks field elements.
 
 use winterfell::math::fields::f64::BaseElement;
 use winterfell::math::FieldElement;

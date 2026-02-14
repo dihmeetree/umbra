@@ -1,4 +1,4 @@
-//! Transaction model for Spectra.
+//! Transaction model for Umbra.
 //!
 //! Transactions consume inputs (via nullifiers) and produce outputs (via commitments).
 //! All amounts are hidden behind commitments. Recipients are unlinkable via stealth
@@ -91,7 +91,7 @@ pub enum TxType {
     ValidatorDeregister {
         /// ID (fingerprint) of the validator being deregistered.
         validator_id: Hash,
-        /// Signature proving ownership: signs `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`.
+        /// Signature proving ownership: signs `"umbra.validator.deregister" || chain_id || validator_id || tx_content_hash`.
         auth_signature: Signature,
         /// Output that receives the returned bond (added to commitment tree).
         bond_return_output: Box<TxOutput>,
@@ -101,7 +101,7 @@ pub enum TxType {
     },
 }
 
-/// A complete Spectra transaction.
+/// A complete Umbra transaction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     /// Transaction inputs (spent outputs)
@@ -132,7 +132,7 @@ impl Transaction {
     /// different valid proofs changes the tx_id, so nodes and mempools can
     /// distinguish the original from the modified version.
     pub fn tx_id(&self) -> TxId {
-        let mut hasher = blake3::Hasher::new_derive_key("spectra.txid");
+        let mut hasher = blake3::Hasher::new_derive_key("umbra.txid");
         // Hash all inputs (nullifiers, proof_links, and spend proof bytes)
         for input in &self.inputs {
             hasher.update(&input.nullifier.0);
@@ -392,7 +392,7 @@ pub fn compute_tx_content_hash(
     expiry_epoch: u64,
     tx_type: &TxType,
 ) -> Hash {
-    let mut hasher = blake3::Hasher::new_derive_key("spectra.tx_content_hash");
+    let mut hasher = blake3::Hasher::new_derive_key("umbra.tx_content_hash");
     // Chain binding
     hasher.update(chain_id);
     hasher.update(&expiry_epoch.to_le_bytes());
@@ -463,10 +463,10 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
 
 /// Compute the deregistration auth sign data.
 ///
-/// The validator signs: `"spectra.validator.deregister" || chain_id || validator_id || tx_content_hash`
+/// The validator signs: `"umbra.validator.deregister" || chain_id || validator_id || tx_content_hash`
 pub fn deregister_sign_data(chain_id: &Hash, validator_id: &Hash, tx_content_hash: &Hash) -> Hash {
     crate::hash_concat(&[
-        b"spectra.validator.deregister",
+        b"umbra.validator.deregister",
         chain_id,
         validator_id,
         tx_content_hash,
