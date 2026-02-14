@@ -103,6 +103,27 @@ pub enum Message {
         has_more: bool,
         total_finalized: u64,
     },
+
+    // ── Snapshot Sync ──
+    /// Request a state snapshot manifest from a peer.
+    GetSnapshot,
+
+    /// Response with snapshot manifest describing the available state snapshot.
+    SnapshotManifest {
+        meta: crate::storage::ChainStateMeta,
+        total_chunks: u32,
+        snapshot_size: u64,
+    },
+
+    /// Request a specific chunk of the snapshot.
+    GetSnapshotChunk { chunk_index: u32 },
+
+    /// Response with a snapshot chunk (raw bytes of serialized SnapshotData).
+    SnapshotChunk {
+        chunk_index: u32,
+        total_chunks: u32,
+        data: Vec<u8>,
+    },
 }
 
 /// Information about a known peer.
@@ -288,6 +309,81 @@ mod tests {
         let bytes = encode_message(&msg).unwrap();
         let decoded = decode_message(&bytes).unwrap();
         assert!(matches!(decoded, Message::GetPeers));
+    }
+
+    #[test]
+    fn snapshot_messages_roundtrip() {
+        // GetSnapshot
+        let msg = Message::GetSnapshot;
+        let bytes = encode_message(&msg).unwrap();
+        assert!(matches!(
+            decode_message(&bytes).unwrap(),
+            Message::GetSnapshot
+        ));
+
+        // SnapshotManifest
+        let meta = crate::storage::ChainStateMeta {
+            epoch: 5,
+            last_finalized: None,
+            state_root: [1u8; 32],
+            commitment_root: [2u8; 32],
+            commitment_count: 100,
+            nullifier_count: 50,
+            nullifier_hash: [3u8; 32],
+            epoch_fees: 0,
+            validator_count: 10,
+            epoch_seed: [4u8; 32],
+            finalized_count: 42,
+            total_minted: 500_000,
+        };
+        let msg = Message::SnapshotManifest {
+            meta,
+            total_chunks: 3,
+            snapshot_size: 12_000_000,
+        };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::SnapshotManifest {
+                meta: m,
+                total_chunks,
+                snapshot_size,
+            } => {
+                assert_eq!(m.epoch, 5);
+                assert_eq!(m.finalized_count, 42);
+                assert_eq!(total_chunks, 3);
+                assert_eq!(snapshot_size, 12_000_000);
+            }
+            _ => panic!("wrong message type"),
+        }
+
+        // GetSnapshotChunk
+        let msg = Message::GetSnapshotChunk { chunk_index: 2 };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::GetSnapshotChunk { chunk_index } => assert_eq!(chunk_index, 2),
+            _ => panic!("wrong message type"),
+        }
+
+        // SnapshotChunk
+        let msg = Message::SnapshotChunk {
+            chunk_index: 1,
+            total_chunks: 3,
+            data: vec![0xAB; 100],
+        };
+        let bytes = encode_message(&msg).unwrap();
+        match decode_message(&bytes).unwrap() {
+            Message::SnapshotChunk {
+                chunk_index,
+                total_chunks,
+                data,
+            } => {
+                assert_eq!(chunk_index, 1);
+                assert_eq!(total_chunks, 3);
+                assert_eq!(data.len(), 100);
+                assert_eq!(data[0], 0xAB);
+            }
+            _ => panic!("wrong message type"),
+        }
     }
 
     #[test]

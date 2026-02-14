@@ -32,18 +32,9 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    env:
-      # Use system RocksDB library instead of compiling from source
-      ROCKSDB_LIB_DIR: /usr/lib/x86_64-linux-gnu
     steps:
       # Checkout the repository code
       - uses: actions/checkout@v4
-
-      # Install RocksDB dependencies for faster builds
-      - name: Install RocksDB dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y librocksdb-dev libclang-dev
 
       # Install the latest stable Rust toolchain
       - name: Install Rust

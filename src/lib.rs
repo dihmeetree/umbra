@@ -97,6 +97,14 @@ pub mod constants {
     /// Cooldown in milliseconds before retrying a failed sync peer.
     pub const SYNC_PEER_COOLDOWN_MS: u64 = 60_000;
 
+    /// Chunk size for snapshot transfer (4 MiB per chunk).
+    /// Must be less than MAX_NETWORK_MESSAGE_BYTES minus serialization overhead.
+    pub const SNAPSHOT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+    /// Minimum finalized vertex gap before preferring snapshot sync over vertex sync.
+    pub const SNAPSHOT_SYNC_THRESHOLD: u64 = 500;
+    /// TTL for cached serialized snapshot on the serving node (seconds).
+    pub const SNAPSHOT_CACHE_TTL_SECS: u64 = 120;
+
     /// View change timeout: if no finalization within this many proposal
     /// intervals, broadcast GetTips to discover missing state.
     pub const VIEW_CHANGE_TIMEOUT_INTERVALS: u64 = 10;
@@ -246,6 +254,18 @@ pub fn deserialize<T: serde::de::DeserializeOwned>(
     if bytes.len() > constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err(bincode::error::DecodeError::LimitExceeded);
     }
+    let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
+    Ok(val)
+}
+
+/// Deserialize a reassembled snapshot blob.
+///
+/// Unlike `deserialize`, this does NOT enforce `MAX_NETWORK_MESSAGE_BYTES`
+/// since a snapshot is assembled locally from multiple network chunks and
+/// may legitimately exceed the per-message limit.
+pub fn deserialize_snapshot<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, bincode::error::DecodeError> {
     let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
     Ok(val)
 }

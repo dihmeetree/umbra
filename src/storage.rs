@@ -80,6 +80,9 @@ pub trait Storage {
         index: usize,
     ) -> Result<Option<Hash>, StorageError>;
 
+    /// Retrieve all stored commitment tree level nodes.
+    fn get_all_commitment_levels(&self) -> Result<Vec<(usize, usize, Hash)>, StorageError>;
+
     fn put_finalized_vertex_index(
         &self,
         sequence: u64,
@@ -106,6 +109,12 @@ pub trait Storage {
     fn get_coinbase_output(&self, sequence: u64) -> Result<Option<TxOutput>, StorageError>;
 
     fn flush(&self) -> Result<(), StorageError>;
+
+    /// Clear all state-related trees for snapshot import.
+    ///
+    /// Clears: nullifiers, commitment_levels, validators, chain_meta, finalized_index.
+    /// Does NOT clear: vertices, transactions, coinbase_outputs (historical data).
+    fn clear_for_snapshot_import(&self) -> Result<(), StorageError>;
 }
 
 /// Sled-backed storage implementation.
@@ -325,6 +334,32 @@ impl Storage for SledStorage {
         }
     }
 
+    fn get_all_commitment_levels(&self) -> Result<Vec<(usize, usize, Hash)>, StorageError> {
+        let mut results = Vec::new();
+        for entry in self.commitment_levels.iter() {
+            let (key_bytes, value_bytes) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            if key_bytes.len() != 16 {
+                continue;
+            }
+            let level = u64::from_le_bytes(
+                key_bytes[..8]
+                    .try_into()
+                    .map_err(|_| StorageError::Serialization("bad level key".into()))?,
+            ) as usize;
+            let index = u64::from_le_bytes(
+                key_bytes[8..16]
+                    .try_into()
+                    .map_err(|_| StorageError::Serialization("bad index key".into()))?,
+            ) as usize;
+            let hash: Hash = value_bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Serialization("bad hash length".into()))?;
+            results.push((level, index, hash));
+        }
+        Ok(results)
+    }
+
     fn put_finalized_vertex_index(
         &self,
         sequence: u64,
@@ -459,6 +494,27 @@ impl Storage for SledStorage {
         self.db
             .flush()
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn clear_for_snapshot_import(&self) -> Result<(), StorageError> {
+        self.nullifiers
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.commitment_levels
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.validators
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.chain_meta
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.finalized_index
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.finalized_count
+            .store(0, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 }
@@ -841,5 +897,62 @@ mod tests {
         assert_eq!(retrieved.round, 20);
         assert_eq!(retrieved.timestamp, 2000);
         assert_eq!(retrieved.state_root, [1u8; 32]);
+    }
+
+    #[test]
+    fn get_all_commitment_levels_roundtrip() {
+        let storage = temp_storage();
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let h3 = [3u8; 32];
+
+        storage.put_commitment_level(0, 0, &h1).unwrap();
+        storage.put_commitment_level(0, 1, &h2).unwrap();
+        storage.put_commitment_level(1, 0, &h3).unwrap();
+
+        let all = storage.get_all_commitment_levels().unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&(0, 0, h1)));
+        assert!(all.contains(&(0, 1, h2)));
+        assert!(all.contains(&(1, 0, h3)));
+    }
+
+    #[test]
+    fn clear_for_snapshot_import_clears_trees() {
+        let storage = temp_storage();
+
+        // Populate data
+        storage.put_nullifier(&Nullifier([1u8; 32])).unwrap();
+        storage.put_commitment_level(0, 0, &[2u8; 32]).unwrap();
+        let kp = SigningKeypair::generate();
+        let v = crate::consensus::bft::Validator::new(kp.public);
+        storage.put_validator(&v, 1_000_000, false).unwrap();
+        let meta = ChainStateMeta {
+            epoch: 1,
+            last_finalized: None,
+            state_root: [0u8; 32],
+            commitment_root: [0u8; 32],
+            commitment_count: 0,
+            nullifier_count: 0,
+            nullifier_hash: [0u8; 32],
+            epoch_fees: 0,
+            validator_count: 0,
+            epoch_seed: [0u8; 32],
+            finalized_count: 0,
+            total_minted: 0,
+        };
+        storage.put_chain_state_meta(&meta).unwrap();
+        let vid = VertexId([3u8; 32]);
+        storage.put_finalized_vertex_index(0, &vid).unwrap();
+
+        // Clear
+        storage.clear_for_snapshot_import().unwrap();
+
+        // Everything should be empty
+        assert!(storage.get_all_nullifiers().unwrap().is_empty());
+        assert!(storage.get_all_commitment_levels().unwrap().is_empty());
+        assert!(storage.get_all_validators().unwrap().is_empty());
+        assert!(storage.get_chain_state_meta().unwrap().is_none());
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
     }
 }

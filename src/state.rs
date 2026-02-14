@@ -22,9 +22,81 @@ use crate::crypto::stark::convert::hash_to_felts;
 use crate::crypto::stark::types::SpendPublicInputs;
 use crate::crypto::stealth::StealthAddress;
 use crate::crypto::vrf::EpochSeed;
-use crate::storage::{ChainStateMeta, Storage};
+use crate::storage::{ChainStateMeta, Storage, ValidatorRecord};
 use crate::transaction::{deregister_sign_data, Transaction, TxOutput, TxType};
 use crate::Hash;
+
+/// Complete state snapshot for fast node bootstrap.
+///
+/// Contains all data needed to reconstruct `ChainState` without replaying
+/// finalized vertices. The receiver writes this data to local storage and
+/// calls `Ledger::restore_from_storage()`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotData {
+    /// Compact metadata (epoch, roots, counts, hashes).
+    pub meta: ChainStateMeta,
+    /// All registered validators with bond and slashed status.
+    pub validators: Vec<ValidatorRecord>,
+    /// Full commitment Merkle tree nodes: (level, index, hash).
+    pub commitment_levels: Vec<(usize, usize, Hash)>,
+    /// All revealed nullifier hashes.
+    pub nullifiers: Vec<Hash>,
+}
+
+/// Import a `SnapshotData` into local storage for `Ledger::restore_from_storage()`.
+///
+/// Clears existing state data, writes snapshot components, and returns the
+/// `ChainStateMeta` needed to restore the ledger.
+///
+/// # Verification
+///
+/// `Ledger::restore_from_storage()` will verify:
+/// - Commitment tree root matches `meta.commitment_root`
+/// - Nullifier count matches `meta.nullifier_count`
+///
+/// The caller should additionally verify `state_root()` after restore.
+pub fn import_snapshot_to_storage(
+    storage: &dyn Storage,
+    snapshot: &SnapshotData,
+) -> Result<ChainStateMeta, StateError> {
+    // 1. Clear existing state data
+    storage
+        .clear_for_snapshot_import()
+        .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+    // 2. Write commitment levels
+    for &(level, index, ref hash) in &snapshot.commitment_levels {
+        storage
+            .put_commitment_level(level, index, hash)
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+    }
+
+    // 3. Write nullifiers
+    for hash in &snapshot.nullifiers {
+        storage
+            .put_nullifier(&Nullifier(*hash))
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+    }
+
+    // 4. Write validators
+    for record in &snapshot.validators {
+        storage
+            .put_validator(&record.validator, record.bond, record.slashed)
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+    }
+
+    // 5. Write chain state meta
+    storage
+        .put_chain_state_meta(&snapshot.meta)
+        .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+    // 6. Flush to disk
+    storage
+        .flush()
+        .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+    Ok(snapshot.meta.clone())
+}
 
 /// The full blockchain state.
 ///
@@ -741,6 +813,40 @@ impl ChainState {
         }
     }
 
+    /// Create a full state snapshot for transfer to a bootstrapping node.
+    ///
+    /// Collects all state components (metadata, validators, commitment tree
+    /// nodes, nullifiers) into a single serializable structure.
+    pub fn to_snapshot_data(
+        &self,
+        storage: &dyn Storage,
+        finalized_count: u64,
+    ) -> Result<SnapshotData, StateError> {
+        let meta = self.to_chain_state_meta(finalized_count);
+
+        let validators = storage
+            .get_all_validators()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+        let commitment_levels = storage
+            .get_all_commitment_levels()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+        let nullifiers: Vec<Hash> = storage
+            .get_all_nullifiers()
+            .map_err(|e| StateError::StorageError(e.to_string()))?
+            .into_iter()
+            .map(|n| n.0)
+            .collect();
+
+        Ok(SnapshotData {
+            meta,
+            validators,
+            commitment_levels,
+            nullifiers,
+        })
+    }
+
     /// Get a commitment tree node hash (for incremental persistence).
     pub fn commitment_tree_node(&self, level: usize, index: usize) -> Hash {
         self.commitment_tree.get_node_public(level, index)
@@ -1046,6 +1152,17 @@ impl Ledger {
         let id = vertex.id;
         self.insert_vertex(vertex)?;
         self.finalize_vertex_unchecked(&id)
+    }
+
+    /// Apply a vertex directly to state without DAG insertion.
+    ///
+    /// Used during post-snapshot catch-up sync where the DAG does not have
+    /// the vertex's parents (they were part of the snapshot, not replayed).
+    pub fn apply_vertex_state_only(
+        &mut self,
+        vertex: &Vertex,
+    ) -> Result<Option<TxOutput>, StateError> {
+        self.state.apply_vertex(vertex)
     }
 
     /// Restore a ledger from persistent storage.
@@ -2233,5 +2350,82 @@ mod tests {
             "slashed validator re-registration should fail, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn snapshot_data_export_import_roundtrip() {
+        use crate::storage::SledStorage;
+
+        // Build state with some data
+        let storage1 = SledStorage::open_temporary().unwrap();
+        let mut state = ChainState::new();
+
+        // Add commitments
+        for i in 0..5u64 {
+            let blind = BlindingFactor::from_bytes([i as u8 + 1; 32]);
+            state
+                .add_commitment(Commitment::commit(i * 100 + 1, &blind))
+                .unwrap();
+        }
+
+        // Add nullifiers
+        let n1 = Nullifier::derive(&[10u8; 32], &[20u8; 32]);
+        let n2 = Nullifier::derive(&[30u8; 32], &[40u8; 32]);
+        state.mark_nullifier(n1).unwrap();
+        state.mark_nullifier(n2).unwrap();
+
+        // Add a validator
+        let kp = SigningKeypair::generate();
+        let validator = Validator::new(kp.public.clone());
+        state.register_genesis_validator(validator.clone());
+
+        // Persist to source storage
+        let depth = crate::crypto::stark::spend_air::MERKLE_DEPTH;
+        for level in 0..=depth {
+            for idx in 0..state.commitment_tree_level_len(level) {
+                let hash = state.commitment_tree_node(level, idx);
+                storage1.put_commitment_level(level, idx, &hash).unwrap();
+            }
+        }
+        storage1.put_nullifier(&n1).unwrap();
+        storage1.put_nullifier(&n2).unwrap();
+        let bond = state
+            .validator_bonds
+            .get(&validator.id)
+            .copied()
+            .unwrap_or(0);
+        storage1.put_validator(&validator, bond, false).unwrap();
+
+        let original_root = state.state_root();
+        let original_commitment_root = state.commitment_root();
+
+        // Export snapshot
+        let snapshot = state.to_snapshot_data(&storage1, 42).unwrap();
+        assert_eq!(snapshot.meta.commitment_count, 5);
+        assert_eq!(snapshot.meta.nullifier_count, 2);
+        assert_eq!(snapshot.meta.finalized_count, 42);
+
+        // Simulate network transfer: serialize + deserialize
+        let bytes = crate::serialize(&snapshot).unwrap();
+        let received: SnapshotData = crate::deserialize_snapshot(&bytes).unwrap();
+
+        // Import into fresh storage
+        let storage2 = SledStorage::open_temporary().unwrap();
+        let meta = import_snapshot_to_storage(&storage2, &received).unwrap();
+
+        assert_eq!(meta.epoch, 0);
+        assert_eq!(meta.commitment_count, 5);
+        assert_eq!(meta.nullifier_count, 2);
+        assert_eq!(meta.state_root, original_root);
+        assert_eq!(meta.commitment_root, original_commitment_root);
+
+        // Restore from imported storage and verify
+        let restored = ChainState::restore_from_storage(&storage2, &meta).unwrap();
+        assert_eq!(restored.commitment_root(), original_commitment_root);
+        assert_eq!(restored.state_root(), original_root);
+        assert_eq!(restored.nullifier_count(), 2);
+        assert!(restored.is_spent(&n1));
+        assert!(restored.is_spent(&n2));
+        assert!(restored.is_active_validator(&validator.id));
     }
 }

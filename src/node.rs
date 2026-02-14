@@ -55,6 +55,16 @@ pub struct NodeState {
 enum SyncState {
     /// Haven't started sync yet — waiting for a peer to query.
     NeedSync { our_finalized: u64 },
+    /// Downloading a state snapshot from a peer.
+    SyncingSnapshot {
+        peer: crate::network::PeerId,
+        total_chunks: u32,
+        received_chunks: Vec<Option<Vec<u8>>>,
+        #[allow(dead_code)]
+        snapshot_size: u64,
+        meta: Box<crate::storage::ChainStateMeta>,
+        last_activity: Instant,
+    },
     /// Actively syncing vertices from a peer.
     Syncing {
         peer: crate::network::PeerId,
@@ -65,6 +75,9 @@ enum SyncState {
         target_epoch: u64,
         /// When we last received a sync response (for timeout detection).
         last_activity: Instant,
+        /// When true, use state-only vertex application (DAG parents unavailable
+        /// because they were part of a snapshot, not replayed).
+        post_snapshot: bool,
     },
     /// Fully synced with the network.
     Synced,
@@ -93,6 +106,9 @@ pub struct Node {
     seen_messages_prev: HashSet<Hash>,
     /// Counter for sync batch rounds (reset on new sync peer).
     sync_rounds: u64,
+    /// Cached serialized snapshot for serving to peers:
+    /// (bytes, total_chunks, meta, created_at).
+    snapshot_cache: Option<(Vec<u8>, u32, crate::storage::ChainStateMeta, Instant)>,
 }
 
 /// Node configuration.
@@ -416,6 +432,7 @@ impl Node {
             seen_messages_current: HashSet::new(),
             seen_messages_prev: HashSet::new(),
             sync_rounds: 0,
+            snapshot_cache: None,
         })
     }
 
@@ -526,13 +543,18 @@ impl Node {
             P2pEvent::PeerDisconnected(peer_id) => {
                 tracing::info!("Peer disconnected: {}", hex::encode(&peer_id[..8]));
                 // If we were syncing from this peer, revert to NeedSync
-                if let SyncState::Syncing { peer, next_seq, .. } = &self.sync_state {
-                    if *peer == peer_id {
+                match &self.sync_state {
+                    SyncState::Syncing { peer, next_seq, .. } if *peer == peer_id => {
                         tracing::warn!("Sync peer disconnected, will retry with next peer");
                         self.sync_state = SyncState::NeedSync {
                             our_finalized: *next_seq,
                         };
                     }
+                    SyncState::SyncingSnapshot { peer, .. } if *peer == peer_id => {
+                        tracing::warn!("Snapshot sync peer disconnected, will retry");
+                        self.sync_state = SyncState::NeedSync { our_finalized: 0 };
+                    }
+                    _ => {}
                 }
             }
         }
@@ -847,37 +869,55 @@ impl Node {
 
                     // Use nullifier count as a rough proxy for how far ahead the peer is
                     if nullifier_count > our_nullifiers || our_finalized == 0 {
-                        tracing::info!(
-                            "Starting sync from peer {} (our finalized: {}, peer nullifiers: {})",
-                            hex::encode(&from[..8]),
-                            our_finalized,
-                            nullifier_count,
-                        );
-                        // Start requesting finalized vertices
-                        let start_after = if our_finalized > 0 {
-                            our_finalized - 1
+                        let gap = nullifier_count.saturating_sub(our_nullifiers);
+                        let use_snapshot =
+                            our_finalized == 0 || gap > crate::constants::SNAPSHOT_SYNC_THRESHOLD;
+
+                        if use_snapshot {
+                            // Large gap or fresh node: try snapshot sync first
+                            tracing::info!(
+                                "Requesting snapshot from peer {} (our finalized: {}, gap: {})",
+                                hex::encode(&from[..8]),
+                                our_finalized,
+                                gap,
+                            );
+                            let _ = self.p2p.send_to(from, Message::GetSnapshot).await;
+                            // Stay in NeedSync until SnapshotManifest arrives.
+                            // If peer doesn't support snapshots, we'll retry
+                            // on the next EpochStateResponse.
                         } else {
-                            u64::MAX // sentinel: storage treats u64::MAX as "start from seq 0"
-                        };
-                        // Fix 7: Reset sync round counter for new peer
-                        self.sync_rounds = 0;
-                        self.sync_state = SyncState::Syncing {
-                            peer: from,
-                            next_seq: start_after,
-                            target: 0, // unknown until first response
-                            target_epoch: peer_epoch,
-                            last_activity: Instant::now(),
-                        };
-                        let _ = self
-                            .p2p
-                            .send_to(
-                                from,
-                                Message::GetFinalizedVertices {
-                                    after_sequence: start_after,
-                                    limit: crate::constants::SYNC_BATCH_SIZE,
-                                },
-                            )
-                            .await;
+                            // Small gap: use vertex-by-vertex sync
+                            tracing::info!(
+                                "Starting vertex sync from peer {} (our finalized: {}, gap: {})",
+                                hex::encode(&from[..8]),
+                                our_finalized,
+                                gap,
+                            );
+                            let start_after = if our_finalized > 0 {
+                                our_finalized - 1
+                            } else {
+                                u64::MAX
+                            };
+                            self.sync_rounds = 0;
+                            self.sync_state = SyncState::Syncing {
+                                peer: from,
+                                next_seq: start_after,
+                                target: 0,
+                                target_epoch: peer_epoch,
+                                last_activity: Instant::now(),
+                                post_snapshot: false,
+                            };
+                            let _ = self
+                                .p2p
+                                .send_to(
+                                    from,
+                                    Message::GetFinalizedVertices {
+                                        after_sequence: start_after,
+                                        limit: crate::constants::SYNC_BATCH_SIZE,
+                                    },
+                                )
+                                .await;
+                        }
                     } else {
                         tracing::info!("Already synced with network");
                         self.sync_state = SyncState::Synced;
@@ -890,13 +930,17 @@ impl Node {
                 total_finalized,
             } => {
                 if let SyncState::Syncing {
-                    peer, target_epoch, ..
+                    peer,
+                    target_epoch,
+                    post_snapshot,
+                    ..
                 } = &self.sync_state
                 {
                     if from != *peer {
                         return; // Ignore responses from unexpected peers
                     }
                     let target_epoch = *target_epoch;
+                    let post_snapshot = *post_snapshot;
 
                     // Fix 7: Verify total_finalized is within reasonable bounds
                     let our_finalized_count = {
@@ -956,9 +1000,14 @@ impl Node {
                         // Record commitment count for incremental persistence
                         let old_cc = state.ledger.state.commitment_count();
 
-                        // Fix 1: Apply vertex via validated path (insert_vertex validates
-                        // structure + signature, then finalize applies to state).
-                        match state.ledger.apply_finalized_vertex(*vertex.clone()) {
+                        // Apply vertex: either through DAG (normal) or state-only
+                        // (post-snapshot, where DAG parents are unavailable).
+                        let result = if post_snapshot {
+                            state.ledger.apply_vertex_state_only(&vertex)
+                        } else {
+                            state.ledger.apply_finalized_vertex(*vertex.clone())
+                        };
+                        match result {
                             Ok(coinbase) => {
                                 applied += 1;
 
@@ -1041,6 +1090,7 @@ impl Node {
                             target: total_finalized,
                             target_epoch,
                             last_activity: Instant::now(),
+                            post_snapshot,
                         };
                         let _ = self
                             .p2p
@@ -1057,18 +1107,29 @@ impl Node {
                         // so that new proposals start at the correct round.
                         {
                             let mut state = self.state.write().await;
-                            let highest_round = state
-                                .ledger
-                                .dag
-                                .finalized_order()
-                                .iter()
-                                .filter_map(|vid| state.ledger.dag.get(vid))
-                                .map(|v| v.round)
-                                .max()
-                                .unwrap_or(0);
-                            while state.bft.round <= highest_round {
-                                state.bft.advance_round();
-                                state.ledger.dag.advance_round();
+                            if post_snapshot {
+                                // After snapshot sync, the DAG is empty (genesis only).
+                                // Advance based on epoch from state.
+                                let target_round =
+                                    state.ledger.state.epoch() * crate::constants::EPOCH_LENGTH + 1;
+                                while state.bft.round < target_round {
+                                    state.bft.advance_round();
+                                    state.ledger.dag.advance_round();
+                                }
+                            } else {
+                                let highest_round = state
+                                    .ledger
+                                    .dag
+                                    .finalized_order()
+                                    .iter()
+                                    .filter_map(|vid| state.ledger.dag.get(vid))
+                                    .map(|v| v.round)
+                                    .max()
+                                    .unwrap_or(0);
+                                while state.bft.round <= highest_round {
+                                    state.bft.advance_round();
+                                    state.ledger.dag.advance_round();
+                                }
                             }
                         }
                         tracing::info!("Sync complete");
@@ -1121,12 +1182,339 @@ impl Node {
                     }
                 }
             }
+            // ── Snapshot Sync ──
+            Message::GetSnapshot => {
+                if let Some((ref bytes, total_chunks, ref meta, ref created)) = self.snapshot_cache
+                {
+                    if created.elapsed()
+                        < std::time::Duration::from_secs(crate::constants::SNAPSHOT_CACHE_TTL_SECS)
+                    {
+                        let _ = self
+                            .p2p
+                            .send_to(
+                                from,
+                                Message::SnapshotManifest {
+                                    meta: meta.clone(),
+                                    total_chunks,
+                                    snapshot_size: bytes.len() as u64,
+                                },
+                            )
+                            .await;
+                        return;
+                    }
+                }
+                // Build fresh snapshot
+                let (bytes, meta, _fc) = {
+                    let state = self.state.read().await;
+                    let fc = state.storage.finalized_vertex_count().unwrap_or(0);
+                    if fc == 0 {
+                        return; // Nothing to snapshot
+                    }
+                    match state.ledger.state.to_snapshot_data(&state.storage, fc) {
+                        Ok(snap) => {
+                            let meta = snap.meta.clone();
+                            match crate::serialize(&snap) {
+                                Ok(b) => (b, meta, fc),
+                                Err(e) => {
+                                    tracing::warn!("Failed to serialize snapshot: {}", e);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to build snapshot: {}", e);
+                            return;
+                        }
+                    }
+                };
+                let chunk_size = crate::constants::SNAPSHOT_CHUNK_SIZE;
+                let total_chunks = bytes.len().div_ceil(chunk_size) as u32;
+                let snapshot_size = bytes.len() as u64;
+                let _ = self
+                    .p2p
+                    .send_to(
+                        from,
+                        Message::SnapshotManifest {
+                            meta: meta.clone(),
+                            total_chunks,
+                            snapshot_size,
+                        },
+                    )
+                    .await;
+                self.snapshot_cache = Some((bytes, total_chunks, meta, Instant::now()));
+            }
+
+            Message::GetSnapshotChunk { chunk_index } => {
+                if let Some((ref bytes, total_chunks, _, ref created)) = self.snapshot_cache {
+                    let fresh = created.elapsed()
+                        < std::time::Duration::from_secs(crate::constants::SNAPSHOT_CACHE_TTL_SECS);
+                    if fresh && chunk_index < total_chunks {
+                        let chunk_size = crate::constants::SNAPSHOT_CHUNK_SIZE;
+                        let start = chunk_index as usize * chunk_size;
+                        let end = (start + chunk_size).min(bytes.len());
+                        let data = bytes[start..end].to_vec();
+                        let _ = self
+                            .p2p
+                            .send_to(
+                                from,
+                                Message::SnapshotChunk {
+                                    chunk_index,
+                                    total_chunks,
+                                    data,
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
+
+            Message::SnapshotManifest {
+                meta,
+                total_chunks,
+                snapshot_size,
+            } => {
+                if let SyncState::NeedSync { .. } = &self.sync_state {
+                    // Validate: reject absurdly large snapshots (> 1 GiB)
+                    if snapshot_size > 1_073_741_824 {
+                        tracing::warn!(
+                            "Snapshot from {} too large ({} bytes), skipping",
+                            hex::encode(&from[..8]),
+                            snapshot_size,
+                        );
+                        return;
+                    }
+                    if total_chunks == 0 || meta.epoch == 0 {
+                        // Empty or genesis snapshot — fall back to vertex sync
+                        return;
+                    }
+
+                    tracing::info!(
+                        "Received snapshot manifest: epoch={}, finalized={}, {} chunks ({} bytes)",
+                        meta.epoch,
+                        meta.finalized_count,
+                        total_chunks,
+                        snapshot_size,
+                    );
+
+                    self.sync_state = SyncState::SyncingSnapshot {
+                        peer: from,
+                        total_chunks,
+                        received_chunks: vec![None; total_chunks as usize],
+                        snapshot_size,
+                        meta: Box::new(meta),
+                        last_activity: Instant::now(),
+                    };
+
+                    // Request first chunk
+                    let _ = self
+                        .p2p
+                        .send_to(from, Message::GetSnapshotChunk { chunk_index: 0 })
+                        .await;
+                }
+            }
+
+            Message::SnapshotChunk {
+                chunk_index, data, ..
+            } => {
+                self.handle_snapshot_chunk(from, chunk_index, data).await;
+            }
+
             // Response messages that don't need special handling
             Message::TransactionResponse(_)
             | Message::Hello { .. }
             | Message::KeyExchange { .. }
             | Message::AuthResponse { .. } => {}
         }
+    }
+
+    /// Handle a received snapshot chunk.
+    async fn handle_snapshot_chunk(
+        &mut self,
+        from: crate::network::PeerId,
+        chunk_index: u32,
+        data: Vec<u8>,
+    ) {
+        // Validate we're in SyncingSnapshot from the right peer
+        let total_chunks = match &self.sync_state {
+            SyncState::SyncingSnapshot {
+                peer, total_chunks, ..
+            } if *peer == from => *total_chunks,
+            _ => return,
+        };
+
+        if chunk_index >= total_chunks {
+            return;
+        }
+
+        // Store the chunk
+        if let SyncState::SyncingSnapshot {
+            ref mut received_chunks,
+            ref mut last_activity,
+            ..
+        } = &mut self.sync_state
+        {
+            *last_activity = Instant::now();
+            received_chunks[chunk_index as usize] = Some(data);
+        }
+
+        // Check if all chunks received
+        let all_received = if let SyncState::SyncingSnapshot {
+            ref received_chunks,
+            ..
+        } = &self.sync_state
+        {
+            received_chunks.iter().all(|c| c.is_some())
+        } else {
+            false
+        };
+
+        if all_received {
+            self.finalize_snapshot_import().await;
+        } else {
+            // Request next missing chunk
+            if let SyncState::SyncingSnapshot {
+                ref received_chunks,
+                peer,
+                ..
+            } = &self.sync_state
+            {
+                if let Some(next_idx) = received_chunks.iter().position(|c| c.is_none()) {
+                    let peer_id = *peer;
+                    let _ = self
+                        .p2p
+                        .send_to(
+                            peer_id,
+                            Message::GetSnapshotChunk {
+                                chunk_index: next_idx as u32,
+                            },
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// Reassemble received snapshot chunks, deserialize, verify, and import.
+    async fn finalize_snapshot_import(&mut self) {
+        // Extract data from SyncingSnapshot state
+        let (assembled, meta, peer) = if let SyncState::SyncingSnapshot {
+            ref received_chunks,
+            ref meta,
+            peer,
+            ..
+        } = &self.sync_state
+        {
+            let bytes: Vec<u8> = received_chunks
+                .iter()
+                .filter_map(|c| c.as_ref())
+                .flat_map(|c| c.iter().copied())
+                .collect();
+            (bytes, *meta.clone(), *peer)
+        } else {
+            return;
+        };
+
+        tracing::info!(
+            "Snapshot fully received ({} bytes), importing...",
+            assembled.len(),
+        );
+
+        // Deserialize
+        let snapshot: crate::state::SnapshotData = match crate::deserialize_snapshot(&assembled) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to deserialize snapshot: {}", e);
+                self.sync_failed_peers.insert(peer, Instant::now());
+                self.sync_state = SyncState::NeedSync { our_finalized: 0 };
+                return;
+            }
+        };
+
+        // Import into storage
+        {
+            let state = self.state.read().await;
+            if let Err(e) = crate::state::import_snapshot_to_storage(&state.storage, &snapshot) {
+                tracing::error!("Snapshot import failed: {}", e);
+                self.sync_failed_peers.insert(peer, Instant::now());
+                self.sync_state = SyncState::NeedSync { our_finalized: 0 };
+                return;
+            }
+        }
+
+        // Restore ledger from imported snapshot
+        {
+            let mut state = self.state.write().await;
+            match Ledger::restore_from_storage(&state.storage, &meta) {
+                Ok(ledger) => {
+                    state.ledger = ledger;
+
+                    // Set up BFT for the snapshot's epoch
+                    let epoch = state.ledger.state.epoch();
+                    let chain_id = *state.ledger.state.chain_id();
+                    let active_validators: Vec<_> = state
+                        .ledger
+                        .state
+                        .active_validators()
+                        .into_iter()
+                        .cloned()
+                        .collect();
+
+                    state.bft = BftState::new(epoch, active_validators, chain_id);
+                    state.bft.set_our_keypair(self.keypair.clone());
+
+                    let epoch_seed = state.ledger.state.epoch_seed().clone();
+                    let total_validators = state.ledger.state.total_validators();
+                    state.bft.set_epoch_context(epoch_seed, total_validators);
+
+                    // Update mempool epoch
+                    state.mempool.set_epoch(epoch);
+
+                    // Verify state root matches
+                    let computed_root = state.ledger.state.state_root();
+                    if computed_root != meta.state_root {
+                        tracing::error!(
+                            "Snapshot state_root mismatch: computed {} vs claimed {}",
+                            hex::encode(computed_root),
+                            hex::encode(meta.state_root),
+                        );
+                        drop(state);
+                        self.sync_failed_peers.insert(peer, Instant::now());
+                        self.sync_state = SyncState::NeedSync { our_finalized: 0 };
+                        return;
+                    }
+
+                    tracing::info!(
+                        "Snapshot imported: epoch={}, commitments={}, nullifiers={}, finalized={}",
+                        epoch,
+                        meta.commitment_count,
+                        meta.nullifier_count,
+                        meta.finalized_count,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to restore ledger from snapshot: {}", e);
+                    drop(state);
+                    self.sync_failed_peers.insert(peer, Instant::now());
+                    self.sync_state = SyncState::NeedSync { our_finalized: 0 };
+                    return;
+                }
+            }
+        }
+
+        // Refresh VRF output for the new epoch
+        self.refresh_vrf_from_bft().await;
+
+        // Transition to vertex sync to catch up any remaining vertices
+        let finalized_count = meta.finalized_count;
+        tracing::info!(
+            "Snapshot sync complete, resuming vertex sync from seq {}",
+            finalized_count,
+        );
+        self.sync_state = SyncState::NeedSync {
+            our_finalized: finalized_count,
+        };
+        // Broadcast to find peers for remaining sync
+        let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
     }
 
     /// Finalize a vertex and apply its transactions to state.
@@ -1350,6 +1738,28 @@ impl Node {
 
                 self.sync_failed_peers.insert(peer_id, Instant::now());
                 self.sync_state = SyncState::NeedSync { our_finalized: seq };
+                let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
+            }
+        }
+
+        // Snapshot sync timeout
+        if let SyncState::SyncingSnapshot {
+            peer,
+            last_activity,
+            ..
+        } = &self.sync_state
+        {
+            let elapsed = last_activity.elapsed();
+            if elapsed > std::time::Duration::from_millis(crate::constants::SYNC_REQUEST_TIMEOUT_MS)
+            {
+                tracing::warn!(
+                    "Snapshot sync timeout: peer {} unresponsive for {}ms",
+                    hex::encode(&peer[..8]),
+                    elapsed.as_millis()
+                );
+                let peer_id = *peer;
+                self.sync_failed_peers.insert(peer_id, Instant::now());
+                self.sync_state = SyncState::NeedSync { our_finalized: 0 };
                 let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
             }
         }

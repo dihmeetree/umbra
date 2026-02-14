@@ -126,7 +126,7 @@ umbra/
     error.html              Error display
 ```
 
-**~23,000 lines of Rust** across 37 source files with **319 tests**.
+**~23,000 lines of Rust** across 37 source files with **323 tests**.
 
 ## Building
 
@@ -396,6 +396,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 - **Protocol version signaling** — vertices carry a `protocol_version` field; the node tracks version signals per epoch and logs activation when a version exceeds 75% threshold (effective epoch+2)
 - **DAG memory pruning** — on epoch transition, finalized vertices older than `PRUNING_RETAIN_EPOCHS` are pruned from in-memory maps (retained in sled for sync)
 - **State sync with timeout/retry** — new nodes joining the network request finalized vertices in batches from peers via `GetFinalizedVertices` / `FinalizedVerticesResponse` messages. A three-state machine (`NeedSync → Syncing → Synced`) tracks sync progress. Unresponsive peers are timed out after `SYNC_REQUEST_TIMEOUT_MS` and placed on cooldown before retrying with another peer
+- **Snapshot sync** — nodes far behind (or joining for the first time) download a compact state snapshot instead of replaying every vertex from genesis. The snapshot includes validators, commitment tree, and nullifiers, transferred in 4 MiB chunks. After import, the node verifies the state root and catches up remaining vertices via incremental sync
 - **Fork resolution** — if no vertex is finalized for `VIEW_CHANGE_TIMEOUT_INTERVALS` proposal ticks or peers report rounds more than `MAX_ROUND_LAG` ahead, the node broadcasts `GetTips` and `GetEpochState` to discover and fetch missing vertices
 - **Mempool expiry eviction** — expired transactions are periodically evicted from the mempool (every ~50 seconds and on epoch transitions)
 - Shared state via `Arc<RwLock<NodeState>>` (ledger + mempool + storage + BFT state)
@@ -407,7 +408,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 319 tests cover:
+All 323 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -419,7 +420,7 @@ All 319 tests cover:
 - **VRF** — evaluation, verification, committee selection statistics, Dilithium5 signing determinism
 - **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices; validation of too many parents, too many transactions, duplicate parents, no parents on non-genesis, too many unfinalized (DoS limit); finalized order excludes non-finalized vertices; finalize unknown vertex returns false; safe indexing after pruning (regression)
 - **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state
-- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses
+- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses, snapshot sync messages (manifest, chunks)
 - **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
 - **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
 - **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found, not-found, invalid hex, wrong length), /vertices/finalized, /peers; POST /tx (valid submission, invalid hex, valid hex with invalid bincode, duplicate submission, oversized payload); full submit-and-retrieve roundtrip
@@ -427,11 +428,11 @@ All 319 tests cover:
 - **Wallet CLI** — init with recovery phrase (creates wallet + backup files), recover from mnemonic + backup, history display, address display, export creates valid address file, messages on empty wallet
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
 - **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty, single-tx edge case, populated pools); byte-limit eviction with total_bytes tracking, fee boundary rejection (equal fee rejected), drain cleans nullifier index, epoch-based expiry on insert, total_bytes accuracy across insert/remove/drain
-- **Storage** — vertex/transaction/nullifier/validator/coinbase persistence and roundtrips, not-found returns None, vertex overwrite, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval
+- **Storage** — vertex/transaction/nullifier/validator/coinbase persistence and roundtrips, not-found returns None, vertex overwrite, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval, commitment level bulk retrieval, snapshot import tree clearing
 - **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled; apply_vertex (basic state transition, too many transactions, intra-vertex duplicate nullifier, epoch fee accumulation regression); validate_transaction (wrong chain_id, double spend, already registered); record_nullifier Result return type (regression); coinbase output creation (with and without KEM key); eligible_validators activation epoch filtering
 - **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; MAC verification failure on corrupted frames; counter replay rejection; self-connection detection
 - **Node** — persistent signing + KEM keypair load/save roundtrip
-- **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage
+- **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage, snapshot export/import roundtrip with state root verification
 
 ## Network Simulator
 
@@ -575,6 +576,9 @@ Proves in zero knowledge:
 | `SYNC_BATCH_SIZE` | 100 | Finalized vertices per sync request batch |
 | `SYNC_REQUEST_TIMEOUT_MS` | 30,000 | Timeout for sync requests |
 | `SYNC_PEER_COOLDOWN_MS` | 60,000 | Cooldown before retrying a failed sync peer |
+| `SNAPSHOT_CHUNK_SIZE` | 4 MiB | Chunk size for snapshot transfer |
+| `SNAPSHOT_SYNC_THRESHOLD` | 500 | Minimum gap before preferring snapshot sync |
+| `SNAPSHOT_CACHE_TTL_SECS` | 120 | TTL for cached snapshot on serving node |
 | `PEER_MSG_RATE_LIMIT` | 100.0 | Per-peer message rate limit (msgs/sec refill) |
 | `PEER_MSG_BURST` | 200.0 | Per-peer max burst messages |
 | `PEER_RATE_LIMIT_STRIKES` | 5 | Rate violations before disconnecting peer |
@@ -736,13 +740,14 @@ All transaction validity is verified via zk-STARKs:
 - **VRF determinism verification** — node startup asserts Dilithium5 signing determinism at runtime, preventing silent VRF correctness failures from non-deterministic implementations
 - **Recovery backup nonce** — wallet recovery backups include a 24-byte random nonce in the keystream derivation, preventing keystream reuse if the same mnemonic entropy is used for multiple backups
 - **Vertex timestamp enforcement** — vertices with timestamps more than 60 seconds in the future are rejected on insertion, preventing timestamp manipulation by malicious proposers while allowing historical vertex sync
+- **Snapshot state root verification** — after importing a snapshot from a peer, the node recomputes the state root from the restored state and rejects snapshots where the computed root does not match the claimed root, preventing state corruption from malicious peers
 
 ## Production Roadmap
 
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 319 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 323 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 
