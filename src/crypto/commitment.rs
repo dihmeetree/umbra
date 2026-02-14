@@ -123,4 +123,19 @@ mod tests {
         let hash = felts_to_hash(&felts);
         assert_eq!(hash, c.0);
     }
+
+    #[test]
+    fn commitment_max_value() {
+        let blind = BlindingFactor::random();
+        let c = Commitment::commit(u64::MAX, &blind);
+        assert!(c.verify(u64::MAX, &blind));
+    }
+
+    #[test]
+    fn commitment_different_values_different_commitments() {
+        let blind = BlindingFactor::from_bytes([42u8; 32]);
+        let c1 = Commitment::commit(100, &blind);
+        let c2 = Commitment::commit(200, &blind);
+        assert_ne!(c1, c2);
+    }
 }

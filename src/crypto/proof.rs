@@ -673,4 +673,89 @@ mod tests {
         assert!(tree.path(1).is_none());
         assert!(tree.path(100).is_none());
     }
+
+    #[test]
+    fn incremental_tree_many_leaves_root_consistency() {
+        let leaves: Vec<Hash> = (0..100u64)
+            .map(|i| {
+                Commitment::commit(i * 10, &BlindingFactor::from_bytes([(i & 0xFF) as u8; 32])).0
+            })
+            .collect();
+
+        // Build via incremental tree
+        let mut tree = IncrementalMerkleTree::new();
+        for leaf in &leaves {
+            tree.append(*leaf).unwrap();
+        }
+
+        // Build via batch tree and canonicalize
+        let (batch_root, batch_paths) = build_merkle_tree(&leaves);
+        let batch_canon_root = canonical_root(&batch_root, batch_paths[0].len());
+
+        assert_eq!(tree.root(), batch_canon_root);
+    }
+
+    #[test]
+    fn canonical_root_at_max_depth() {
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        // When tree_depth == MERKLE_DEPTH, canonical_root should return the root unchanged
+        let result = canonical_root(&c.0, MERKLE_DEPTH);
+        assert_eq!(result, c.0);
+    }
+
+    #[test]
+    fn zero_subtree_cache_consistent() {
+        let first = zero_subtree_hashes();
+        let second = zero_subtree_hashes();
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn incremental_tree_single_leaf_nonzero_root() {
+        let mut tree = IncrementalMerkleTree::new();
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        assert_eq!(tree.num_leaves(), 1);
+        assert!(tree.path(0).is_some());
+        // Root should not be zero
+        assert_ne!(tree.root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn build_merkle_tree_single_leaf_nonzero_root() {
+        let leaf = Commitment::commit(100, &BlindingFactor::random()).0;
+        let (root, paths) = build_merkle_tree(&[leaf]);
+        assert_ne!(root, [0u8; 32]);
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn merkle_proof_valid_four_leaves() {
+        let leaves: Vec<Hash> = (0..4u64)
+            .map(|i| Commitment::commit(i * 100, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+        let (root, paths) = build_merkle_tree(&leaves);
+        // All proofs should verify via compute_merkle_root
+        for (i, leaf) in leaves.iter().enumerate() {
+            assert_eq!(
+                compute_merkle_root(leaf, &paths[i]),
+                root,
+                "proof failed for leaf {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn merkle_proof_rejects_fake_leaf() {
+        let leaves: Vec<Hash> = (0..2u64)
+            .map(|i| Commitment::commit(i * 100, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+        let (root, paths) = build_merkle_tree(&leaves);
+        let fake_leaf = [0xFFu8; 32];
+        assert_ne!(compute_merkle_root(&fake_leaf, &paths[0]), root);
+    }
 }

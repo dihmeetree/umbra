@@ -404,4 +404,97 @@ mod tests {
         output.proof_commitment[0] ^= 0xff;
         assert!(!output.verify_proof_only(&kp.public, b"tamper2"));
     }
+
+    #[test]
+    fn vrf_verify_rejects_tampered_value() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"value-tamper");
+        output.value[0] ^= 0x01;
+        assert!(!output.verify(&kp.public, b"value-tamper", &output.proof_commitment));
+        assert!(!output.verify_proof_only(&kp.public, b"value-tamper"));
+    }
+
+    #[test]
+    fn vrf_verify_rejects_tampered_commitment() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"commitment-tamper");
+        output.proof_commitment[0] ^= 0x01;
+        assert!(!output.verify(&kp.public, b"commitment-tamper", &output.proof_commitment));
+        assert!(!output.verify_proof_only(&kp.public, b"commitment-tamper"));
+    }
+
+    #[test]
+    fn epoch_seed_genesis_deterministic() {
+        let g1 = EpochSeed::genesis();
+        let g2 = EpochSeed::genesis();
+        assert_eq!(g1.seed, g2.seed);
+        assert_eq!(g1.epoch, g2.epoch);
+    }
+
+    #[test]
+    fn epoch_seed_different_after_next() {
+        let genesis = EpochSeed::genesis();
+        let next = genesis.next(&[0u8; 32]);
+        assert_ne!(genesis.seed, next.seed);
+    }
+
+    #[test]
+    fn vrf_verify_rejects_wrong_proof_length() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"proof-len-test");
+        let commitment = output.proof_commitment;
+        // Truncate the proof to wrong length
+        output.proof = vec![0u8; 100];
+        assert!(!output.verify(&kp.public, b"proof-len-test", &commitment));
+        assert!(!output.verify_proof_only(&kp.public, b"proof-len-test"));
+    }
+
+    #[test]
+    fn vrf_different_inputs_different_outputs() {
+        let kp = SigningKeypair::generate();
+        let o1 = VrfOutput::evaluate(&kp, b"input-a");
+        let o2 = VrfOutput::evaluate(&kp, b"input-b");
+        assert_ne!(o1.value, o2.value);
+    }
+
+    #[test]
+    fn vrf_different_keys_different_outputs() {
+        let kp1 = SigningKeypair::generate();
+        let kp2 = SigningKeypair::generate();
+        let o1 = VrfOutput::evaluate(&kp1, b"same-input");
+        let o2 = VrfOutput::evaluate(&kp2, b"same-input");
+        assert_ne!(o1.value, o2.value);
+    }
+
+    #[test]
+    fn epoch_seed_next_differs_by_hash() {
+        let genesis = EpochSeed::genesis();
+        let next1 = genesis.next(&[0u8; 32]);
+        let next2 = genesis.next(&[1u8; 32]);
+        assert_ne!(next1.seed, next2.seed);
+        assert_eq!(next1.epoch, next2.epoch); // same epoch number
+    }
+
+    #[test]
+    fn epoch_seed_chain_is_deterministic() {
+        let genesis = EpochSeed::genesis();
+        let chain1 = genesis.next(&[42u8; 32]).next(&[43u8; 32]);
+        let chain2 = genesis.next(&[42u8; 32]).next(&[43u8; 32]);
+        assert_eq!(chain1.seed, chain2.seed);
+        assert_eq!(chain1.epoch, chain2.epoch);
+    }
+
+    #[test]
+    fn is_selected_always_true_when_committee_equals_total() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"equal-test");
+        assert!(output.is_selected(100, 100));
+    }
+
+    #[test]
+    fn vrf_proof_commitment_differs_from_value() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"commitment-value-test");
+        assert_ne!(output.value, output.proof_commitment);
+    }
 }

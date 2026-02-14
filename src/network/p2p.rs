@@ -1638,4 +1638,217 @@ mod tests {
         let ip2: IpAddr = "2001:db8::1".parse().unwrap();
         assert_eq!(subnet_prefix(ip2), [0, 0]);
     }
+
+    #[test]
+    fn counter_to_nonce_zero() {
+        let nonce = counter_to_nonce(0);
+        assert_eq!(nonce.len(), TRANSPORT_NONCE_SIZE);
+        assert_eq!(nonce, [0u8; 24]);
+    }
+
+    #[test]
+    fn counter_to_nonce_one() {
+        let nonce = counter_to_nonce(1);
+        assert_eq!(nonce.len(), TRANSPORT_NONCE_SIZE);
+        // Little-endian u64: 1 stored in the first 8 bytes
+        assert_eq!(nonce[0], 1);
+        for &b in &nonce[1..] {
+            assert_eq!(b, 0);
+        }
+    }
+
+    #[test]
+    fn counter_to_nonce_max() {
+        let nonce = counter_to_nonce(u64::MAX);
+        assert_eq!(nonce.len(), TRANSPORT_NONCE_SIZE);
+        // First 8 bytes should all be 0xFF (u64::MAX in little-endian)
+        for &b in &nonce[..8] {
+            assert_eq!(b, 0xFF);
+        }
+        // Remaining bytes should be zero
+        for &b in &nonce[8..] {
+            assert_eq!(b, 0);
+        }
+    }
+
+    #[test]
+    fn xor_keystream_empty_data() {
+        let key = [1u8; 32];
+        let nonce = counter_to_nonce(0);
+        let result = xor_keystream(&key, &nonce, &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn xor_keystream_preserves_length() {
+        let key = [2u8; 32];
+        let nonce = counter_to_nonce(0);
+        for len in [1, 32, 63, 64, 65, 128] {
+            let data = vec![0xAB; len];
+            let result = xor_keystream(&key, &nonce, &data);
+            assert_eq!(
+                result.len(),
+                data.len(),
+                "xor_keystream output length mismatch for input length {}",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn xor_keystream_roundtrip() {
+        let key = [3u8; 32];
+        let nonce = counter_to_nonce(42);
+        let original = b"Hello, encrypted P2P transport!";
+        let encrypted = xor_keystream(&key, &nonce, original);
+        let decrypted = xor_keystream(&key, &nonce, &encrypted);
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn transport_mac_deterministic() {
+        let mac_key = [4u8; 32];
+        let counter = 7u64;
+        let ciphertext = b"some ciphertext data";
+        let mac1 = transport_mac(&mac_key, counter, ciphertext);
+        let mac2 = transport_mac(&mac_key, counter, ciphertext);
+        assert_eq!(mac1, mac2);
+    }
+
+    #[test]
+    fn transport_mac_changes_with_input() {
+        let mac_key = [5u8; 32];
+        let counter = 0u64;
+        let ct1 = b"ciphertext A";
+        let ct2 = b"ciphertext B";
+        let mac1 = transport_mac(&mac_key, counter, ct1);
+        let mac2 = transport_mac(&mac_key, counter, ct2);
+        assert_ne!(
+            mac1, mac2,
+            "different ciphertext should produce different MAC"
+        );
+
+        // Also verify different counter with same ciphertext produces different MAC
+        let mac3 = transport_mac(&mac_key, 1, ct1);
+        assert_ne!(mac1, mac3, "different counter should produce different MAC");
+    }
+
+    #[test]
+    fn pad_to_bucket_alignment() {
+        let bucket = crate::constants::P2P_PADDING_BUCKET;
+
+        // Just below one bucket: pads up to one bucket
+        assert_eq!(pad_to_bucket(bucket - 1), bucket);
+
+        // Exactly one bucket: stays at one bucket
+        assert_eq!(pad_to_bucket(bucket), bucket);
+
+        // One byte over one bucket: pads up to two buckets
+        assert_eq!(pad_to_bucket(bucket + 1), 2 * bucket);
+    }
+
+    #[test]
+    fn rate_limiter_exact_capacity() {
+        let mut rl = RateLimiter::new(5.0, 0.0);
+        // Consume exactly 5 tokens; all should succeed
+        for i in 0..5 {
+            assert!(rl.try_consume(), "token {} should succeed", i);
+        }
+        // 6th should fail
+        assert!(
+            !rl.try_consume(),
+            "6th consume should fail after exhausting 5 tokens"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_refill_after_time() {
+        let mut rl = RateLimiter::new(2.0, 10.0);
+        // Consume all tokens
+        assert!(rl.try_consume());
+        assert!(rl.try_consume());
+        assert!(!rl.try_consume());
+
+        // Simulate time passing by setting last_refill to 1 second in the past.
+        // With refill_per_sec=10.0, 1 second gives 10 tokens (capped at max_tokens=2.0).
+        rl.last_refill = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(rl.try_consume(), "should succeed after refill");
+        assert!(
+            rl.try_consume(),
+            "should succeed (second token after refill)"
+        );
+    }
+
+    #[test]
+    fn peer_reputation_penalize_exact_threshold() {
+        let mut rep = PeerReputation::new();
+        let initial = crate::constants::PEER_INITIAL_REPUTATION;
+        let threshold = crate::constants::PEER_BAN_THRESHOLD;
+
+        // Penalize so score drops just below the ban threshold
+        let penalty = initial - threshold + 1;
+        rep.penalize(penalty);
+        assert_eq!(rep.score, threshold - 1);
+        assert!(
+            rep.is_banned(),
+            "peer should be banned when score < PEER_BAN_THRESHOLD"
+        );
+    }
+
+    #[test]
+    fn peer_reputation_reward_does_not_exceed_initial() {
+        let mut rep = PeerReputation::new();
+        let initial = crate::constants::PEER_INITIAL_REPUTATION;
+
+        // Penalize by a small amount
+        rep.penalize(10);
+        assert_eq!(rep.score, initial - 10);
+
+        // Reward by a large amount (much more than the penalty)
+        rep.reward(100);
+        // Score should be capped at PEER_INITIAL_REPUTATION
+        assert_eq!(
+            rep.score, initial,
+            "score should not exceed PEER_INITIAL_REPUTATION"
+        );
+    }
+
+    #[test]
+    fn subnet_prefix_ipv4_same_slash16() {
+        // Two IPs in the same /16 subnet (first two octets match)
+        let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+        let ip2: IpAddr = "192.168.2.1".parse().unwrap();
+        assert_eq!(
+            subnet_prefix(ip1),
+            subnet_prefix(ip2),
+            "IPs in same /16 should have same subnet prefix"
+        );
+    }
+
+    #[test]
+    fn subnet_prefix_ipv4_different_slash16() {
+        // Two IPs in different /16 subnets
+        let ip1: IpAddr = "192.168.1.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.1.1".parse().unwrap();
+        assert_ne!(
+            subnet_prefix(ip1),
+            subnet_prefix(ip2),
+            "IPs in different /16 should have different subnet prefix"
+        );
+    }
+
+    #[test]
+    fn session_keys_different_directions() {
+        let shared_secret = [7u8; 32];
+        let init_keys = SessionKeys::derive(&shared_secret, true);
+        let resp_keys = SessionKeys::derive(&shared_secret, false);
+
+        // Initiator's send_key should equal responder's recv_key
+        assert_eq!(init_keys.send_key, resp_keys.recv_key);
+        // Responder's send_key should equal initiator's recv_key
+        assert_eq!(resp_keys.send_key, init_keys.recv_key);
+        // MAC keys follow the same pattern
+        assert_eq!(init_keys.send_mac_key, resp_keys.recv_mac_key);
+        assert_eq!(resp_keys.send_mac_key, init_keys.recv_mac_key);
+    }
 }

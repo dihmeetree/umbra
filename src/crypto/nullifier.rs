@@ -204,4 +204,18 @@ mod tests {
         assert!(collected.contains(&n1));
         assert!(collected.contains(&n2));
     }
+
+    #[test]
+    fn nullifier_zero_inputs() {
+        let n = Nullifier::derive(&[0u8; 32], &[0u8; 32]);
+        assert_ne!(n.0, [0u8; 32]);
+    }
+
+    #[test]
+    fn nullifier_different_inputs_different_outputs() {
+        let commitment = [7u8; 32];
+        let n1 = Nullifier::derive(&[1u8; 32], &commitment);
+        let n2 = Nullifier::derive(&[2u8; 32], &commitment);
+        assert_ne!(n1, n2);
+    }
 }

@@ -424,4 +424,163 @@ mod tests {
         let decrypted = encrypted.decrypt(&kp).unwrap();
         assert_eq!(decrypted, msg);
     }
+
+    #[test]
+    fn encrypt_empty_plaintext() {
+        let kp = KemKeypair::generate();
+        let encrypted = EncryptedPayload::encrypt(&kp.public, b"").unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn encrypt_at_max_size_boundary() {
+        let kp = KemKeypair::generate();
+        let msg = vec![0xABu8; crate::constants::MAX_ENCRYPT_PLAINTEXT];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_over_max_size_returns_none() {
+        let kp = KemKeypair::generate();
+        let msg = vec![0u8; crate::constants::MAX_ENCRYPT_PLAINTEXT + 1];
+        assert!(EncryptedPayload::encrypt(&kp.public, &msg).is_none());
+    }
+
+    #[test]
+    fn decrypt_tampered_ciphertext_fails() {
+        let kp = KemKeypair::generate();
+        let msg = b"tamper ciphertext test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        if !encrypted.ciphertext.is_empty() {
+            encrypted.ciphertext[0] ^= 0x01;
+        }
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn decrypt_tampered_mac_fails() {
+        let kp = KemKeypair::generate();
+        let msg = b"tamper mac test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        encrypted.mac[0] ^= 0x01;
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn encrypt_various_padding_sizes() {
+        let kp = KemKeypair::generate();
+        for size in &[0, 1, 32, 60, 63, 64, 65, 128] {
+            let msg = vec![0xABu8; *size];
+            let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+            let decrypted = encrypted.decrypt(&kp).unwrap();
+            assert_eq!(decrypted, msg, "roundtrip failed for size {}", size);
+        }
+    }
+
+    #[test]
+    fn decrypt_tampered_nonce_fails() {
+        let kp = KemKeypair::generate();
+        let msg = b"tamper nonce test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        encrypted.nonce[0] ^= 0x01;
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn encrypt_shared_secret_roundtrip() {
+        let kp = KemKeypair::generate();
+        let (ss, ct) = kp.public.encapsulate().unwrap();
+        let msg = b"shared secret message";
+        let encrypted = EncryptedPayload::encrypt_with_shared_secret(&ss, ct, msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_one_byte_message() {
+        let kp = KemKeypair::generate();
+        let msg = vec![0xAB];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_exactly_one_block() {
+        // 32 bytes = one keystream block
+        let kp = KemKeypair::generate();
+        let msg = vec![0xCD; 32];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_crosses_block_boundary() {
+        // 33 bytes crosses the 32-byte keystream block boundary
+        let kp = KemKeypair::generate();
+        let msg = vec![0xEF; 33];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn encrypt_large_message() {
+        let kp = KemKeypair::generate();
+        let msg = vec![0x42; 10_000];
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
+        let decrypted = encrypted.decrypt(&kp).unwrap();
+        assert_eq!(decrypted, msg);
+    }
+
+    #[test]
+    fn ciphertext_padded_to_bucket_boundary() {
+        let kp = KemKeypair::generate();
+        // 1 byte plaintext + 4 byte length prefix = 5 bytes, padded to 64
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &[0x01]).unwrap();
+        assert_eq!(encrypted.ciphertext.len() % 64, 0);
+
+        // 60 byte plaintext + 4 = 64, already aligned
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &[0x02; 60]).unwrap();
+        assert_eq!(encrypted.ciphertext.len() % 64, 0);
+
+        // 61 byte plaintext + 4 = 65, padded to 128
+        let encrypted = EncryptedPayload::encrypt(&kp.public, &[0x03; 61]).unwrap();
+        assert_eq!(encrypted.ciphertext.len() % 64, 0);
+    }
+
+    #[test]
+    fn different_encryptions_produce_different_ciphertexts() {
+        let kp = KemKeypair::generate();
+        let msg = b"same message";
+        let e1 = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        let e2 = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        // Different nonces mean different ciphertexts
+        assert_ne!(e1.nonce, e2.nonce);
+        assert_ne!(e1.ciphertext, e2.ciphertext);
+    }
+
+    #[test]
+    fn decrypt_with_wrong_key_returns_none() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        let msg = b"secret message";
+        let encrypted = EncryptedPayload::encrypt(&kp1.public, msg).unwrap();
+        assert!(encrypted.decrypt(&kp2).is_none());
+    }
+
+    #[test]
+    fn tampered_kem_ciphertext_fails_decrypt() {
+        let kp = KemKeypair::generate();
+        let msg = b"test message for kem tamper";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        if !encrypted.kem_ciphertext.0.is_empty() {
+            encrypted.kem_ciphertext.0[0] ^= 0xFF;
+        }
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
 }

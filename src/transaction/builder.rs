@@ -642,4 +642,140 @@ mod tests {
             .unwrap();
         assert_eq!(tx2.fee, 400);
     }
+
+    #[test]
+    fn build_rejects_input_sum_overflow() {
+        let recipient = FullKeypair::generate();
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: u64::MAX,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"overflow1"),
+                merkle_path: vec![],
+            })
+            .add_input(InputSpec {
+                value: 1,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"overflow2"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(
+            matches!(result, Err(TxBuildError::ArithmeticOverflow)),
+            "expected ArithmeticOverflow, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn build_rejects_output_sum_overflow() {
+        let r1 = FullKeypair::generate();
+        let r2 = FullKeypair::generate();
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 100,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"overflow-out"),
+                merkle_path: vec![],
+            })
+            .add_output(r1.kem.public.clone(), u64::MAX)
+            .add_output(r2.kem.public.clone(), 1)
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(
+            matches!(result, Err(TxBuildError::ArithmeticOverflow)),
+            "expected ArithmeticOverflow, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn encode_note_format() {
+        let value = 0x0102030405060708u64;
+        let blinding = BlindingFactor::from_bytes([0xAB; 32]);
+        let encoded = encode_note(value, &blinding);
+        assert_eq!(
+            encoded.len(),
+            40,
+            "encode_note must produce exactly 40 bytes"
+        );
+        // First 8 bytes: value in little-endian
+        assert_eq!(&encoded[..8], &value.to_le_bytes());
+        // Next 32 bytes: blinding factor
+        assert_eq!(&encoded[8..40], &[0xAB; 32]);
+    }
+
+    #[test]
+    fn builder_set_tx_type_validator_register() {
+        use crate::crypto::keys::{KemKeypair, SigningKeypair};
+        use crate::transaction::TxType;
+
+        let signing_kp = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
+
+        // fee = VALIDATOR_BASE_BOND + MIN_TX_FEE = 1_000_001
+        // input = output + fee = 100 + 1_000_001 = 1_000_101
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1_000_101,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([230; 32]),
+                spend_auth: crate::hash_domain(b"test", &[230]),
+                merkle_path: vec![],
+            })
+            .add_output(kem_kp.public.clone(), 100)
+            .set_tx_type(TxType::ValidatorRegister {
+                signing_key: signing_kp.public.clone(),
+                kem_public_key: kem_kp.public.clone(),
+            })
+            .set_fee(1_000_001) // VALIDATOR_BASE_BOND + MIN_TX_FEE
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert!(matches!(tx.tx_type, TxType::ValidatorRegister { .. }));
+    }
+
+    #[test]
+    fn builder_default_creates_transfer() {
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 400,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([231; 32]),
+                spend_auth: crate::hash_domain(b"test", &[231]),
+                merkle_path: vec![],
+            })
+            .add_output(
+                crate::crypto::keys::FullKeypair::generate()
+                    .kem
+                    .public
+                    .clone(),
+                100,
+            )
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert!(matches!(tx.tx_type, crate::transaction::TxType::Transfer));
+    }
+
+    #[test]
+    fn note_encode_decode_boundary_values() {
+        use crate::crypto::commitment::BlindingFactor;
+
+        // Max u64 value
+        let blinding = BlindingFactor::from_bytes([0xFF; 32]);
+        let encoded = encode_note(u64::MAX, &blinding);
+        let (value, restored) = decode_note(&encoded).unwrap();
+        assert_eq!(value, u64::MAX);
+        assert_eq!(restored.0, blinding.0);
+
+        // Zero value
+        let blinding_zero = BlindingFactor::from_bytes([0; 32]);
+        let encoded = encode_note(0, &blinding_zero);
+        let (value, restored) = decode_note(&encoded).unwrap();
+        assert_eq!(value, 0);
+        assert_eq!(restored.0, blinding_zero.0);
+    }
 }

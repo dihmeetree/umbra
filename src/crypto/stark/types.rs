@@ -440,4 +440,37 @@ mod tests {
             "should reject empty data"
         );
     }
+
+    #[test]
+    fn balance_public_inputs_total_blocks() {
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![
+                [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
+                [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
+                [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
+            ],
+            output_commitments: vec![
+                [Felt::new(13), Felt::new(14), Felt::new(15), Felt::new(16)],
+                [Felt::new(17), Felt::new(18), Felt::new(19), Felt::new(20)],
+            ],
+            fee: Felt::new(100),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        // total_blocks = n_in * 2 + n_out = 3 * 2 + 2 = 8
+        assert_eq!(pub_inputs.total_blocks(), 8);
+    }
+
+    #[test]
+    fn balance_public_inputs_num_inputs() {
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![
+                [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
+                [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
+            ],
+            output_commitments: vec![[Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)]],
+            fee: Felt::new(50),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        assert_eq!(pub_inputs.num_inputs(), 2);
+    }
 }

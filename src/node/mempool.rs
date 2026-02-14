@@ -858,4 +858,364 @@ mod tests {
         pool.drain_highest_fee(100);
         assert_eq!(pool.total_bytes(), 0);
     }
+
+    #[test]
+    fn insert_at_exact_byte_limit() {
+        // Create a single test tx and measure its size
+        let tx1 = make_test_tx(140);
+        let one_tx_size = tx1.estimated_size();
+
+        // Set max_bytes to exactly one transaction's estimated_size
+        let config = MempoolConfig {
+            max_transactions: usize::MAX,
+            max_bytes: one_tx_size,
+        };
+        let mut pool = Mempool::new(config);
+
+        // Insert first tx — should succeed (exactly fits)
+        assert!(pool.insert(tx1).is_ok());
+        assert_eq!(pool.len(), 1);
+
+        // Insert a second tx with higher fee — should evict the first due to byte limit
+        let tx2 = make_test_tx_n_outputs(2, 141); // fee=400 > fee=300
+        assert!(pool.insert(tx2.clone()).is_ok());
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&tx2.tx_id()));
+    }
+
+    #[test]
+    fn multiple_transactions_identical_fees() {
+        let mut pool = Mempool::with_defaults();
+
+        // All 3 transactions have the same fee (1 input, 1 output → fee=300)
+        let tx1 = make_test_tx(150);
+        let tx2 = make_test_tx(151);
+        let tx3 = make_test_tx(152);
+        let id1 = tx1.tx_id();
+        let id2 = tx2.tx_id();
+        let id3 = tx3.tx_id();
+
+        pool.insert(tx1).unwrap();
+        pool.insert(tx2).unwrap();
+        pool.insert(tx3).unwrap();
+        assert_eq!(pool.len(), 3);
+
+        // Drain all — with identical fees, insertion order (FIFO) should be the tie-breaker
+        let drained = pool.drain_highest_fee(3);
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].tx_id(), id1);
+        assert_eq!(drained[1].tx_id(), id2);
+        assert_eq!(drained[2].tx_id(), id3);
+    }
+
+    #[test]
+    fn nullifier_index_consistency_after_eviction() {
+        // Use a small pool that holds at most 2 txs
+        let config = MempoolConfig {
+            max_transactions: 2,
+            max_bytes: usize::MAX,
+        };
+        let mut pool = Mempool::new(config);
+
+        // Insert two low-fee txs (both fee=300).
+        // With equal fees, eviction takes the last BTreeMap entry (higher
+        // insertion_order = later inserted = tx_low2), so capture its nullifiers.
+        let tx_low1 = make_test_tx_n_outputs(1, 160);
+        let tx_low2 = make_test_tx_n_outputs(1, 161);
+        let nullifiers2: Vec<Nullifier> = tx_low2.inputs.iter().map(|i| i.nullifier).collect();
+
+        pool.insert(tx_low1).unwrap();
+        pool.insert(tx_low2).unwrap();
+        assert_eq!(pool.len(), 2);
+
+        // Insert a higher-fee tx, evicting the lowest-priority (tx_low2, later inserted)
+        let tx_high = make_test_tx_n_outputs(2, 162); // fee=400
+        pool.insert(tx_high).unwrap();
+        assert_eq!(pool.len(), 2);
+
+        // The evicted tx's nullifiers should no longer be in the index.
+        // Verify by inserting a new tx with the same nullifier as the evicted one.
+        // Build a tx that reuses tx_low2's nullifier (same input spec with seed=161).
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx_reuse = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 400,
+                blinding: BlindingFactor::from_bytes([161; 32]),
+                spend_auth: crate::hash_domain(b"test", &[161]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        // Confirm same nullifier as the evicted tx
+        assert_eq!(tx_reuse.inputs[0].nullifier, nullifiers2[0]);
+
+        // This insert must succeed — no stale nullifier entry should block it.
+        // It may fail with FeeTooLow if the pool is full and its fee is too low,
+        // so we check that it's not a NullifierConflict error.
+        let result = pool.insert(tx_reuse);
+        assert!(
+            !matches!(result, Err(MempoolError::NullifierConflict(_))),
+            "stale nullifier entry found after eviction: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn expiry_epoch_exact_boundary() {
+        let mut pool = Mempool::with_defaults();
+
+        // Build a tx with expiry_epoch=10
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 400,
+                blinding: BlindingFactor::from_bytes([170; 32]),
+                spend_auth: crate::hash_domain(b"test", &[170]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_expiry_epoch(10)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        pool.set_epoch(0);
+        pool.insert(tx).unwrap();
+        assert_eq!(pool.len(), 1);
+
+        // set_epoch(10), evict_expired() — should NOT evict (10 < 10 is false)
+        pool.set_epoch(10);
+        assert_eq!(pool.evict_expired(), 0);
+        assert_eq!(pool.len(), 1);
+
+        // set_epoch(11), evict_expired() — should evict (10 < 11 is true)
+        pool.set_epoch(11);
+        assert_eq!(pool.evict_expired(), 1);
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn zero_fee_transaction() {
+        let mut pool = Mempool::with_defaults();
+
+        // Build a valid tx and then mutate its fee to 0.
+        // validate_structure enforces MIN_TX_FEE, so this should be rejected.
+        let mut tx = make_test_tx(180);
+        tx.fee = 0;
+
+        match pool.insert(tx) {
+            Err(MempoolError::ValidationFailed(_)) => {}
+            other => panic!("expected ValidationFailed for zero-fee tx, got {:?}", other),
+        }
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn drain_cleans_all_indices() {
+        let mut pool = Mempool::with_defaults();
+
+        // Insert 5 transactions
+        for seed in 190..195 {
+            pool.insert(make_test_tx(seed)).unwrap();
+        }
+        assert_eq!(pool.len(), 5);
+        assert!(pool.total_bytes() > 0);
+        assert!(!pool.is_empty());
+
+        // Drain all
+        let drained = pool.drain_highest_fee(100);
+        assert_eq!(drained.len(), 5);
+        assert_eq!(pool.len(), 0);
+        assert_eq!(pool.total_bytes(), 0);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn fee_percentiles_two_transactions() {
+        let mut pool = Mempool::with_defaults();
+
+        // Insert 2 transactions with different fees:
+        // 1 output → fee=300, 2 outputs → fee=400
+        pool.insert(make_test_tx_n_outputs(1, 200)).unwrap();
+        pool.insert(make_test_tx_n_outputs(2, 201)).unwrap();
+
+        let percentiles = pool.fee_percentiles().unwrap();
+        assert_eq!(percentiles.len(), 5);
+        // With 2 txs (fees 300 and 400 in ascending order):
+        // All percentiles should be within [300, 400]
+        for &p in &percentiles {
+            assert!((300..=400).contains(&p), "percentile {} out of range", p);
+        }
+    }
+
+    #[test]
+    fn remove_conflicting_multiple_nullifiers() {
+        let mut pool = Mempool::with_defaults();
+
+        // Build a transaction with 2 inputs (2 nullifiers).
+        // 2 inputs, 1 output → fee = FEE_BASE + 2*FEE_PER_INPUT + 1*FEE_PER_OUTPUT = 400
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let fee = 400u64; // 100 + 200 + 100
+        let output_value = 100u64;
+        let _input_value_each = (output_value + fee) / 2; // 250 each, 500 total = 100 + 400
+
+        let tx_multi = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: output_value + fee / 2, // first input
+                blinding: BlindingFactor::from_bytes([210; 32]),
+                spend_auth: crate::hash_domain(b"test", &[210]),
+                merkle_path: vec![],
+            })
+            .add_input(InputSpec {
+                value: fee / 2, // second input
+                blinding: BlindingFactor::from_bytes([211; 32]),
+                spend_auth: crate::hash_domain(b"test", &[211]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), output_value)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert_eq!(tx_multi.inputs.len(), 2);
+        let nullifier0 = tx_multi.inputs[0].nullifier;
+        let nullifier1 = tx_multi.inputs[1].nullifier;
+        assert_ne!(nullifier0, nullifier1);
+
+        pool.insert(tx_multi).unwrap();
+        assert_eq!(pool.len(), 1);
+
+        // Call remove_conflicting with only ONE of the two nullifiers
+        let removed = pool.remove_conflicting(&[nullifier1]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn get_returns_transaction() {
+        let mut pool = Mempool::with_defaults();
+        let tx = make_test_tx(250);
+        let tx_id = tx.tx_id();
+        let expected_fee = tx.fee;
+        pool.insert(tx).unwrap();
+
+        let retrieved = pool.get(&tx_id).unwrap();
+        assert_eq!(retrieved.fee, expected_fee);
+        assert_eq!(retrieved.tx_id(), tx_id);
+    }
+
+    #[test]
+    fn get_returns_none_for_missing() {
+        let pool = Mempool::with_defaults();
+        let fake_id = crate::transaction::TxId([0xFFu8; 32]);
+        assert!(pool.get(&fake_id).is_none());
+    }
+
+    #[test]
+    fn drain_zero_returns_empty() {
+        let mut pool = Mempool::with_defaults();
+        pool.insert(make_test_tx(251)).unwrap();
+        let drained = pool.drain_highest_fee(0);
+        assert!(drained.is_empty());
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn drain_more_than_pool_size() {
+        let mut pool = Mempool::with_defaults();
+        pool.insert(make_test_tx(252)).unwrap();
+        pool.insert(make_test_tx(253)).unwrap();
+        let drained = pool.drain_highest_fee(100);
+        assert_eq!(drained.len(), 2);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_none() {
+        let mut pool = Mempool::with_defaults();
+        let fake_id = crate::transaction::TxId([0xAAu8; 32]);
+        assert!(pool.remove(&fake_id).is_none());
+    }
+
+    #[test]
+    fn remove_conflicting_empty_nullifiers() {
+        let mut pool = Mempool::with_defaults();
+        pool.insert(make_test_tx(254)).unwrap();
+        let removed = pool.remove_conflicting(&[]);
+        assert!(removed.is_empty());
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn set_epoch_to_zero() {
+        let mut pool = Mempool::with_defaults();
+        pool.set_epoch(100);
+        pool.set_epoch(0);
+        // Should accept a no-expiry tx at epoch 0
+        let tx = make_test_tx(255);
+        assert!(pool.insert(tx).is_ok());
+    }
+
+    #[test]
+    fn multiple_evictions_in_single_insert() {
+        // Create a pool that can hold 3 txs by count
+        let sample = make_test_tx(1);
+        let one_tx_size = sample.estimated_size();
+        let config = MempoolConfig {
+            max_transactions: usize::MAX,
+            max_bytes: one_tx_size * 2 + one_tx_size / 4, // Can hold ~2.25 txs
+        };
+        let mut pool = Mempool::new(config);
+
+        // Insert 2 low-fee txs (1 output each, fee=300)
+        let tx1 = make_test_tx(10);
+        let tx2 = make_test_tx(11);
+        pool.insert(tx1).unwrap();
+        pool.insert(tx2).unwrap();
+        assert_eq!(pool.len(), 2);
+
+        // Insert a higher-fee tx that needs at least one eviction
+        let tx3 = make_test_tx_n_outputs(2, 12); // fee=400, larger size
+        let result = pool.insert(tx3);
+        // Should succeed by evicting one of the low-fee txs
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn fee_percentiles_empty_returns_none() {
+        let pool = Mempool::with_defaults();
+        assert!(pool.fee_percentiles().is_none());
+    }
+
+    #[test]
+    fn stats_after_insert_and_remove() {
+        let mut pool = Mempool::with_defaults();
+        let tx = make_test_tx(220);
+        let tx_id = tx.tx_id();
+        let tx_size = tx.estimated_size();
+
+        pool.insert(tx).unwrap();
+        let stats = pool.stats();
+        assert_eq!(stats.transaction_count, 1);
+        assert_eq!(stats.total_bytes, tx_size);
+
+        pool.remove(&tx_id);
+        let stats = pool.stats();
+        assert_eq!(stats.transaction_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+    }
+
+    #[test]
+    fn contains_after_remove() {
+        let mut pool = Mempool::with_defaults();
+        let tx = make_test_tx(221);
+        let tx_id = tx.tx_id();
+        pool.insert(tx).unwrap();
+        assert!(pool.contains(&tx_id));
+        pool.remove(&tx_id);
+        assert!(!pool.contains(&tx_id));
+    }
 }

@@ -1686,4 +1686,741 @@ mod tests {
         let inactive_id = validators[2].1.id;
         assert!(!committee.iter().any(|(v, _)| v.id == inactive_id));
     }
+
+    #[test]
+    fn certificate_verify_insufficient_signatures() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Quorum for committee of 4 = 3. Provide only 2 signatures.
+        let mut signatures = Vec::new();
+        for (i, kp) in keypairs.iter().enumerate().take(2) {
+            let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            signatures.push((validators[i].id, sig));
+        }
+
+        let cert = Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures,
+        };
+
+        assert!(!cert.verify(&validators, &chain_id));
+    }
+
+    #[test]
+    fn certificate_verify_duplicate_voters() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Create 3 signatures but the first voter appears twice
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig0 = keypairs[0].sign(&msg);
+        let sig1 = keypairs[1].sign(&msg);
+
+        let signatures = vec![
+            (validators[0].id, sig0.clone()),
+            (validators[0].id, sig0), // Duplicate voter
+            (validators[1].id, sig1),
+        ];
+
+        let cert = Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures,
+        };
+
+        // Only 2 unique valid voters, which is less than quorum of 3
+        assert!(!cert.verify(&validators, &chain_id));
+    }
+
+    #[test]
+    fn certificate_verify_non_committee_voter() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Create signatures from 2 committee members + 1 outsider
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let outsider_kp = SigningKeypair::generate();
+        let outsider_id = outsider_kp.public.fingerprint();
+
+        let signatures = vec![
+            (validators[0].id, keypairs[0].sign(&msg)),
+            (validators[1].id, keypairs[1].sign(&msg)),
+            (outsider_id, outsider_kp.sign(&msg)), // Not in committee
+        ];
+
+        let cert = Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures,
+        };
+
+        // Only 2 valid committee signatures, less than quorum of 3
+        assert!(!cert.verify(&validators, &chain_id));
+    }
+
+    #[test]
+    fn certificate_verify_too_many_signatures() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+
+        // Create > 2 * committee.len() = 8 signatures (use 9)
+        let mut signatures = Vec::new();
+        for i in 0..9 {
+            let idx = i % keypairs.len();
+            signatures.push((validators[idx].id, keypairs[idx].sign(&msg)));
+        }
+
+        let cert = Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures,
+        };
+
+        // Should be rejected because signatures.len() > 2 * committee.len()
+        assert!(!cert.verify(&validators, &chain_id));
+    }
+
+    #[test]
+    fn receive_vote_wrong_epoch() {
+        let (keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(5, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Vote with epoch 0 (BftState is at epoch 5)
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = keypairs[0].sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+
+        assert!(bft.receive_vote(vote).is_none());
+    }
+
+    #[test]
+    fn receive_vote_wrong_round() {
+        let (keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        // BftState is at round 0
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Vote with round 5 (BftState is at round 0)
+        let msg = vote_sign_data(&vertex_id, 0, 5, &VoteType::Accept, &chain_id);
+        let sig = keypairs[0].sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 5,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+
+        assert!(bft.receive_vote(vote).is_none());
+    }
+
+    #[test]
+    fn receive_vote_non_committee_voter() {
+        let (_keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Vote from a validator not in the committee
+        let outsider_kp = SigningKeypair::generate();
+        let outsider_id = outsider_kp.public.fingerprint();
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = outsider_kp.sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: outsider_id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+
+        assert!(bft.receive_vote(vote).is_none());
+    }
+
+    #[test]
+    fn try_certify_quorum_minus_one() {
+        // Committee of 4, quorum = 3. Send only 2 Accept votes.
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        for (i, kp) in keypairs.iter().enumerate().take(2) {
+            let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            let vote = Vote {
+                vertex_id,
+                voter_id: validators[i].id,
+                epoch: 0,
+                round: 0,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            };
+            let result = bft.receive_vote(vote);
+            assert!(result.is_none());
+        }
+
+        // No certificate should exist
+        assert!(bft.get_certificate(&vertex_id).is_none());
+    }
+
+    #[test]
+    fn try_certify_exact_quorum() {
+        // Committee of 4, quorum = 3. Send exactly 3 Accept votes.
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        let mut cert_result = None;
+        for (i, kp) in keypairs.iter().enumerate().take(3) {
+            let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            let vote = Vote {
+                vertex_id,
+                voter_id: validators[i].id,
+                epoch: 0,
+                round: 0,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            };
+            if let Some(c) = bft.receive_vote(vote) {
+                cert_result = Some(c);
+            }
+        }
+
+        // Certificate should have been issued
+        let cert = cert_result.expect("certificate should be issued at exact quorum");
+        assert_eq!(cert.vertex_id, vertex_id);
+        assert_eq!(cert.signatures.len(), 3);
+
+        // Also accessible via get_certificate
+        assert!(bft.get_certificate(&vertex_id).is_some());
+    }
+
+    #[test]
+    fn select_committee_deterministic() {
+        let mut validators = Vec::new();
+        for _ in 0..20 {
+            let kp = SigningKeypair::generate();
+            let v = Validator::new(kp.public.clone());
+            validators.push((kp, v));
+        }
+
+        let seed = EpochSeed::genesis();
+        let committee1 = select_committee(&seed, &validators, 7);
+        let committee2 = select_committee(&seed, &validators, 7);
+
+        assert_eq!(committee1.len(), committee2.len());
+        for (a, b) in committee1.iter().zip(committee2.iter()) {
+            assert_eq!(a.0.id, b.0.id);
+        }
+    }
+
+    #[test]
+    fn dynamic_quorum_small_committees() {
+        // dynamic_quorum(n) = (n*2)/3 + 1
+        assert_eq!(dynamic_quorum(2), 2); // (2*2)/3 + 1 = 1 + 1 = 2
+        assert_eq!(dynamic_quorum(3), 3); // (3*2)/3 + 1 = 2 + 1 = 3
+        assert_eq!(dynamic_quorum(4), 3); // (4*2)/3 + 1 = 2 + 1 = 3
+    }
+
+    #[test]
+    fn advance_epoch_clears_round_votes() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Add a vote so that votes and round_votes are populated
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = keypairs[0].sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+        bft.receive_vote(vote);
+
+        // Verify votes exist
+        assert!(!bft.votes.is_empty());
+        assert!(!bft.round_votes.is_empty());
+
+        // Advance epoch
+        let (_, new_validators) = make_committee(3);
+        bft.advance_epoch(1, new_validators);
+
+        // Votes and round_votes should be cleared
+        assert!(bft.votes.is_empty());
+        assert!(bft.round_votes.is_empty());
+        assert_eq!(bft.epoch, 1);
+        assert_eq!(bft.round, 0);
+    }
+
+    #[test]
+    fn certificate_verify_empty_signatures() {
+        let (_keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+
+        let cert = Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures: vec![], // Empty
+        };
+
+        assert!(!cert.verify(&validators, &chain_id));
+    }
+
+    #[test]
+    fn equivocation_across_rounds() {
+        // Validator votes at round 1 on vertex A, then at round 3 on vertex B.
+        // Equivocation is tracked per (voter_id, round), so votes in different
+        // rounds are independent and should NOT trigger equivocation detection.
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        let vertex_a = VertexId([1u8; 32]);
+        let vertex_b = VertexId([2u8; 32]);
+
+        // Vote at round 0 (BftState starts at round 0) for vertex_a
+        let msg_a = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
+        let sig_a = keypairs[0].sign(&msg_a);
+        bft.receive_vote(Vote {
+            vertex_id: vertex_a,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig_a,
+            vrf_proof: None,
+        });
+
+        // Advance to round 1, then round 2, then round 3
+        bft.advance_round();
+        bft.advance_round();
+        bft.advance_round();
+        assert_eq!(bft.round, 3);
+
+        // Vote at round 3 for vertex_b -- different round, so not equivocation
+        let msg_b = vote_sign_data(&vertex_b, 0, 3, &VoteType::Accept, &chain_id);
+        let sig_b = keypairs[0].sign(&msg_b);
+        let _result = bft.receive_vote(Vote {
+            vertex_id: vertex_b,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 3,
+            vote_type: VoteType::Accept,
+            signature: sig_b,
+            vrf_proof: None,
+        });
+
+        // No equivocation should be detected (different rounds)
+        assert!(bft.equivocations().is_empty());
+        // The vote should be accepted (not rejected as equivocation)
+        // It won't produce a certificate with only 1 vote, but it should be stored
+        assert!(bft.votes.contains_key(&vertex_b));
+    }
+
+    #[test]
+    fn equivocation_with_different_vote_types() {
+        // Validator votes Accept on vertex A and Reject on vertex B in the same round.
+        // This is still equivocation (same voter, same round, different vertex).
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        let vertex_a = VertexId([1u8; 32]);
+        let vertex_b = VertexId([2u8; 32]);
+
+        // Accept vote on vertex A
+        let msg_a = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
+        let sig_a = keypairs[0].sign(&msg_a);
+        bft.receive_vote(Vote {
+            vertex_id: vertex_a,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig_a,
+            vrf_proof: None,
+        });
+
+        // Reject vote on vertex B (same round, different vertex)
+        let msg_b = vote_sign_data(&vertex_b, 0, 0, &VoteType::Reject, &chain_id);
+        let sig_b = keypairs[0].sign(&msg_b);
+        let result = bft.receive_vote(Vote {
+            vertex_id: vertex_b,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Reject,
+            signature: sig_b,
+            vrf_proof: None,
+        });
+
+        // Equivocation detected
+        assert!(result.is_none());
+        assert_eq!(bft.equivocations().len(), 1);
+        let ev = &bft.equivocations()[0];
+        assert_eq!(ev.first_vote_type, VoteType::Accept);
+        assert_eq!(ev.second_vote_type, VoteType::Reject);
+        assert_eq!(ev.first_vertex, vertex_a);
+        assert_eq!(ev.second_vertex, vertex_b);
+    }
+
+    #[test]
+    fn leader_selection_wraps_beyond_committee_size() {
+        // When round > committee size, leader should wrap via modulo.
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators.clone(), test_chain_id());
+
+        // Advance to round 100 (well beyond committee size of 3)
+        for _ in 0..100 {
+            bft.advance_round();
+        }
+        assert_eq!(bft.round, 100);
+
+        // 100 % 3 == 1, so leader should be validators[1]
+        assert_eq!(bft.leader().unwrap().id, validators[100 % 3].id);
+
+        // Advance to round 101: 101 % 3 == 2
+        bft.advance_round();
+        assert_eq!(bft.leader().unwrap().id, validators[101 % 3].id);
+
+        // Advance to round 102: 102 % 3 == 0
+        bft.advance_round();
+        assert_eq!(bft.leader().unwrap().id, validators[102 % 3].id);
+    }
+
+    #[test]
+    fn vote_sign_data_binding() {
+        // Changing any field in vote_sign_data must produce a different output.
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+        let epoch = 5u64;
+        let round = 3u64;
+        let vote_type = VoteType::Accept;
+
+        let base = vote_sign_data(&vertex_id, epoch, round, &vote_type, &chain_id);
+
+        // Changing epoch
+        let diff_epoch = vote_sign_data(&vertex_id, epoch + 1, round, &vote_type, &chain_id);
+        assert_ne!(base, diff_epoch);
+
+        // Changing round
+        let diff_round = vote_sign_data(&vertex_id, epoch, round + 1, &vote_type, &chain_id);
+        assert_ne!(base, diff_round);
+
+        // Changing vertex_id
+        let other_vertex = VertexId([2u8; 32]);
+        let diff_vertex = vote_sign_data(&other_vertex, epoch, round, &vote_type, &chain_id);
+        assert_ne!(base, diff_vertex);
+
+        // Changing vote_type
+        let diff_type = vote_sign_data(&vertex_id, epoch, round, &VoteType::Reject, &chain_id);
+        assert_ne!(base, diff_type);
+
+        // Changing chain_id
+        let other_chain = crate::hash_domain(b"umbra.chain_id", b"other-chain");
+        let diff_chain = vote_sign_data(&vertex_id, epoch, round, &vote_type, &other_chain);
+        assert_ne!(base, diff_chain);
+    }
+
+    #[test]
+    fn certificate_verify_mixed_valid_and_invalid_signatures() {
+        // Certificate with 3 signatures: 2 valid + 1 invalid (tampered).
+        // Quorum for committee of 4 is 3, so this should fail.
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let vertex_id = VertexId([1u8; 32]);
+
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+
+        // Two valid signatures
+        let sig0 = keypairs[0].sign(&msg);
+        let sig1 = keypairs[1].sign(&msg);
+
+        // One invalid (tampered) signature from validator 2
+        let mut sig2 = keypairs[2].sign(&msg);
+        if !sig2.0.is_empty() {
+            sig2.0[0] ^= 0xFF;
+        }
+
+        let cert = Certificate {
+            vertex_id,
+            round: 0,
+            epoch: 0,
+            signatures: vec![
+                (validators[0].id, sig0),
+                (validators[1].id, sig1),
+                (validators[2].id, sig2), // Invalid
+            ],
+        };
+
+        // Only 2 valid signatures, less than quorum of 3
+        assert!(!cert.verify(&validators, &chain_id));
+    }
+
+    #[test]
+    fn round_advancement_at_high_numbers() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+
+        // Advance to a high round number
+        for _ in 0..10_000 {
+            bft.advance_round();
+        }
+        assert_eq!(bft.round, 10_000);
+
+        // Leader should still work correctly at high round numbers
+        // 10_000 % 3 == 1
+        assert!(bft.leader().is_some());
+
+        // Continue advancing
+        bft.advance_round();
+        assert_eq!(bft.round, 10_001);
+    }
+
+    #[test]
+    fn select_committee_from_proofs_basic() {
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let mut proofs = Vec::new();
+        for _ in 0..10 {
+            let kp = SigningKeypair::generate();
+            let v = Validator::new(kp.public.clone());
+            let vrf_input = epoch_seed.vrf_input(&v.id);
+            let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
+            proofs.push((v, vrf_output));
+        }
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        // Should return at least MIN_COMMITTEE_SIZE members
+        assert!(committee.len() >= crate::constants::MIN_COMMITTEE_SIZE);
+    }
+
+    #[test]
+    fn select_committee_from_proofs_excludes_inactive() {
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let mut proofs = Vec::new();
+        for i in 0..6 {
+            let kp = SigningKeypair::generate();
+            let mut v = Validator::new(kp.public.clone());
+            if i < 3 {
+                v.active = false; // Mark half as inactive
+            }
+            let vrf_input = epoch_seed.vrf_input(&v.id);
+            let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
+            proofs.push((v, vrf_output));
+        }
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        // All returned validators should be active
+        for (v, _) in &committee {
+            assert!(v.active);
+        }
+    }
+
+    #[test]
+    fn select_committee_from_proofs_excludes_future_activation() {
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis(); // epoch 0
+        let mut proofs = Vec::new();
+        for i in 0..6 {
+            let kp = SigningKeypair::generate();
+            let kem_kp = crate::crypto::keys::KemKeypair::generate();
+            // Half activate at epoch 5 (in the future relative to epoch 0)
+            let activation = if i < 3 { 5 } else { 0 };
+            let v =
+                Validator::with_activation(kp.public.clone(), kem_kp.public.clone(), activation);
+            let vrf_input = epoch_seed.vrf_input(&v.id);
+            let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
+            proofs.push((v, vrf_output));
+        }
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        for (v, _) in &committee {
+            assert!(v.activation_epoch <= epoch_seed.epoch);
+        }
+    }
+
+    #[test]
+    fn select_committee_from_proofs_deterministic_ordering() {
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let mut proofs = Vec::new();
+        for _ in 0..10 {
+            let kp = SigningKeypair::generate();
+            let v = Validator::new(kp.public.clone());
+            let vrf_input = epoch_seed.vrf_input(&v.id);
+            let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
+            proofs.push((v, vrf_output));
+        }
+        let c1 = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        let c2 = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        assert_eq!(c1.len(), c2.len());
+        for (a, b) in c1.iter().zip(c2.iter()) {
+            assert_eq!(a.0.id, b.0.id);
+        }
+    }
+
+    #[test]
+    fn select_committee_from_proofs_empty_input() {
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let committee = select_committee_from_proofs(&epoch_seed, &[], 5);
+        assert!(committee.is_empty());
+    }
+
+    #[test]
+    fn select_committee_from_proofs_fallback_when_few_selected() {
+        // With very few validators, all should be included via fallback
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let mut proofs = Vec::new();
+        for _ in 0..3 {
+            let kp = SigningKeypair::generate();
+            let v = Validator::new(kp.public.clone());
+            let vrf_input = epoch_seed.vrf_input(&v.id);
+            let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
+            proofs.push((v, vrf_output));
+        }
+        // With 3 validators and committee_size=21, fallback should include all 3
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 21);
+        assert_eq!(committee.len(), 3);
+    }
+
+    #[test]
+    fn create_vote_with_vrf_proof() {
+        let kp = SigningKeypair::generate();
+        let vrf_output = VrfOutput::evaluate(&kp, b"test-epoch-input");
+        let vertex_id = VertexId([42u8; 32]);
+        let chain_id = test_chain_id();
+        let vote = create_vote(
+            vertex_id,
+            &kp,
+            0,
+            0,
+            true,
+            &chain_id,
+            Some(vrf_output.clone()),
+        );
+        assert!(vote.vrf_proof.is_some());
+        assert_eq!(vote.vrf_proof.unwrap().value, vrf_output.value);
+    }
+
+    #[test]
+    fn dynamic_quorum_various_sizes() {
+        assert_eq!(dynamic_quorum(1), 1);
+        assert_eq!(dynamic_quorum(2), 2);
+        assert_eq!(dynamic_quorum(3), 3);
+        assert_eq!(dynamic_quorum(4), 3);
+        assert_eq!(dynamic_quorum(7), 5);
+        assert_eq!(dynamic_quorum(10), 7);
+        assert_eq!(dynamic_quorum(21), 15);
+        assert_eq!(dynamic_quorum(100), 67);
+    }
+
+    #[test]
+    fn vote_sign_data_includes_all_fields() {
+        let v1 = VertexId([1u8; 32]);
+        let v2 = VertexId([2u8; 32]);
+        let chain_id = test_chain_id();
+
+        // Different vertex_id
+        let d1 = vote_sign_data(&v1, 0, 0, &VoteType::Accept, &chain_id);
+        let d2 = vote_sign_data(&v2, 0, 0, &VoteType::Accept, &chain_id);
+        assert_ne!(d1, d2);
+
+        // Different epoch
+        let d3 = vote_sign_data(&v1, 1, 0, &VoteType::Accept, &chain_id);
+        assert_ne!(d1, d3);
+
+        // Different round
+        let d4 = vote_sign_data(&v1, 0, 1, &VoteType::Accept, &chain_id);
+        assert_ne!(d1, d4);
+
+        // Different vote type
+        let d5 = vote_sign_data(&v1, 0, 0, &VoteType::Reject, &chain_id);
+        assert_ne!(d1, d5);
+
+        // Different chain_id
+        let other_chain = [0xFFu8; 32];
+        let d6 = vote_sign_data(&v1, 0, 0, &VoteType::Accept, &other_chain);
+        assert_ne!(d1, d6);
+    }
+
+    #[test]
+    fn advance_epoch_resets_vrf_state() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+
+        // Register a VRF commitment
+        let kp = SigningKeypair::generate();
+        let vrf = VrfOutput::evaluate(&kp, b"test");
+        let validator_id = [99u8; 32];
+        bft.register_vrf_commitment(validator_id, vrf.proof_commitment);
+        assert!(bft.vrf_commitment(&validator_id).is_some());
+
+        // Advance epoch
+        let new_validators = bft.committee.clone();
+        bft.advance_epoch(1, new_validators);
+
+        // VRF commitments should be cleared
+        assert!(bft.vrf_commitment(&validator_id).is_none());
+    }
+
+    #[test]
+    fn our_vrf_proof_getter() {
+        let (keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+        bft.set_our_keypair(keypairs[0].clone());
+
+        assert!(bft.our_vrf_proof().is_none());
+
+        let vrf = VrfOutput::evaluate(&keypairs[0], b"test-proof");
+        bft.set_our_vrf_proof(vrf.clone());
+        assert!(bft.our_vrf_proof().is_some());
+        assert_eq!(bft.our_vrf_proof().unwrap().value, vrf.value);
+    }
+
+    #[test]
+    fn validator_with_kem_key() {
+        let kp = SigningKeypair::generate();
+        let kem_kp = crate::crypto::keys::KemKeypair::generate();
+        let v = Validator::with_kem(kp.public.clone(), kem_kp.public.clone());
+        assert!(v.kem_public_key.is_some());
+        assert!(v.active);
+        assert_eq!(v.activation_epoch, 0);
+        assert_eq!(v.id, kp.public.fingerprint());
+    }
 }

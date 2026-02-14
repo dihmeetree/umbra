@@ -470,4 +470,283 @@ mod tests {
         assert_eq!(fee, 13_540);
         assert!(fee <= constants::MAX_TX_FEE);
     }
+
+    #[test]
+    fn deserialize_snapshot_roundtrip() {
+        let original: Vec<u8> = vec![10, 20, 30, 40, 50];
+        let bytes = serialize(&original).unwrap();
+        let restored: Vec<u8> = deserialize_snapshot(&bytes).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn deserialize_snapshot_accepts_large_data() {
+        // Create a payload larger than MAX_NETWORK_MESSAGE_BYTES.
+        // `deserialize` would reject this, but `deserialize_snapshot` should not.
+        let large_vec: Vec<u8> = vec![0u8; constants::MAX_NETWORK_MESSAGE_BYTES + 1024];
+        let bytes = serialize(&large_vec).unwrap();
+        // Confirm deserialize rejects it
+        assert!(deserialize::<Vec<u8>>(&bytes).is_err());
+        // Confirm deserialize_snapshot accepts it
+        let restored: Vec<u8> = deserialize_snapshot(&bytes).unwrap();
+        assert_eq!(restored.len(), large_vec.len());
+    }
+
+    #[test]
+    fn deserialize_snapshot_rejects_malformed() {
+        let garbage = [0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let result = deserialize_snapshot::<Vec<u8>>(&garbage);
+        assert!(result.is_err(), "malformed data should be rejected");
+    }
+
+    #[test]
+    fn block_reward_epoch_zero() {
+        assert_eq!(
+            constants::block_reward_for_epoch(0),
+            constants::INITIAL_BLOCK_REWARD
+        );
+    }
+
+    #[test]
+    fn block_reward_halving_at_interval() {
+        // After epoch 500 (first halving): reward >> 1
+        assert_eq!(
+            constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS),
+            constants::INITIAL_BLOCK_REWARD >> 1
+        );
+        // After epoch 1000 (second halving): reward >> 2
+        assert_eq!(
+            constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS * 2),
+            constants::INITIAL_BLOCK_REWARD >> 2
+        );
+    }
+
+    #[test]
+    fn block_reward_zero_after_max_halvings() {
+        // After 63 halvings (epoch 31500+), reward should be 0
+        let epoch = constants::HALVING_INTERVAL_EPOCHS * (constants::MAX_HALVINGS as u64 + 1);
+        assert_eq!(constants::block_reward_for_epoch(epoch), 0);
+    }
+
+    #[test]
+    fn block_reward_no_overflow_large_epoch() {
+        // Should not panic with u64::MAX
+        let reward = constants::block_reward_for_epoch(u64::MAX);
+        assert_eq!(reward, 0);
+    }
+
+    #[test]
+    fn chain_id_deterministic() {
+        let a = constants::chain_id();
+        let b = constants::chain_id();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn chain_id_not_zero() {
+        let id = constants::chain_id();
+        assert_ne!(id, [0u8; 32]);
+    }
+
+    #[test]
+    fn hash_domain_empty_domain() {
+        let h = hash_domain(b"", b"data");
+        // Should produce a valid 32-byte hash (not all zeros)
+        assert_ne!(h, [0u8; 32]);
+    }
+
+    #[test]
+    fn hash_domain_empty_data() {
+        let h = hash_domain(b"umbra.test", b"");
+        // Should produce a valid 32-byte hash (not all zeros)
+        assert_ne!(h, [0u8; 32]);
+    }
+
+    #[test]
+    fn hash_concat_empty_parts() {
+        let a = hash_concat(&[]);
+        let b = hash_concat(&[]);
+        // Should produce a deterministic result
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_concat_single_part() {
+        let h = hash_concat(&[b"single"]);
+        // Should produce a valid 32-byte hash
+        assert_ne!(h, [0u8; 32]);
+        // Should be deterministic
+        assert_eq!(h, hash_concat(&[b"single"]));
+    }
+
+    #[test]
+    fn deserialize_exact_boundary() {
+        // Create data that serializes to exactly MAX_NETWORK_MESSAGE_BYTES.
+        // We serialize a Vec<u8> whose serialized form is at the boundary.
+        // bincode legacy encodes Vec<u8> as: 8 bytes length prefix + payload.
+        let payload_len = constants::MAX_NETWORK_MESSAGE_BYTES - 8;
+        let data = vec![0u8; payload_len];
+        let bytes = serialize(&data).unwrap();
+        assert_eq!(bytes.len(), constants::MAX_NETWORK_MESSAGE_BYTES);
+        // Should succeed since it is exactly at the limit, not exceeding it
+        let restored: Vec<u8> = deserialize(&bytes).unwrap();
+        assert_eq!(restored.len(), payload_len);
+    }
+
+    #[test]
+    fn deserialize_empty_input() {
+        let result = deserialize::<u64>(b"");
+        assert!(result.is_err(), "empty input should fail to deserialize");
+    }
+
+    #[test]
+    fn compute_weight_fee_zero_inputs() {
+        // 0 inputs, 0 outputs, 0 message bytes: just the base fee
+        assert_eq!(constants::compute_weight_fee(0, 0, 0), constants::FEE_BASE);
+    }
+
+    #[test]
+    fn compute_weight_fee_at_max_io() {
+        // MAX_TX_IO inputs and outputs, no messages
+        let fee = constants::compute_weight_fee(constants::MAX_TX_IO, constants::MAX_TX_IO, 0);
+        let expected = constants::FEE_BASE
+            + (constants::MAX_TX_IO as u64) * constants::FEE_PER_INPUT
+            + (constants::MAX_TX_IO as u64) * constants::FEE_PER_OUTPUT;
+        assert_eq!(fee, expected);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn constants_bft_quorum_safety() {
+        // Quorum must not exceed committee size
+        assert!(
+            constants::BFT_QUORUM <= constants::COMMITTEE_SIZE,
+            "BFT_QUORUM ({}) must be <= COMMITTEE_SIZE ({})",
+            constants::BFT_QUORUM,
+            constants::COMMITTEE_SIZE
+        );
+        // Quorum must be strictly greater than 2/3 of committee size (Byzantine fault tolerance)
+        assert!(
+            constants::BFT_QUORUM > constants::COMMITTEE_SIZE * 2 / 3,
+            "BFT_QUORUM ({}) must be > COMMITTEE_SIZE * 2 / 3 ({})",
+            constants::BFT_QUORUM,
+            constants::COMMITTEE_SIZE * 2 / 3
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn constants_min_committee_allows_bft() {
+        // Need at least f=1 -> 3f+1=4 for BFT safety
+        assert!(
+            constants::MIN_COMMITTEE_SIZE >= 4,
+            "MIN_COMMITTEE_SIZE ({}) must be >= 4 for BFT safety (f=1 requires 3f+1=4)",
+            constants::MIN_COMMITTEE_SIZE
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn constants_snapshot_chunk_fits_network() {
+        assert!(
+            constants::SNAPSHOT_CHUNK_SIZE < constants::MAX_NETWORK_MESSAGE_BYTES,
+            "SNAPSHOT_CHUNK_SIZE ({}) must be < MAX_NETWORK_MESSAGE_BYTES ({})",
+            constants::SNAPSHOT_CHUNK_SIZE,
+            constants::MAX_NETWORK_MESSAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn constants_port_uniqueness() {
+        assert_ne!(
+            constants::DEFAULT_P2P_PORT,
+            constants::DEFAULT_RPC_PORT,
+            "P2P and RPC ports must be different"
+        );
+    }
+
+    #[test]
+    fn hash_domain_empty_data_still_differs_by_domain() {
+        let h1 = hash_domain(b"domain.a", b"");
+        let h2 = hash_domain(b"domain.b", b"");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn hash_concat_order_matters() {
+        let h1 = hash_concat(&[b"hello", b"world"]);
+        let h2 = hash_concat(&[b"world", b"hello"]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer string"));
+        assert!(!constant_time_eq(b"", b"notempty"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn serialize_deserialize_various_types() {
+        // Test with u64
+        let val: u64 = 42;
+        let bytes = serialize(&val).unwrap();
+        let restored: u64 = deserialize(&bytes).unwrap();
+        assert_eq!(val, restored);
+
+        // Test with Vec<u8>
+        let val: Vec<u8> = vec![1, 2, 3, 4, 5];
+        let bytes = serialize(&val).unwrap();
+        let restored: Vec<u8> = deserialize(&bytes).unwrap();
+        assert_eq!(val, restored);
+
+        // Test with String
+        let val = String::from("test string");
+        let bytes = serialize(&val).unwrap();
+        let restored: String = deserialize(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn deserialize_snapshot_rejects_empty() {
+        let result: Result<Vec<u8>, _> = deserialize_snapshot(b"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn blinding_factor_from_bytes_deterministic() {
+        use crate::crypto::commitment::BlindingFactor;
+        let b1 = BlindingFactor::from_bytes([42u8; 32]);
+        let b2 = BlindingFactor::from_bytes([42u8; 32]);
+        assert_eq!(b1.0, b2.0);
+    }
+
+    #[test]
+    fn block_reward_decreases_with_halvings() {
+        let r0 = constants::block_reward_for_epoch(0);
+        let r1 = constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS);
+        assert!(r1 < r0);
+        assert_eq!(r1, r0 / 2);
+    }
+
+    #[test]
+    fn required_bond_increases_with_validators() {
+        let bond_10 = constants::required_validator_bond(10);
+        let bond_100 = constants::required_validator_bond(100);
+        assert!(bond_100 > bond_10);
+    }
+
+    #[test]
+    fn compute_weight_fee_increases_with_io() {
+        let fee1 = constants::compute_weight_fee(1, 1, 0);
+        let fee2 = constants::compute_weight_fee(2, 2, 0);
+        assert!(fee2 > fee1);
+    }
+
+    #[test]
+    fn compute_weight_fee_increases_with_messages() {
+        let fee1 = constants::compute_weight_fee(1, 1, 0);
+        let fee2 = constants::compute_weight_fee(1, 1, 1000);
+        assert!(fee2 > fee1);
+    }
 }

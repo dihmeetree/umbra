@@ -1191,4 +1191,574 @@ mod tests {
         let dag = Dag::new(genesis);
         assert!(dag.get(&VertexId([0xFF; 32])).is_none());
     }
+
+    #[test]
+    fn vertex_compute_id_changes_with_each_parameter() {
+        let parents = vec![VertexId([1u8; 32])];
+        let epoch = 0u64;
+        let round = 1u64;
+        let proposer_fp = [0u8; 32];
+        let tx_root = [0u8; 32];
+
+        let base_id = Vertex::compute_id(&parents, epoch, round, &proposer_fp, &tx_root, None);
+
+        // Changing parents produces a different ID
+        let different_parents = vec![VertexId([2u8; 32])];
+        let id_diff_parents = Vertex::compute_id(
+            &different_parents,
+            epoch,
+            round,
+            &proposer_fp,
+            &tx_root,
+            None,
+        );
+        assert_ne!(base_id, id_diff_parents);
+
+        // Changing epoch produces a different ID
+        let id_diff_epoch =
+            Vertex::compute_id(&parents, epoch + 1, round, &proposer_fp, &tx_root, None);
+        assert_ne!(base_id, id_diff_epoch);
+
+        // Changing round produces a different ID
+        let id_diff_round =
+            Vertex::compute_id(&parents, epoch, round + 1, &proposer_fp, &tx_root, None);
+        assert_ne!(base_id, id_diff_round);
+
+        // Changing proposer produces a different ID
+        let different_proposer = [99u8; 32];
+        let id_diff_proposer =
+            Vertex::compute_id(&parents, epoch, round, &different_proposer, &tx_root, None);
+        assert_ne!(base_id, id_diff_proposer);
+    }
+
+    #[test]
+    fn vertex_tx_root_multiple_transactions() {
+        use crate::crypto::commitment::Commitment;
+        use crate::crypto::encryption::EncryptedPayload;
+        use crate::crypto::keys::KemCiphertext;
+        use crate::crypto::nullifier::Nullifier;
+        use crate::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
+        use crate::crypto::stealth::StealthAddress;
+        use crate::transaction::{TxInput, TxOutput, TxType};
+
+        let make_dummy_tx = |nonce: u8| -> Transaction {
+            Transaction {
+                inputs: vec![TxInput {
+                    nullifier: Nullifier([nonce; 32]),
+                    proof_link: [nonce; 32],
+                    spend_proof: SpendStarkProof {
+                        proof_bytes: vec![nonce],
+                        public_inputs_bytes: vec![nonce],
+                    },
+                }],
+                outputs: vec![TxOutput {
+                    commitment: Commitment([nonce; 32]),
+                    stealth_address: StealthAddress {
+                        one_time_key: [nonce; 32],
+                        kem_ciphertext: KemCiphertext(vec![nonce]),
+                    },
+                    encrypted_note: EncryptedPayload {
+                        kem_ciphertext: KemCiphertext(vec![nonce]),
+                        nonce: [nonce; 24],
+                        ciphertext: vec![nonce],
+                        mac: [nonce; 32],
+                    },
+                }],
+                fee: 0,
+                chain_id: [0u8; 32],
+                expiry_epoch: 0,
+                balance_proof: BalanceStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: vec![],
+                },
+                messages: vec![],
+                tx_binding: [nonce; 32],
+                tx_type: TxType::Transfer,
+            }
+        };
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+
+        // Create vertex with transactions
+        let txs = vec![make_dummy_tx(1), make_dummy_tx(2), make_dummy_tx(3)];
+        let id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[0; 32], None);
+        let v_with_txs = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: txs.clone(),
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        let root1 = v_with_txs.tx_root();
+
+        // tx_root of non-empty vertex differs from empty tx_root
+        let empty_root = genesis.tx_root();
+        assert_ne!(root1, empty_root);
+
+        // tx_root is deterministic: same transactions produce same root
+        let v_with_txs_copy = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: txs,
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        let root2 = v_with_txs_copy.tx_root();
+        assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn vertex_tx_ids_returns_correct_ids() {
+        use crate::crypto::stark::types::BalanceStarkProof;
+        use crate::transaction::TxType;
+
+        // Create known transactions with distinct content
+        let make_dummy_tx = |nonce: u8| -> Transaction {
+            Transaction {
+                inputs: vec![],
+                outputs: vec![],
+                fee: nonce as u64,
+                chain_id: [nonce; 32],
+                expiry_epoch: 0,
+                balance_proof: BalanceStarkProof {
+                    proof_bytes: vec![nonce],
+                    public_inputs_bytes: vec![nonce],
+                },
+                messages: vec![],
+                tx_binding: [nonce; 32],
+                tx_type: TxType::Transfer,
+            }
+        };
+
+        let tx1 = make_dummy_tx(10);
+        let tx2 = make_dummy_tx(20);
+        let expected_ids = [tx1.tx_id(), tx2.tx_id()];
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[0; 32], None);
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: vec![tx1, tx2],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        let tx_ids = v.tx_ids();
+        assert_eq!(tx_ids.len(), 2);
+        assert_eq!(tx_ids[0], expected_ids[0]);
+        assert_eq!(tx_ids[1], expected_ids[1]);
+    }
+
+    #[test]
+    fn dag_tips_with_only_genesis() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let dag = Dag::new(genesis);
+
+        let tips = dag.tips();
+        assert_eq!(tips.len(), 1);
+        assert!(tips.contains(&gid));
+    }
+
+    #[test]
+    fn dag_single_validator() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Insert a vertex from a single validator
+        let v1 = make_vertex(vec![gid], 1);
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+
+        // Tips should be just v1
+        assert_eq!(dag.tips().len(), 1);
+        assert!(dag.tips().contains(&v1_id));
+
+        // Finalize and verify
+        dag.finalize(&v1_id);
+        assert!(dag.is_finalized(&v1_id));
+
+        let order = dag.finalized_order();
+        assert_eq!(order.len(), 2);
+        assert_eq!(order[0], gid);
+        assert_eq!(order[1], v1_id);
+    }
+
+    #[test]
+    fn finalized_order_genesis_only() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let dag = Dag::new(genesis);
+
+        // Genesis is finalized by default
+        let order = dag.finalized_order();
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0], gid);
+    }
+
+    #[test]
+    fn vertex_validate_structure_rejects_id_mismatch() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+
+        // Create a vertex with a correct ID, then tamper with it
+        let correct_id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[1; 32], None);
+        let wrong_id = VertexId([0xAA; 32]); // Does not match compute_id()
+        let v = Vertex {
+            id: wrong_id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey(vec![0; 32]),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature(vec![]),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        assert_ne!(correct_id, wrong_id);
+        let result = v.validate_structure(false);
+        assert!(matches!(result, Err(VertexError::InvalidId)));
+    }
+
+    #[test]
+    fn vertex_validate_structure_rejects_bad_signature() {
+        use crate::crypto::keys::SigningKeypair;
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+
+        let kp = SigningKeypair::generate();
+        let proposer = kp.public.clone();
+        let proposer_fp = proposer.fingerprint();
+
+        // Compute the vertex ID correctly (no txs, so tx_root is all zeros)
+        let tx_root = [0u8; 32];
+        let id = Vertex::compute_id(&[gid], 0, 1, &proposer_fp, &tx_root, None);
+
+        // Sign the correct data
+        let mut sig = kp.sign(&id.0);
+        // Tamper with the signature
+        if !sig.0.is_empty() {
+            sig.0[0] ^= 0xFF;
+        }
+
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer,
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: sig,
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        let result = v.validate_structure(false);
+        assert!(matches!(result, Err(VertexError::InvalidSignature)));
+    }
+
+    #[test]
+    fn validate_vrf_missing_proof() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Create a vertex with no VRF proof
+        let v = make_vertex(vec![gid], 1);
+        dag.insert_unchecked(v.clone()).unwrap();
+
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let result = v.validate_vrf(&epoch_seed, 100, None);
+        assert!(matches!(result, Err(VertexError::MissingVrf)));
+    }
+
+    #[test]
+    fn validate_vrf_valid_proof() {
+        use crate::crypto::keys::SigningKeypair;
+
+        let kp = SigningKeypair::generate();
+        let proposer_fp = kp.public.fingerprint();
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let vrf_input = epoch_seed.vrf_input(&proposer_fp);
+        let vrf_output = crate::crypto::vrf::VrfOutput::evaluate(&kp, &vrf_input);
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let tx_root = [0u8; 32];
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            Some(&vrf_output.value),
+        );
+        let sig = kp.sign(&id.0);
+
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: kp.public.clone(),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: sig,
+            vrf_proof: Some(vrf_output.clone()),
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        // With 1 total validator, is_selected always returns true
+        let result = v.validate_vrf(&epoch_seed, 1, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_vrf_with_commitment() {
+        use crate::crypto::keys::SigningKeypair;
+
+        let kp = SigningKeypair::generate();
+        let proposer_fp = kp.public.fingerprint();
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let vrf_input = epoch_seed.vrf_input(&proposer_fp);
+        let vrf_output = crate::crypto::vrf::VrfOutput::evaluate(&kp, &vrf_input);
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let tx_root = [0u8; 32];
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            Some(&vrf_output.value),
+        );
+        let sig = kp.sign(&id.0);
+
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: kp.public.clone(),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: sig,
+            vrf_proof: Some(vrf_output.clone()),
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        // Verify with correct commitment
+        let result = v.validate_vrf(&epoch_seed, 1, Some(&vrf_output.proof_commitment));
+        assert!(result.is_ok());
+
+        // Verify with wrong commitment should fail
+        let wrong_commitment = [0xFFu8; 32];
+        let result = v.validate_vrf(&epoch_seed, 1, Some(&wrong_commitment));
+        assert!(matches!(result, Err(VertexError::InvalidVrf)));
+    }
+
+    #[test]
+    fn validate_vrf_invalid_proof() {
+        use crate::crypto::keys::SigningKeypair;
+
+        let kp = SigningKeypair::generate();
+        let proposer_fp = kp.public.fingerprint();
+        let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+        let vrf_input = epoch_seed.vrf_input(&proposer_fp);
+        let mut vrf_output = crate::crypto::vrf::VrfOutput::evaluate(&kp, &vrf_input);
+        // Tamper with the VRF value
+        vrf_output.value[0] ^= 0xFF;
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let tx_root = [0u8; 32];
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            Some(&vrf_output.value),
+        );
+        let sig = kp.sign(&id.0);
+
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: kp.public.clone(),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: sig,
+            vrf_proof: Some(vrf_output),
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        let result = v.validate_vrf(&epoch_seed, 1, None);
+        assert!(matches!(result, Err(VertexError::InvalidVrf)));
+    }
+
+    #[test]
+    fn children_tracking_after_insert() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex_with_nonce(vec![gid], 1, 0);
+        let v2 = make_vertex_with_nonce(vec![gid], 1, 1);
+        let v1_id = v1.id;
+        let v2_id = v2.id;
+        dag.insert_unchecked(v1).unwrap();
+        dag.insert_unchecked(v2).unwrap();
+
+        // v1 and v2 should both be tips (no children)
+        let tips = dag.tips();
+        assert!(tips.contains(&v1_id));
+        assert!(tips.contains(&v2_id));
+        assert!(!tips.contains(&gid)); // genesis is no longer a tip
+
+        // Insert v3 referencing both v1 and v2
+        let v3 = make_vertex(vec![v1_id, v2_id], 2);
+        let v3_id = v3.id;
+        dag.insert_unchecked(v3).unwrap();
+
+        // Only v3 should be a tip now
+        let tips = dag.tips();
+        assert_eq!(tips.len(), 1);
+        assert!(tips.contains(&v3_id));
+    }
+
+    #[test]
+    fn finalize_chain_then_prune() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Build a chain of 5 vertices
+        let mut prev = gid;
+        let mut ids = vec![gid];
+        for i in 1..=5u64 {
+            let v = make_vertex_with_nonce(vec![prev], i, i as u8);
+            prev = v.id;
+            ids.push(v.id);
+            dag.insert_unchecked(v).unwrap();
+        }
+
+        // Finalize all
+        for id in &ids[1..] {
+            dag.finalize(id);
+        }
+
+        // Prune keeping only last 2
+        let pruned = dag.prune_finalized(2);
+        assert!(pruned > 0);
+        // After pruning, len should be smaller
+        assert!(dag.len() <= 3); // at most tip + 2 kept
+    }
+
+    #[test]
+    fn vertex_validate_structure_accepts_valid_signed() {
+        use crate::crypto::keys::SigningKeypair;
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+
+        let kp = SigningKeypair::generate();
+        let proposer_fp = kp.public.fingerprint();
+        let tx_root = [0u8; 32];
+        let id = Vertex::compute_id(&[gid], 0, 1, &proposer_fp, &tx_root, None);
+        let sig = kp.sign(&id.0);
+
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: kp.public.clone(),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: sig,
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+
+        assert!(v.validate_structure(false).is_ok());
+    }
+
+    #[test]
+    fn dag_multiple_tips() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Create 3 vertices all referencing genesis (creates 3 tips)
+        let v1 = make_vertex_with_nonce(vec![gid], 1, 0);
+        let v2 = make_vertex_with_nonce(vec![gid], 1, 1);
+        let v3 = make_vertex_with_nonce(vec![gid], 1, 2);
+        let id1 = v1.id;
+        let id2 = v2.id;
+        let id3 = v3.id;
+        dag.insert_unchecked(v1).unwrap();
+        dag.insert_unchecked(v2).unwrap();
+        dag.insert_unchecked(v3).unwrap();
+
+        let tips = dag.tips();
+        assert_eq!(tips.len(), 3);
+        assert!(tips.contains(&id1));
+        assert!(tips.contains(&id2));
+        assert!(tips.contains(&id3));
+    }
+
+    #[test]
+    fn ancestors_bounded_empty() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let dag = Dag::new(genesis);
+        let anc = dag.ancestors_bounded(&gid, 100);
+        assert!(anc.is_empty());
+    }
+
+    #[test]
+    fn finalize_returns_false_for_unknown() {
+        let genesis = Dag::genesis_vertex();
+        let mut dag = Dag::new(genesis);
+        let unknown = VertexId([0xFFu8; 32]);
+        assert!(!dag.finalize(&unknown));
+    }
 }

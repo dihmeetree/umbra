@@ -1044,4 +1044,367 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn validate_rejects_fee_too_high() {
+        let mut tx = make_test_tx();
+        tx.fee = crate::constants::MAX_TX_FEE + 1;
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::FeeTooHigh)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_deregister_invalid_signature_size() {
+        // A ValidatorDeregister with an auth_signature of 100 bytes (neither 0 nor 4627)
+        // should trigger InvalidBondReturn.
+        let mut tx = make_test_tx();
+        let kp = FullKeypair::generate();
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&kp.kem.public, 0).unwrap();
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt(&kp.kem.public, b"bond return")
+                .unwrap();
+        tx.tx_type = TxType::ValidatorDeregister {
+            validator_id: [0x42; 32],
+            auth_signature: Signature(vec![0xAB; 100]), // wrong size: not 0 and not 4627
+            bond_return_output: Box::new(TxOutput {
+                commitment: crate::crypto::commitment::Commitment([1u8; 32]), // non-zero
+                stealth_address: stealth_result.address,
+                encrypted_note,
+            }),
+            bond_blinding: [0u8; 32],
+        };
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::InvalidBondReturn)
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_max_inputs() {
+        // Build a tx with exactly MAX_TX_IO inputs. It should NOT produce TooManyInputs.
+        // It may fail on other validation (e.g., fee mismatch, binding), which is fine.
+        let mut tx = make_test_tx();
+        let extra = tx.inputs[0].clone();
+        while tx.inputs.len() < crate::constants::MAX_TX_IO {
+            let mut cloned = extra.clone();
+            // Give each input a unique nullifier to avoid DuplicateNullifier
+            cloned.nullifier = crate::crypto::nullifier::Nullifier(crate::hash_domain(
+                b"test.nullifier",
+                &(tx.inputs.len() as u64).to_le_bytes(),
+            ));
+            tx.inputs.push(cloned);
+        }
+        assert_eq!(tx.inputs.len(), crate::constants::MAX_TX_IO);
+        let result = tx.validate_structure(0);
+        // It may error on other checks, but NOT TooManyInputs
+        assert!(
+            !matches!(result, Err(TxValidationError::TooManyInputs)),
+            "should not produce TooManyInputs with exactly MAX_TX_IO inputs, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validate_accepts_max_outputs() {
+        // Build a tx with exactly MAX_TX_IO outputs. It should NOT produce TooManyOutputs.
+        let mut tx = make_test_tx();
+        let extra = tx.outputs[0].clone();
+        while tx.outputs.len() < crate::constants::MAX_TX_IO {
+            let mut cloned = extra.clone();
+            // Give each output a unique commitment to avoid DuplicateOutputCommitment
+            let mut comm_bytes = [0u8; 32];
+            comm_bytes[0..8].copy_from_slice(&(tx.outputs.len() as u64).to_le_bytes());
+            cloned.commitment = crate::crypto::commitment::Commitment(comm_bytes);
+            tx.outputs.push(cloned);
+        }
+        assert_eq!(tx.outputs.len(), crate::constants::MAX_TX_IO);
+        let result = tx.validate_structure(0);
+        // It may error on other checks, but NOT TooManyOutputs
+        assert!(
+            !matches!(result, Err(TxValidationError::TooManyOutputs)),
+            "should not produce TooManyOutputs with exactly MAX_TX_IO outputs, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validate_accepts_max_message_size() {
+        // Build a tx with a message of exactly MAX_MESSAGE_SIZE bytes (ciphertext).
+        // It should NOT produce MessageTooLarge. Other validation errors are fine.
+        let mut tx = make_test_tx();
+        tx.messages.push(TxMessage {
+            payload: crate::crypto::encryption::EncryptedPayload {
+                ciphertext: vec![0u8; crate::constants::MAX_MESSAGE_SIZE],
+                nonce: [0u8; 24],
+                mac: [0u8; 32],
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
+            },
+        });
+        let result = tx.validate_structure(0);
+        assert!(
+            !matches!(result, Err(TxValidationError::MessageTooLarge)),
+            "should not produce MessageTooLarge with exactly MAX_MESSAGE_SIZE bytes, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn validate_accepts_max_messages() {
+        // Build a tx with exactly MAX_MESSAGES_PER_TX messages. Should NOT produce TooManyMessages.
+        let mut tx = make_test_tx();
+        let msg = TxMessage {
+            payload: crate::crypto::encryption::EncryptedPayload {
+                ciphertext: vec![0u8; 10],
+                nonce: [0u8; 24],
+                mac: [0u8; 32],
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
+            },
+        };
+        for _ in 0..crate::constants::MAX_MESSAGES_PER_TX {
+            tx.messages.push(msg.clone());
+        }
+        assert_eq!(tx.messages.len(), crate::constants::MAX_MESSAGES_PER_TX);
+        let result = tx.validate_structure(0);
+        assert!(
+            !matches!(result, Err(TxValidationError::TooManyMessages)),
+            "should not produce TooManyMessages with exactly MAX_MESSAGES_PER_TX messages, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn tx_content_hash_changes_with_chain_id() {
+        let mut tx1 = make_test_tx();
+        let mut tx2 = make_test_tx();
+        // Give them different chain_ids but keep everything else structurally identical
+        tx1.chain_id = [1u8; 32];
+        tx2.chain_id = [2u8; 32];
+        assert_ne!(
+            tx1.tx_content_hash(),
+            tx2.tx_content_hash(),
+            "tx_content_hash should differ when chain_id differs"
+        );
+    }
+
+    #[test]
+    fn estimated_size_increases_with_inputs() {
+        let recipient = FullKeypair::generate();
+        // 1 input, 1 output
+        let tx1 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth1"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 700)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        // 2 inputs, 1 output (fee = 100 + 200 + 100 = 400)
+        let tx2 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 700,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth2a"),
+                merkle_path: vec![],
+            })
+            .add_input(InputSpec {
+                value: 700,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth2b"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 1000)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        assert!(
+            tx2.estimated_size() > tx1.estimated_size(),
+            "2-input tx ({}) should be larger than 1-input tx ({})",
+            tx2.estimated_size(),
+            tx1.estimated_size()
+        );
+    }
+
+    #[test]
+    fn decode_note_rejects_empty() {
+        assert!(crate::transaction::builder::decode_note(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_note_rejects_short() {
+        assert!(crate::transaction::builder::decode_note(&[0u8; 39]).is_none());
+    }
+
+    #[test]
+    fn decode_note_rejects_long() {
+        assert!(crate::transaction::builder::decode_note(&[0u8; 41]).is_none());
+    }
+
+    #[test]
+    fn decode_note_accepts_zeros() {
+        let result = crate::transaction::builder::decode_note(&[0u8; 40]);
+        assert!(
+            result.is_some(),
+            "decode_note should accept exactly 40 zero bytes"
+        );
+        let (value, blinding) = result.unwrap();
+        assert_eq!(value, 0);
+        assert_eq!(blinding.0, [0u8; 32]);
+    }
+
+    #[test]
+    fn compute_fee_direct() {
+        // Build a transaction and verify compute_fee matches
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 400,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([200; 32]),
+                spend_auth: crate::hash_domain(b"test", &[200]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        let expected = crate::constants::compute_weight_fee(tx.inputs.len(), tx.outputs.len(), 0);
+        assert_eq!(tx.compute_fee(), expected);
+        assert_eq!(tx.fee, expected);
+    }
+
+    #[test]
+    fn tx_id_changes_with_different_fee() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        // 1 input, 1 output -> fee = 300, input = 100 + 300 = 400
+        let tx1 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 400,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([201; 32]),
+                spend_auth: crate::hash_domain(b"test", &[201]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        // 1 input, 2 outputs -> fee = 400, input = 200 + 400 = 600
+        let tx2 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 600,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([202; 32]),
+                spend_auth: crate::hash_domain(b"test", &[202]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        assert_ne!(tx1.fee, tx2.fee);
+        assert_ne!(tx1.tx_id(), tx2.tx_id());
+    }
+
+    #[test]
+    fn estimated_size_increases_with_outputs() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        // 1 input, 1 output -> fee = 300, input = 100 + 300 = 400
+        let tx1 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 400,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([203; 32]),
+                spend_auth: crate::hash_domain(b"test", &[203]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        // 1 input, 3 outputs -> fee = 100 + 100 + 300 = 500, input = 300 + 500 = 800
+        let tx2 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 800,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([204; 32]),
+                spend_auth: crate::hash_domain(b"test", &[204]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .add_output(recipient.kem.public.clone(), 100)
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        assert!(tx2.estimated_size() > tx1.estimated_size());
+    }
+
+    #[test]
+    fn tx_content_hash_changes_with_fee() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx1 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 400,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([205; 32]),
+                spend_auth: crate::hash_domain(b"test", &[205]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        let tx2 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 600,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([206; 32]),
+                spend_auth: crate::hash_domain(b"test", &[206]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        assert_ne!(tx1.tx_content_hash(), tx2.tx_content_hash());
+    }
+
+    #[test]
+    fn deregister_sign_data_differs_by_validator_id() {
+        let chain_id = crate::constants::chain_id();
+        let content_hash = [42u8; 32];
+        let d1 = deregister_sign_data(&chain_id, &[1u8; 32], &content_hash);
+        let d2 = deregister_sign_data(&chain_id, &[2u8; 32], &content_hash);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn deregister_sign_data_differs_by_content_hash() {
+        let chain_id = crate::constants::chain_id();
+        let validator_id = [1u8; 32];
+        let d1 = deregister_sign_data(&chain_id, &validator_id, &[42u8; 32]);
+        let d2 = deregister_sign_data(&chain_id, &validator_id, &[43u8; 32]);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn transaction_with_zero_messages() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 400,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([207; 32]),
+                spend_auth: crate::hash_domain(b"test", &[207]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        assert!(tx.messages.is_empty());
+        assert!(tx.validate_structure(0).is_ok());
+    }
 }

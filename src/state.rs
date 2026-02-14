@@ -2577,4 +2577,260 @@ mod tests {
         assert!(bond_at_100 > bond_at_1);
         assert_eq!(bond_at_100, 2_000_000);
     }
+
+    #[test]
+    fn eligible_validators_empty_set() {
+        let state = ChainState::new();
+        let eligible = state.eligible_validators(0);
+        assert!(eligible.is_empty());
+    }
+
+    #[test]
+    fn eligible_validators_mixed_activation_epochs() {
+        let mut state = ChainState::new();
+
+        // Register 3 validators with different activation epochs
+        let kp0 = SigningKeypair::generate();
+        let kem0 = KemKeypair::generate();
+        let v0 = Validator::with_activation(kp0.public.clone(), kem0.public.clone(), 0);
+        let vid0 = v0.id;
+        state.register_genesis_validator(v0);
+
+        let kp1 = SigningKeypair::generate();
+        let kem1 = KemKeypair::generate();
+        let mut v1 = Validator::with_kem(kp1.public.clone(), kem1.public.clone());
+        v1.activation_epoch = 1;
+        let vid1 = v1.id;
+        state.register_genesis_validator(v1);
+
+        let kp5 = SigningKeypair::generate();
+        let kem5 = KemKeypair::generate();
+        let mut v5 = Validator::with_kem(kp5.public.clone(), kem5.public.clone());
+        v5.activation_epoch = 5;
+        let vid5 = v5.id;
+        state.register_genesis_validator(v5);
+
+        // Epoch 0: only v0 is eligible
+        let eligible_0 = state.eligible_validators(0);
+        assert_eq!(eligible_0.len(), 1);
+        assert!(eligible_0.iter().any(|v| v.id == vid0));
+
+        // Epoch 1: v0 and v1 are eligible
+        let eligible_1 = state.eligible_validators(1);
+        assert_eq!(eligible_1.len(), 2);
+        assert!(eligible_1.iter().any(|v| v.id == vid0));
+        assert!(eligible_1.iter().any(|v| v.id == vid1));
+
+        // Epoch 5: all three are eligible
+        let eligible_5 = state.eligible_validators(5);
+        assert_eq!(eligible_5.len(), 3);
+        assert!(eligible_5.iter().any(|v| v.id == vid0));
+        assert!(eligible_5.iter().any(|v| v.id == vid1));
+        assert!(eligible_5.iter().any(|v| v.id == vid5));
+
+        // Epoch 6: all three still eligible
+        let eligible_6 = state.eligible_validators(6);
+        assert_eq!(eligible_6.len(), 3);
+    }
+
+    #[test]
+    fn active_validators_empty() {
+        let state = ChainState::new();
+        let active = state.active_validators();
+        assert!(active.is_empty());
+    }
+
+    #[test]
+    fn validator_set_hash_deterministic() {
+        let mut state1 = ChainState::new();
+        let mut state2 = ChainState::new();
+
+        let kp_a = SigningKeypair::generate();
+        let kp_b = SigningKeypair::generate();
+
+        let v_a = Validator::new(kp_a.public.clone());
+        let v_b = Validator::new(kp_b.public.clone());
+
+        // Register in different order
+        state1.register_genesis_validator(v_a.clone());
+        state1.register_genesis_validator(v_b.clone());
+
+        state2.register_genesis_validator(v_b);
+        state2.register_genesis_validator(v_a);
+
+        // validator_set_hash sorts by ID, so order of registration should not matter
+        assert_eq!(
+            state1.state_root(),
+            state2.state_root(),
+            "same validators registered in different order should produce the same state root"
+        );
+    }
+
+    #[test]
+    fn slash_validator_already_inactive() {
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+
+        state.register_genesis_validator(v);
+
+        // Manually deactivate the validator
+        state.validators.get_mut(&vid).unwrap().active = false;
+        assert!(!state.is_active_validator(&vid));
+
+        // Slashing an already-inactive validator should still work
+        let result = state.slash_validator(&vid);
+        assert!(result.is_ok(), "slashing inactive validator should succeed");
+        assert!(state.is_slashed(&vid));
+        assert!(!state.is_active_validator(&vid));
+    }
+
+    #[test]
+    fn multi_epoch_progression() {
+        let mut state = ChainState::new();
+
+        // Register a validator and slash it so we have some fees
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let _vid = v.id;
+        state.register_genesis_validator(v);
+
+        assert_eq!(state.epoch(), 0);
+
+        let mut prev_seed = state.epoch_seed().seed;
+
+        // Advance epoch 5 times
+        for expected_epoch in 1..=5u64 {
+            // Accumulate some fees (slash a new validator each round)
+            let kp_new = SigningKeypair::generate();
+            let v_new = Validator::new(kp_new.public.clone());
+            let vid_new = v_new.id;
+            state.register_genesis_validator(v_new);
+            state.slash_validator(&vid_new).unwrap();
+            assert!(state.epoch_fees() > 0);
+
+            let (fees, new_seed) = state.advance_epoch();
+
+            // Verify epoch counter incremented
+            assert_eq!(state.epoch(), expected_epoch);
+
+            // Verify fees were returned and reset
+            assert!(fees > 0);
+            assert_eq!(state.epoch_fees(), 0);
+
+            // Verify seed changed
+            assert_ne!(
+                new_seed.seed, prev_seed,
+                "epoch seed should change each epoch"
+            );
+            prev_seed = new_seed.seed;
+        }
+
+        assert_eq!(state.epoch(), 5);
+    }
+
+    #[test]
+    fn apply_vertex_state_only_updates_state_not_dag() {
+        let mut ledger = Ledger::new();
+
+        // Register a validator with KEM key for coinbase
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        ledger.state.register_genesis_validator(validator);
+
+        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
+
+        // Build a vertex with a transaction
+        let tx = build_valid_tx_for_state(&mut ledger.state, 500, 42);
+        let tx_nullifier = tx.inputs[0].nullifier;
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx]);
+
+        let dag_len_before = ledger.dag.len();
+        let nullifiers_before = ledger.state.nullifier_count();
+
+        // apply_vertex_state_only should NOT insert into DAG
+        let result = ledger.apply_vertex_state_only(&vertex);
+        assert!(
+            result.is_ok(),
+            "apply_vertex_state_only failed: {:?}",
+            result.err()
+        );
+
+        // DAG length should NOT change
+        assert_eq!(ledger.dag.len(), dag_len_before, "DAG should not grow");
+
+        // But nullifier should be recorded in state
+        assert_eq!(ledger.state.nullifier_count(), nullifiers_before + 1);
+        assert!(ledger.state.is_spent(&tx_nullifier));
+    }
+
+    #[test]
+    fn commitment_count_tracks_additions() {
+        let mut state = ChainState::new();
+        assert_eq!(state.commitment_count(), 0);
+
+        for i in 0..3u64 {
+            let blind = BlindingFactor::from_bytes([i as u8 + 1; 32]);
+            state
+                .add_commitment(Commitment::commit(i * 100 + 1, &blind))
+                .unwrap();
+        }
+
+        assert_eq!(state.commitment_count(), 3);
+    }
+
+    #[test]
+    fn nullifier_count_tracks_marking() {
+        let mut state = ChainState::new();
+        assert_eq!(state.nullifier_count(), 0);
+
+        let n1 = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        let n2 = Nullifier::derive(&[3u8; 32], &[4u8; 32]);
+        state.mark_nullifier(n1).unwrap();
+        state.mark_nullifier(n2).unwrap();
+
+        assert_eq!(state.nullifier_count(), 2);
+    }
+
+    #[test]
+    fn get_validator_returns_none_for_missing() {
+        let state = ChainState::new();
+        let missing_id = [99u8; 32];
+        assert!(state.get_validator(&missing_id).is_none());
+    }
+
+    #[test]
+    fn is_active_validator_false_for_missing() {
+        let state = ChainState::new();
+        let missing_id = [99u8; 32];
+        assert!(!state.is_active_validator(&missing_id));
+    }
+
+    #[test]
+    fn total_minted_tracks_coinbase() {
+        let mut state = ChainState::new();
+        assert_eq!(state.total_minted(), 0);
+
+        // Register a validator with KEM key so coinbase can be created
+        let val_signing = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
+        state.register_genesis_validator(validator);
+
+        // Create a coinbase output
+        let vertex_id = VertexId([1u8; 32]);
+        let amount = 50_000u64;
+        let result = state.create_coinbase_output(&vertex_id, &val_signing.public, amount);
+        assert!(result.is_some());
+        assert_eq!(state.total_minted(), amount);
+
+        // Create another coinbase output
+        let vertex_id2 = VertexId([2u8; 32]);
+        let amount2 = 30_000u64;
+        let result2 = state.create_coinbase_output(&vertex_id2, &val_signing.public, amount2);
+        assert!(result2.is_some());
+        assert_eq!(state.total_minted(), amount + amount2);
+    }
 }

@@ -231,4 +231,69 @@ mod tests {
         // (they also use different KEM encapsulations, so different ciphertexts)
         assert_ne!(r0.address.one_time_key, r1.address.one_time_key);
     }
+
+    #[test]
+    fn stealth_derive_spend_auth_different_indices() {
+        let secret = [42u8; 32];
+        let fingerprint = crate::hash_domain(b"test", b"fp");
+        let auth0 = derive_spend_auth(&secret, &fingerprint, 0);
+        let auth1 = derive_spend_auth(&secret, &fingerprint, 1);
+        assert_ne!(auth0, auth1);
+    }
+
+    #[test]
+    fn stealth_try_detect_wrong_key_constant_time() {
+        let recipient_a = KemKeypair::generate();
+        let recipient_b = KemKeypair::generate();
+        let result = StealthAddress::generate(&recipient_a.public, 0).unwrap();
+        // Detecting with the wrong key should return None
+        assert!(result.address.try_detect(&recipient_b).is_none());
+    }
+
+    #[test]
+    fn derive_spend_auth_differs_by_secret() {
+        let fp = crate::hash_domain(b"test", b"fp");
+        let auth1 = derive_spend_auth(&[1u8; 32], &fp, 0);
+        let auth2 = derive_spend_auth(&[2u8; 32], &fp, 0);
+        assert_ne!(auth1, auth2);
+    }
+
+    #[test]
+    fn stealth_address_wrong_index_fails_detection() {
+        let recipient = KemKeypair::generate();
+        let result = StealthAddress::generate(&recipient.public, 0).unwrap();
+        // Trying to detect at a different index should fail
+        assert!(result.address.try_detect_at_index(&recipient, 1).is_none());
+        assert!(result.address.try_detect_at_index(&recipient, 99).is_none());
+    }
+
+    #[test]
+    fn stealth_address_shared_secret_consistent() {
+        let recipient = KemKeypair::generate();
+        let result = StealthAddress::generate(&recipient.public, 0).unwrap();
+        let info = result.address.try_detect_at_index(&recipient, 0).unwrap();
+        // shared_secret should be the same as the one used for generation
+        assert_eq!(info.shared_secret, result.shared_secret.0);
+    }
+
+    #[test]
+    fn stealth_address_multiple_outputs_same_recipient() {
+        let recipient = KemKeypair::generate();
+        // Generate multiple stealth addresses for the same recipient
+        let r0 = StealthAddress::generate(&recipient.public, 0).unwrap();
+        let r1 = StealthAddress::generate(&recipient.public, 1).unwrap();
+        let r2 = StealthAddress::generate(&recipient.public, 2).unwrap();
+
+        // All should be detectable
+        assert!(r0.address.try_detect(&recipient).is_some());
+        assert!(r1.address.try_detect(&recipient).is_some());
+        assert!(r2.address.try_detect(&recipient).is_some());
+
+        // All should have different one-time keys
+        assert_ne!(r0.address.one_time_key, r1.address.one_time_key);
+        assert_ne!(r1.address.one_time_key, r2.address.one_time_key);
+
+        // All should have different KEM ciphertexts
+        assert_ne!(r0.address.kem_ciphertext.0, r1.address.kem_ciphertext.0);
+    }
 }

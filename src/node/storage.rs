@@ -958,4 +958,130 @@ mod tests {
         assert!(storage.get_chain_state_meta().unwrap().is_none());
         assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
     }
+
+    #[test]
+    fn get_vertex_returns_none_for_missing() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let missing_id = crate::consensus::dag::VertexId([0xFFu8; 32]);
+        assert!(storage.get_vertex(&missing_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn has_vertex_returns_false_for_missing() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let missing_id = crate::consensus::dag::VertexId([0xFFu8; 32]);
+        assert!(!storage.has_vertex(&missing_id).unwrap());
+    }
+
+    #[test]
+    fn has_nullifier_returns_false_for_missing() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let missing = crate::crypto::nullifier::Nullifier([0xFFu8; 32]);
+        assert!(!storage.has_nullifier(&missing).unwrap());
+    }
+
+    #[test]
+    fn get_chain_state_meta_returns_none_initially() {
+        let storage = SledStorage::open_temporary().unwrap();
+        assert!(storage.get_chain_state_meta().unwrap().is_none());
+    }
+
+    #[test]
+    fn get_transaction_returns_none_for_missing() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let missing = crate::transaction::TxId([0xFFu8; 32]);
+        assert!(storage.get_transaction(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_validator_returns_none_for_missing() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let missing = [0xFFu8; 32];
+        assert!(storage.get_validator(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_coinbase_output_returns_none_for_missing() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let missing_seq: u64 = 0xFFFFFFFF;
+        assert!(storage.get_coinbase_output(missing_seq).unwrap().is_none());
+    }
+
+    #[test]
+    fn finalized_vertex_count_initially_zero() {
+        let storage = SledStorage::open_temporary().unwrap();
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn get_all_nullifiers_empty_initially() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let nullifiers = storage.get_all_nullifiers().unwrap();
+        assert!(nullifiers.is_empty());
+    }
+
+    #[test]
+    fn get_all_validators_empty_initially() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let validators = storage.get_all_validators().unwrap();
+        assert!(validators.is_empty());
+    }
+
+    #[test]
+    fn get_all_commitment_levels_empty_initially() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let levels = storage.get_all_commitment_levels().unwrap();
+        assert!(levels.is_empty());
+    }
+
+    #[test]
+    fn put_and_get_multiple_nullifiers() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let n1 = crate::crypto::nullifier::Nullifier([1u8; 32]);
+        let n2 = crate::crypto::nullifier::Nullifier([2u8; 32]);
+        let n3 = crate::crypto::nullifier::Nullifier([3u8; 32]);
+
+        storage.put_nullifier(&n1).unwrap();
+        storage.put_nullifier(&n2).unwrap();
+        storage.put_nullifier(&n3).unwrap();
+
+        assert!(storage.has_nullifier(&n1).unwrap());
+        assert!(storage.has_nullifier(&n2).unwrap());
+        assert!(storage.has_nullifier(&n3).unwrap());
+
+        let all = storage.get_all_nullifiers().unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn put_nullifier_idempotent() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let n = crate::crypto::nullifier::Nullifier([42u8; 32]);
+        storage.put_nullifier(&n).unwrap();
+        storage.put_nullifier(&n).unwrap(); // Second insert should not error
+        assert!(storage.has_nullifier(&n).unwrap());
+    }
+
+    #[test]
+    fn get_finalized_vertices_after_empty() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let vertices = storage.get_finalized_vertices_after(0, 100).unwrap();
+        assert!(vertices.is_empty());
+    }
+
+    #[test]
+    fn clear_for_snapshot_import_removes_all_data() {
+        let storage = SledStorage::open_temporary().unwrap();
+        // Put some data
+        let n = crate::crypto::nullifier::Nullifier([1u8; 32]);
+        storage.put_nullifier(&n).unwrap();
+        assert!(storage.has_nullifier(&n).unwrap());
+
+        // Clear everything
+        storage.clear_for_snapshot_import().unwrap();
+
+        // Should be empty now
+        assert!(!storage.has_nullifier(&n).unwrap());
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
+    }
 }

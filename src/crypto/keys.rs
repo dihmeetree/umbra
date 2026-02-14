@@ -540,4 +540,132 @@ mod tests {
         let empty_sig = Signature::empty();
         assert!(!kp.public.verify(b"test message", &empty_sig));
     }
+
+    #[test]
+    fn signing_keypair_from_bytes_roundtrip() {
+        let kp = SigningKeypair::generate();
+        let pk_bytes = kp.public.as_bytes().to_vec();
+        let sk_bytes = kp.secret.0.clone();
+        let restored = SigningKeypair::from_bytes(pk_bytes, sk_bytes).unwrap();
+        let msg = b"roundtrip test message";
+        let sig = restored.sign(msg);
+        assert!(restored.public.verify(msg, &sig));
+        assert!(kp.public.verify(msg, &sig));
+    }
+
+    #[test]
+    fn kem_keypair_from_bytes_roundtrip() {
+        let kp = KemKeypair::generate();
+        let pk_bytes = kp.public.as_bytes().to_vec();
+        let sk_bytes = kp.secret.0.clone();
+        let restored = KemKeypair::from_bytes(pk_bytes, sk_bytes).unwrap();
+        let (ss1, ct) = restored.public.encapsulate().unwrap();
+        let ss2 = restored.decapsulate(&ct).unwrap();
+        assert_eq!(ss1.0, ss2.0);
+    }
+
+    #[test]
+    fn sign_empty_message() {
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"");
+        assert!(kp.public.verify(b"", &sig));
+    }
+
+    #[test]
+    fn verify_rejects_zero_signature() {
+        let kp = SigningKeypair::generate();
+        let zero_sig = Signature(vec![0u8; DILITHIUM5_SIG_BYTES]);
+        assert!(!kp.public.verify(b"test message", &zero_sig));
+    }
+
+    #[test]
+    fn signing_key_valid_size_boundary() {
+        let too_small = SigningPublicKey(vec![0u8; DILITHIUM5_PK_BYTES - 1]);
+        assert!(!too_small.is_valid_size());
+        let too_large = SigningPublicKey(vec![0u8; DILITHIUM5_PK_BYTES + 1]);
+        assert!(!too_large.is_valid_size());
+    }
+
+    #[test]
+    fn kem_key_valid_size_boundary() {
+        let too_small = KemPublicKey(vec![0u8; KYBER1024_PK_BYTES - 1]);
+        assert!(!too_small.is_valid_size());
+        let too_large = KemPublicKey(vec![0u8; KYBER1024_PK_BYTES + 1]);
+        assert!(!too_large.is_valid_size());
+    }
+
+    #[test]
+    fn signing_keypair_from_bytes_rejects_invalid() {
+        // Wrong size public key
+        let result = SigningKeypair::from_bytes(vec![0u8; 10], vec![0u8; 100]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn kem_keypair_from_bytes_rejects_invalid() {
+        // Wrong size public key
+        let result = KemKeypair::from_bytes(vec![0u8; 10], vec![0u8; 100]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn signing_key_fingerprint_deterministic() {
+        let kp = SigningKeypair::generate();
+        let fp1 = kp.public.fingerprint();
+        let fp2 = kp.public.fingerprint();
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn different_signing_keys_different_fingerprints() {
+        let kp1 = SigningKeypair::generate();
+        let kp2 = SigningKeypair::generate();
+        assert_ne!(kp1.public.fingerprint(), kp2.public.fingerprint());
+    }
+
+    #[test]
+    fn kem_key_fingerprint_deterministic() {
+        let kp = KemKeypair::generate();
+        let fp1 = kp.public.fingerprint();
+        let fp2 = kp.public.fingerprint();
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn verify_wrong_message_fails() {
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"message A");
+        assert!(!kp.public.verify(b"message B", &sig));
+    }
+
+    #[test]
+    fn sign_large_message() {
+        let kp = SigningKeypair::generate();
+        let msg = vec![0xABu8; 10_000];
+        let sig = kp.sign(&msg);
+        assert!(kp.public.verify(&msg, &sig));
+    }
+
+    #[test]
+    fn kem_encapsulate_decapsulate_shared_secret_matches() {
+        let kp = KemKeypair::generate();
+        let (ss_enc, ct) = kp.public.encapsulate().unwrap();
+        let ss_dec = kp.decapsulate(&ct).unwrap();
+        assert_eq!(ss_enc.0, ss_dec.0);
+    }
+
+    #[test]
+    fn signature_correct_size() {
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"test");
+        assert_eq!(sig.as_bytes().len(), DILITHIUM5_SIG_BYTES);
+    }
+
+    #[test]
+    fn full_keypair_public_address_deterministic() {
+        let kp = FullKeypair::generate();
+        let addr1 = kp.public_address();
+        let addr2 = kp.public_address();
+        assert_eq!(addr1.address_id(), addr2.address_id());
+    }
 }

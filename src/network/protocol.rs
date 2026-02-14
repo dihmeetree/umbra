@@ -666,4 +666,86 @@ mod tests {
         data.extend_from_slice(&[0xFF; 8]);
         assert!(decode_message(&data).is_none());
     }
+
+    #[test]
+    fn new_transaction_roundtrip() {
+        use crate::crypto::commitment::Commitment;
+        use crate::crypto::encryption::EncryptedPayload;
+        use crate::crypto::keys::KemCiphertext;
+        use crate::crypto::nullifier::Nullifier;
+        use crate::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
+        use crate::crypto::stealth::StealthAddress;
+        use crate::transaction::{Transaction, TxInput, TxOutput, TxType};
+
+        // Use correct sizes for crypto types (Kyber1024 ciphertext = 1568 bytes)
+        let kem_ct = KemCiphertext(vec![0u8; 1568]);
+
+        let tx = Transaction {
+            inputs: vec![TxInput {
+                nullifier: Nullifier([1u8; 32]),
+                proof_link: [2u8; 32],
+                spend_proof: SpendStarkProof {
+                    proof_bytes: vec![3],
+                    public_inputs_bytes: vec![4],
+                },
+            }],
+            outputs: vec![TxOutput {
+                commitment: Commitment([5u8; 32]),
+                stealth_address: StealthAddress {
+                    one_time_key: [6u8; 32],
+                    kem_ciphertext: kem_ct.clone(),
+                },
+                encrypted_note: EncryptedPayload {
+                    kem_ciphertext: KemCiphertext(vec![0u8; 1568]),
+                    nonce: [9u8; 24],
+                    ciphertext: vec![10],
+                    mac: [11u8; 32],
+                },
+            }],
+            fee: 100,
+            chain_id: [0u8; 32],
+            expiry_epoch: 0,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+            tx_type: TxType::Transfer,
+        };
+        let msg = Message::NewTransaction(tx.clone());
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        match decoded {
+            Message::NewTransaction(decoded_tx) => {
+                assert_eq!(decoded_tx.fee, 100);
+                assert_eq!(decoded_tx.inputs.len(), 1);
+            }
+            _ => panic!("expected NewTransaction"),
+        }
+    }
+
+    #[test]
+    fn encode_decode_preserves_all_message_variants() {
+        // Test simple parameterless variants
+        let msg = Message::GetTips;
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        assert!(matches!(decoded, Message::GetTips));
+
+        let msg = Message::GetPeers;
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        assert!(matches!(decoded, Message::GetPeers));
+
+        let msg = Message::GetSnapshot;
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        assert!(matches!(decoded, Message::GetSnapshot));
+
+        let msg = Message::GetEpochState;
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        assert!(matches!(decoded, Message::GetEpochState));
+    }
 }
