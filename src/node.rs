@@ -743,6 +743,47 @@ impl Node {
                     .broadcast(Message::BftCertificate(cert), Some(from))
                     .await;
             }
+            Message::BftEquivocationEvidence(evidence) => {
+                // Dedup by (voter_id, epoch, round)
+                let dedup_key = crate::hash_concat(&[
+                    &evidence.voter_id,
+                    &evidence.epoch.to_le_bytes(),
+                    &evidence.round.to_le_bytes(),
+                ]);
+                if self.is_seen(&dedup_key) {
+                    return;
+                }
+                self.mark_seen(dedup_key);
+
+                let mut state = self.state.write().await;
+                // Skip if already slashed (idempotent)
+                if state.ledger.state.is_slashed(&evidence.voter_id) {
+                    return;
+                }
+                // Verify both signatures independently
+                if !state.bft.verify_equivocation_evidence(&evidence) {
+                    tracing::debug!(
+                        "Rejected invalid equivocation evidence for {}",
+                        hex::encode(&evidence.voter_id[..8]),
+                    );
+                    return;
+                }
+                if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
+                    tracing::warn!(
+                        "Slashed validator {} (network evidence, epoch={}, round={})",
+                        hex::encode(&evidence.voter_id[..8]),
+                        evidence.epoch,
+                        evidence.round,
+                    );
+                }
+                drop(state);
+                // Re-gossip verified evidence to all peers
+                let _ = self
+                    .p2p
+                    .broadcast(Message::BftEquivocationEvidence(evidence), Some(from))
+                    .await;
+            }
+
             Message::GetTransaction(hash) => {
                 let state = self.state.read().await;
                 let tx_id = TxId(hash);
@@ -1600,8 +1641,9 @@ impl Node {
                 // Flush to disk
                 let _ = state.storage.flush();
 
-                // Check for equivocation evidence and slash
-                for evidence in state.bft.equivocations() {
+                // Check for equivocation evidence, slash, and broadcast to network
+                let evidence_to_broadcast: Vec<_> = state.bft.equivocations().to_vec();
+                for evidence in &evidence_to_broadcast {
                     if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
                         tracing::warn!(
                             "Slashed validator {} for equivocation in round {}",
@@ -1612,6 +1654,14 @@ impl Node {
                 }
                 // M5: Clear processed evidence to avoid re-processing
                 state.bft.clear_equivocations();
+
+                // Broadcast evidence to all peers so they can slash independently
+                for evidence in evidence_to_broadcast {
+                    let _ = self
+                        .p2p
+                        .broadcast(Message::BftEquivocationEvidence(evidence), None)
+                        .await;
+                }
 
                 // Track protocol version signal (F16), capped to prevent memory exhaustion
                 if let Some(v) = state.ledger.dag.get(vertex_id) {

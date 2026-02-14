@@ -33,7 +33,7 @@
 ## Protocol
 
 - [ ] **Governance mechanism** — define a process for deciding what protocol upgrades get signaled
-- [ ] **Slashing evidence propagation** — broadcast equivocation evidence to all nodes, not just detect locally
+- [x] **Slashing evidence propagation** — broadcast equivocation evidence to all nodes, not just detect locally
 - [ ] **Light client verification** — SPV-style proofs that light clients can verify independently
 - [ ] **Cross-chain bridges** — interoperability with other networks
 

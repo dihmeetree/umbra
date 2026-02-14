@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::consensus::bft::{Certificate, Vote};
+use crate::consensus::bft::{Certificate, EquivocationEvidence, Vote};
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::keys::{KemCiphertext, KemPublicKey, Signature, SigningPublicKey};
 use crate::transaction::Transaction;
@@ -57,6 +57,9 @@ pub enum Message {
 
     /// A finality certificate for a vertex
     BftCertificate(Certificate),
+
+    /// Equivocation evidence: proof a validator voted for two vertices in one round
+    BftEquivocationEvidence(EquivocationEvidence),
 
     // ── Peer Discovery ──
     /// Announce ourselves to a peer (includes KEM public key for encrypted transport)
@@ -406,6 +409,41 @@ mod tests {
                 assert_eq!(epoch, 5);
                 assert_eq!(committee.len(), 2);
                 assert_eq!(nullifier_count, 100);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn equivocation_evidence_roundtrip() {
+        use crate::consensus::bft::{EquivocationEvidence, VoteType};
+        use crate::consensus::dag::VertexId;
+
+        let kp = SigningKeypair::generate();
+        let vertex1 = VertexId([1u8; 32]);
+        let vertex2 = VertexId([2u8; 32]);
+
+        let evidence = EquivocationEvidence {
+            voter_id: kp.public.fingerprint(),
+            epoch: 3,
+            round: 7,
+            first_vertex: vertex1,
+            second_vertex: vertex2,
+            first_vote_type: VoteType::Accept,
+            second_vote_type: VoteType::Accept,
+            first_signature: kp.sign(b"vote1"),
+            second_signature: kp.sign(b"vote2"),
+        };
+
+        let msg = Message::BftEquivocationEvidence(evidence);
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::BftEquivocationEvidence(e) => {
+                assert_eq!(e.epoch, 3);
+                assert_eq!(e.round, 7);
+                assert_eq!(e.first_vertex.0, [1u8; 32]);
+                assert_eq!(e.second_vertex.0, [2u8; 32]);
             }
             _ => panic!("wrong message type"),
         }

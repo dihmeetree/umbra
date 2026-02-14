@@ -32,7 +32,7 @@ use crate::Hash;
 /// This is slashable misbehaviour. Honest validators produce at most one vote per round.
 /// Both conflicting signatures are included so the evidence is independently verifiable
 /// by any node without trusting the reporter.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EquivocationEvidence {
     /// The misbehaving validator
     pub voter_id: Hash,
@@ -44,6 +44,10 @@ pub struct EquivocationEvidence {
     pub first_vertex: VertexId,
     /// The conflicting second vertex
     pub second_vertex: VertexId,
+    /// Vote type of the first vote (needed for signature verification)
+    pub first_vote_type: VoteType,
+    /// Vote type of the second vote (needed for signature verification)
+    pub second_vote_type: VoteType,
     /// Signature on the first vote (proves the validator signed for first_vertex)
     pub first_signature: Signature,
     /// Signature on the second vote (proves the validator signed for second_vertex)
@@ -429,19 +433,21 @@ impl BftState {
                     .iter()
                     .any(|e| e.voter_id == vote.voter_id);
                 if !already_recorded {
-                    // Retrieve the first signature from stored votes for independent verifiability
-                    let first_signature = self
+                    // Retrieve the first signature and vote type from stored votes
+                    let (first_signature, first_vote_type) = self
                         .votes
                         .get(&prev_vertex)
                         .and_then(|vs| vs.iter().find(|v| v.voter_id == vote.voter_id))
-                        .map(|v| v.signature.clone())
-                        .unwrap_or_else(|| Signature(vec![]));
+                        .map(|v| (v.signature.clone(), v.vote_type.clone()))
+                        .unwrap_or_else(|| (Signature(vec![]), VoteType::Accept));
                     self.equivocations.push(EquivocationEvidence {
                         voter_id: vote.voter_id,
                         epoch: vote.epoch,
                         round: vote.round,
                         first_vertex: prev_vertex,
                         second_vertex: vote.vertex_id,
+                        first_vote_type,
+                        second_vote_type: vote.vote_type.clone(),
                         first_signature,
                         second_signature: vote.signature.clone(),
                     });
@@ -524,6 +530,46 @@ impl BftState {
     /// Clear processed equivocation evidence (call after slashing).
     pub fn clear_equivocations(&mut self) {
         self.equivocations.clear();
+    }
+
+    /// Verify equivocation evidence received from the network.
+    ///
+    /// Returns true if the evidence is cryptographically valid: epoch matches,
+    /// voter is a committee member, vertices differ, and both signatures verify.
+    pub fn verify_equivocation_evidence(&self, evidence: &EquivocationEvidence) -> bool {
+        // Epoch must match current
+        if evidence.epoch != self.epoch {
+            return false;
+        }
+        // Voter must be a current committee member
+        let voter = match self.committee.iter().find(|v| v.id == evidence.voter_id) {
+            Some(v) => v,
+            None => return false,
+        };
+        // Must be two different vertices (same vertex is not equivocation)
+        if evidence.first_vertex == evidence.second_vertex {
+            return false;
+        }
+        // Verify first signature
+        let msg1 = vote_sign_data(
+            &evidence.first_vertex,
+            evidence.epoch,
+            evidence.round,
+            &evidence.first_vote_type,
+            &self.chain_id,
+        );
+        if !voter.public_key.verify(&msg1, &evidence.first_signature) {
+            return false;
+        }
+        // Verify second signature
+        let msg2 = vote_sign_data(
+            &evidence.second_vertex,
+            evidence.epoch,
+            evidence.round,
+            &evidence.second_vote_type,
+            &self.chain_id,
+        );
+        voter.public_key.verify(&msg2, &evidence.second_signature)
     }
 
     /// Advance to a new epoch, clearing all per-epoch state.
@@ -670,7 +716,7 @@ pub fn dynamic_quorum(committee_size: usize) -> usize {
 ///    round 8B, vote_type 1B), so length-prefix framing is unnecessary.
 /// 2. The result is used as raw sign input for `keypair.sign()`, not as a hash
 ///    input to `hash_domain()`. Signing already handles its own hashing internally.
-fn vote_sign_data(
+pub fn vote_sign_data(
     vertex_id: &VertexId,
     epoch: u64,
     round: u64,
@@ -863,6 +909,9 @@ mod tests {
             !ev.second_signature.as_bytes().is_empty(),
             "second_signature should be present in equivocation evidence"
         );
+        // Vote types must be recorded
+        assert_eq!(ev.first_vote_type, VoteType::Accept);
+        assert_eq!(ev.second_vote_type, VoteType::Accept);
         // Verify the signatures actually validate (evidence is independently verifiable)
         let msg_a_check = vote_sign_data(&vertex_a, 0, 0, &VoteType::Accept, &chain_id);
         let msg_b_check = vote_sign_data(&vertex_b, 0, 0, &VoteType::Accept, &chain_id);
@@ -1331,5 +1380,113 @@ mod tests {
 
         // VRF commitments should be cleared
         assert!(bft.vrf_commitment(&validators[0].id).is_none());
+    }
+
+    /// Helper: create equivocation evidence from a committee with real signatures.
+    fn make_equivocation_evidence(
+        keypairs: &[SigningKeypair],
+        validators: &[Validator],
+        chain_id: &crate::Hash,
+        epoch: u64,
+        round: u64,
+    ) -> EquivocationEvidence {
+        let vertex_a = VertexId([1u8; 32]);
+        let vertex_b = VertexId([2u8; 32]);
+        let msg_a = vote_sign_data(&vertex_a, epoch, round, &VoteType::Accept, chain_id);
+        let msg_b = vote_sign_data(&vertex_b, epoch, round, &VoteType::Accept, chain_id);
+        EquivocationEvidence {
+            voter_id: validators[0].id,
+            epoch,
+            round,
+            first_vertex: vertex_a,
+            second_vertex: vertex_b,
+            first_vote_type: VoteType::Accept,
+            second_vote_type: VoteType::Accept,
+            first_signature: keypairs[0].sign(&msg_a),
+            second_signature: keypairs[0].sign(&msg_b),
+        }
+    }
+
+    #[test]
+    fn verify_equivocation_evidence_valid() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let evidence = make_equivocation_evidence(&keypairs, &validators, &chain_id, 0, 0);
+        assert!(bft.verify_equivocation_evidence(&evidence));
+    }
+
+    #[test]
+    fn verify_equivocation_evidence_wrong_epoch() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        // Evidence claims epoch 5, but BFT is at epoch 0
+        let evidence = make_equivocation_evidence(&keypairs, &validators, &chain_id, 5, 0);
+        assert!(!bft.verify_equivocation_evidence(&evidence));
+    }
+
+    #[test]
+    fn verify_equivocation_evidence_non_committee() {
+        let (_keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Create evidence from a keypair NOT in the committee
+        let outsider_kp = SigningKeypair::generate();
+        let outsider = Validator::new(outsider_kp.public.clone());
+        let evidence = make_equivocation_evidence(&[outsider_kp], &[outsider], &chain_id, 0, 0);
+        assert!(!bft.verify_equivocation_evidence(&evidence));
+    }
+
+    #[test]
+    fn verify_equivocation_evidence_same_vertex() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+
+        let vertex = VertexId([1u8; 32]);
+        let msg = vote_sign_data(&vertex, 0, 0, &VoteType::Accept, &chain_id);
+        let evidence = EquivocationEvidence {
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            first_vertex: vertex,
+            second_vertex: vertex, // Same vertex — not real equivocation
+            first_vote_type: VoteType::Accept,
+            second_vote_type: VoteType::Accept,
+            first_signature: keypairs[0].sign(&msg),
+            second_signature: keypairs[0].sign(&msg),
+        };
+        assert!(!bft.verify_equivocation_evidence(&evidence));
+    }
+
+    #[test]
+    fn verify_equivocation_evidence_bad_signature() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+
+        let mut evidence = make_equivocation_evidence(&keypairs, &validators, &chain_id, 0, 0);
+        // Tamper with second signature
+        evidence.second_signature = keypairs[1].sign(b"garbage");
+        assert!(!bft.verify_equivocation_evidence(&evidence));
+    }
+
+    #[test]
+    fn evidence_serialization_roundtrip() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let evidence = make_equivocation_evidence(&keypairs, &validators, &chain_id, 3, 7);
+
+        let bytes = crate::serialize(&evidence).unwrap();
+        let restored: EquivocationEvidence = crate::deserialize(&bytes).unwrap();
+        assert_eq!(restored.voter_id, evidence.voter_id);
+        assert_eq!(restored.epoch, 3);
+        assert_eq!(restored.round, 7);
+        assert_eq!(restored.first_vertex, evidence.first_vertex);
+        assert_eq!(restored.second_vertex, evidence.second_vertex);
+        assert_eq!(restored.first_vote_type, VoteType::Accept);
+        assert_eq!(restored.second_vote_type, VoteType::Accept);
     }
 }

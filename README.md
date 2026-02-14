@@ -126,7 +126,7 @@ umbra/
     error.html              Error display
 ```
 
-**~23,000 lines of Rust** across 37 source files with **323 tests**.
+**~23,000 lines of Rust** across 37 source files with **330 tests**.
 
 ## Building
 
@@ -408,7 +408,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 323 tests cover:
+All 330 tests cover:
 
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
 - **Post-quantum crypto** — key generation, signing, KEM roundtrips
@@ -419,8 +419,8 @@ All 323 tests cover:
 - **Encryption** — message roundtrips, authentication, tamper detection
 - **VRF** — evaluation, verification, committee selection statistics, Dilithium5 signing determinism
 - **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices; validation of too many parents, too many transactions, duplicate parents, no parents on non-genesis, too many unfinalized (DoS limit); finalized order excludes non-finalized vertices; finalize unknown vertex returns false; safe indexing after pruning (regression)
-- **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state
-- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses, snapshot sync messages (manifest, chunks)
+- **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, equivocation evidence verification (valid, wrong epoch, non-committee, same vertex, bad signature) and serialization roundtrip, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state
+- **Network** — message serialization roundtrips, oversized message rejection, sync message roundtrips (GetFinalizedVertices, FinalizedVerticesResponse), peer discovery messages, epoch state responses, snapshot sync messages (manifest, chunks), equivocation evidence
 - **Transactions** — ID determinism, content hash determinism, estimated size, deregister sign data; validation of all error paths (no inputs/outputs, too many inputs/outputs, duplicate nullifiers, expired, fee too low, invalid binding, too many messages, message too large, insufficient bond, invalid validator key size (regression), invalid KEM key size, zero bond return commitment, proof link cross-check mismatch (regression), no-expiry passthrough, expiry boundary epoch)
 - **Transaction builder** — STARK proof generation, chain ID and expiry, multi-input/multi-output, input/output limit enforcement
 - **RPC endpoints** — GET /state, /mempool, /validators, /validator/:id (found and not-found), /tx/:id (found, not-found, invalid hex, wrong length), /vertices/finalized, /peers; POST /tx (valid submission, invalid hex, valid hex with invalid bincode, duplicate submission, oversized payload); full submit-and-retrieve roundtrip
@@ -741,13 +741,14 @@ All transaction validity is verified via zk-STARKs:
 - **Recovery backup nonce** — wallet recovery backups include a 24-byte random nonce in the keystream derivation, preventing keystream reuse if the same mnemonic entropy is used for multiple backups
 - **Vertex timestamp enforcement** — vertices with timestamps more than 60 seconds in the future are rejected on insertion, preventing timestamp manipulation by malicious proposers while allowing historical vertex sync
 - **Snapshot state root verification** — after importing a snapshot from a peer, the node recomputes the state root from the restored state and rejects snapshots where the computed root does not match the claimed root, preventing state corruption from malicious peers
+- **Slashing evidence propagation** — when a node detects equivocation (a validator voting for two different vertices in the same round), it broadcasts cryptographic proof (both conflicting signatures) to all peers. Receiving nodes independently verify both signatures, apply slashing locally, and re-gossip, ensuring all nodes converge on the same slashed validator state
 
 ## Production Roadmap
 
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 323 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 330 tests with targeted state correctness, validation bypass, regression tests, and cryptographic hardening; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 
