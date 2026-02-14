@@ -2,7 +2,7 @@
   <img src="assets/umbra-header.jpg" alt="Umbra" width="850">
 </p>
 
-Umbra is designed from the ground up to be **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final** — with no trusted setup required.
+Umbra is a post-quantum private cryptocurrency with zk-STARKs and DAG-BFT consensus — **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final**, with no trusted setup required.
 
 > [!WARNING]
 > While Umbra implements cryptographic algorithms standardized by NIST, this software has not undergone a formal security audit. A formal audit is planned once the design and APIs have stabilized.
