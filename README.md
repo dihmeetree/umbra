@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/umbra-header.jpg" alt="Umbra" width="600" />
+  <img src="assets/umbra-header.jpg" alt="Umbra" width="850">
 </p>
 
 A post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust.
