@@ -2,6 +2,7 @@
 name = "umbra"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = """
 Umbra: A post-quantum private cryptocurrency with DAG-BFT consensus.
 Features: zk-STARK-ready proofs, stealth addresses, encrypted messaging,
