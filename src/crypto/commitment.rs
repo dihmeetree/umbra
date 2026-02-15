@@ -25,7 +25,7 @@ pub struct Commitment(pub Hash);
 ///
 /// Debug output is redacted to prevent accidental logging of secret values.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct BlindingFactor(pub [u8; 32]);
+pub struct BlindingFactor(pub(crate) [u8; 32]);
 
 impl std::fmt::Debug for BlindingFactor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

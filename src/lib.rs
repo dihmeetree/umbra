@@ -220,6 +220,15 @@ pub mod constants {
     /// Genesis mint amount — initial coins created for the genesis validator.
     pub const GENESIS_MINT: u64 = 100_000_000;
 
+    /// Maximum total supply of coins that can ever be minted.
+    ///
+    /// This is the theoretical upper bound: genesis mint (100M) + mining rewards.
+    /// Mining follows a halving schedule that converges to:
+    ///   EPOCH_LENGTH * HALVING_INTERVAL * INITIAL_BLOCK_REWARD * 2 = 50 billion.
+    /// The cap is set slightly above this to account for fees included in
+    /// coinbase outputs and to provide a hard safety limit against inflation bugs.
+    pub const MAX_TOTAL_SUPPLY: u64 = 51_000_000_000;
+
     /// Compute the block reward for a given epoch.
     pub fn block_reward_for_epoch(epoch: u64) -> u64 {
         let halvings = epoch / HALVING_INTERVAL_EPOCHS;

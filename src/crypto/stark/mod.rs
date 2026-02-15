@@ -45,6 +45,7 @@ pub use spend_prover::prove_spend;
 ///
 /// NOT suitable for production use — provides weaker security guarantees.
 /// Uses reduced grinding factor for faster proof generation.
+#[cfg(test)]
 pub fn light_proof_options() -> ProofOptions {
     ProofOptions::new(
         42, // num_queries

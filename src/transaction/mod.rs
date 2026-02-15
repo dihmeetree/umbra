@@ -269,7 +269,7 @@ impl Transaction {
                 // deserialization enforces this for network-received data, but
                 // locally constructed transactions bypass deserialization.
                 let sig_bytes = auth_signature.as_bytes();
-                if !sig_bytes.is_empty() && sig_bytes.len() != 4627 {
+                if sig_bytes.len() != 4627 {
                     return Err(TxValidationError::InvalidBondReturn);
                 }
                 // Bond return output must have a non-zero commitment

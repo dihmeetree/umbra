@@ -1127,18 +1127,32 @@ impl Node {
                                 applied += 1;
 
                                 // Persist the same way as finalize_vertex_inner
-                                let _ = state.storage.put_vertex(&vertex);
+                                if let Err(e) = state.storage.put_vertex(&vertex) {
+                                    tracing::error!(error = %e, "Sync: failed to persist vertex");
+                                }
                                 for tx in &vertex.transactions {
-                                    let _ = state.storage.put_transaction(tx);
+                                    if let Err(e) = state.storage.put_transaction(tx) {
+                                        tracing::error!(error = %e, "Sync: failed to persist transaction");
+                                    }
                                     for input in &tx.inputs {
-                                        let _ = state.storage.put_nullifier(&input.nullifier);
+                                        if let Err(e) =
+                                            state.storage.put_nullifier(&input.nullifier)
+                                        {
+                                            tracing::error!(error = %e, "Sync: failed to persist nullifier");
+                                        }
                                     }
                                 }
-                                let _ = state.storage.put_finalized_vertex_index(seq, &vertex.id);
+                                if let Err(e) =
+                                    state.storage.put_finalized_vertex_index(seq, &vertex.id)
+                                {
+                                    tracing::error!(error = %e, "Sync: failed to persist finalized vertex index");
+                                }
 
                                 // Persist coinbase output if created
                                 if let Some(ref cb) = coinbase {
-                                    let _ = state.storage.put_coinbase_output(seq, cb);
+                                    if let Err(e) = state.storage.put_coinbase_output(seq, cb) {
+                                        tracing::error!(error = %e, "Sync: failed to persist coinbase output");
+                                    }
                                 }
 
                                 // Persist modified commitment tree nodes
@@ -1150,9 +1164,12 @@ impl Node {
                                         for idx in range_start..range_end {
                                             let hash =
                                                 state.ledger.state.commitment_tree_node(level, idx);
-                                            let _ = state
+                                            if let Err(e) = state
                                                 .storage
-                                                .put_commitment_level(level, idx, &hash);
+                                                .put_commitment_level(level, idx, &hash)
+                                            {
+                                                tracing::error!(error = %e, level, idx, "Sync: failed to persist commitment tree node");
+                                            }
                                         }
                                     }
                                 }
@@ -1165,7 +1182,11 @@ impl Node {
                                         .validator_bond(&validator.id)
                                         .unwrap_or(0);
                                     let slashed = state.ledger.state.is_slashed(&validator.id);
-                                    let _ = state.storage.put_validator(validator, bond, slashed);
+                                    if let Err(e) =
+                                        state.storage.put_validator(validator, bond, slashed)
+                                    {
+                                        tracing::error!(error = %e, "Sync: failed to persist validator state");
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1186,8 +1207,12 @@ impl Node {
                         let state = self.state.read().await;
                         let fc = state.storage.finalized_vertex_count().unwrap_or(0);
                         let meta = state.ledger.state.to_chain_state_meta(fc);
-                        let _ = state.storage.put_chain_state_meta(&meta);
-                        let _ = state.storage.flush();
+                        if let Err(e) = state.storage.put_chain_state_meta(&meta) {
+                            tracing::error!(error = %e, "Sync: failed to persist chain state meta");
+                        }
+                        if let Err(e) = state.storage.flush() {
+                            tracing::error!(error = %e, "Sync: failed to flush storage to disk");
+                        }
                     }
 
                     tracing::info!(
@@ -1705,26 +1730,37 @@ impl Node {
 
                 // -- Persist finalized vertex and state --
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
-                    let _ = state.storage.put_vertex(v);
+                    if let Err(e) = state.storage.put_vertex(v) {
+                        tracing::error!(error = %e, "Failed to persist finalized vertex");
+                    }
 
                     // Persist individual transactions and their nullifiers
                     for tx in &v.transactions {
-                        let _ = state.storage.put_transaction(tx);
+                        if let Err(e) = state.storage.put_transaction(tx) {
+                            tracing::error!(error = %e, "Failed to persist transaction");
+                        }
                         for input in &tx.inputs {
-                            let _ = state.storage.put_nullifier(&input.nullifier);
+                            if let Err(e) = state.storage.put_nullifier(&input.nullifier) {
+                                tracing::error!(error = %e, "Failed to persist nullifier");
+                            }
                         }
                     }
                 }
 
                 // Persist finalized vertex index
                 let finalized_count = state.storage.finalized_vertex_count().unwrap_or(0);
-                let _ = state
+                if let Err(e) = state
                     .storage
-                    .put_finalized_vertex_index(finalized_count, vertex_id);
+                    .put_finalized_vertex_index(finalized_count, vertex_id)
+                {
+                    tracing::error!(error = %e, "Failed to persist finalized vertex index");
+                }
 
                 // Persist coinbase output if created
                 if let Some(ref cb) = coinbase {
-                    let _ = state.storage.put_coinbase_output(finalized_count, cb);
+                    if let Err(e) = state.storage.put_coinbase_output(finalized_count, cb) {
+                        tracing::error!(error = %e, "Failed to persist coinbase output");
+                    }
                 }
 
                 // Persist modified commitment tree nodes (incremental)
@@ -1735,7 +1771,9 @@ impl Node {
                         let range_end = ((new_commitment_count - 1) >> level) + 1;
                         for idx in range_start..range_end {
                             let hash = state.ledger.state.commitment_tree_node(level, idx);
-                            let _ = state.storage.put_commitment_level(level, idx, &hash);
+                            if let Err(e) = state.storage.put_commitment_level(level, idx, &hash) {
+                                tracing::error!(error = %e, level, idx, "Failed to persist commitment tree node");
+                            }
                         }
                     }
                 }
@@ -1748,15 +1786,21 @@ impl Node {
                         .validator_bond(&validator.id)
                         .unwrap_or(0);
                     let slashed = state.ledger.state.is_slashed(&validator.id);
-                    let _ = state.storage.put_validator(validator, bond, slashed);
+                    if let Err(e) = state.storage.put_validator(validator, bond, slashed) {
+                        tracing::error!(error = %e, "Failed to persist validator state");
+                    }
                 }
 
                 // Persist chain state meta snapshot
                 let meta = state.ledger.state.to_chain_state_meta(finalized_count + 1);
-                let _ = state.storage.put_chain_state_meta(&meta);
+                if let Err(e) = state.storage.put_chain_state_meta(&meta) {
+                    tracing::error!(error = %e, "Failed to persist chain state meta");
+                }
 
                 // Flush to disk
-                let _ = state.storage.flush();
+                if let Err(e) = state.storage.flush() {
+                    tracing::error!(error = %e, "Failed to flush storage to disk");
+                }
 
                 // Check for equivocation evidence, slash, and broadcast to network
                 let evidence_to_broadcast: Vec<_> = state.bft.equivocations().to_vec();

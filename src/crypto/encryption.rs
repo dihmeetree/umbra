@@ -64,8 +64,8 @@ const ENCRYPT_PADDING_BUCKET: usize = 64;
 /// Pad plaintext with a 4-byte length prefix and random padding to the next
 /// multiple of `ENCRYPT_PADDING_BUCKET`.
 fn pad_plaintext(plaintext: &[u8]) -> Vec<u8> {
-    // L5: Guard against silent truncation when casting length to u32.
-    debug_assert!(
+    // Guard against silent truncation when casting length to u32.
+    assert!(
         plaintext.len() <= u32::MAX as usize,
         "plaintext length exceeds u32::MAX, length prefix would truncate"
     );

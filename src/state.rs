@@ -270,7 +270,7 @@ impl ChainState {
         let commitment_count_before = self.commitments.len();
         let tree_leaves_before = self.commitment_tree.num_leaves();
         let mut applied_nullifiers: Vec<Nullifier> = Vec::new();
-        let mut registered_validators: Vec<(Hash, bool)> = Vec::new(); // (id, was_reregistration)
+        let mut registered_validators: Vec<(Hash, bool, u64)> = Vec::new(); // (id, was_reregistration, old_bond)
         let mut deregistered_validators: Vec<(Hash, u64)> = Vec::new(); // (id, bond)
 
         // Pass 2 — apply all transactions sequentially.
@@ -282,7 +282,9 @@ impl ChainState {
                 TxType::ValidatorRegister { signing_key, .. } => {
                     let vid = signing_key.fingerprint();
                     let is_reregistration = self.validators.contains_key(&vid);
-                    Some((true, vid, 0u64, is_reregistration))
+                    // Capture old bond for re-registrations so it can be restored on rollback
+                    let old_bond = self.validator_bonds.get(&vid).copied().unwrap_or(0);
+                    Some((true, vid, old_bond, is_reregistration))
                 }
                 TxType::ValidatorDeregister { validator_id, .. } => {
                     let bond = self.validator_bonds.get(validator_id).copied().unwrap_or(0);
@@ -293,11 +295,11 @@ impl ChainState {
             match self.apply_transaction_unchecked(tx) {
                 Ok(()) => {
                     applied_nullifiers.extend(tx_nullifiers);
-                    if let Some((is_register, vid, bond, is_rereg)) = pre_apply_info {
+                    if let Some((is_register, vid, old_bond, is_rereg)) = pre_apply_info {
                         if is_register {
-                            registered_validators.push((vid, is_rereg));
+                            registered_validators.push((vid, is_rereg, old_bond));
                         } else {
-                            deregistered_validators.push((vid, bond));
+                            deregistered_validators.push((vid, old_bond));
                         }
                     }
                 }
@@ -307,26 +309,38 @@ impl ChainState {
                     self.nullifier_hash = nullifier_hash_before;
                     for n in &applied_nullifiers {
                         self.nullifiers.remove(n);
-                        // Note: sled writes are NOT rolled back — extra nullifiers
-                        // in sled are harmless (they prevent re-spending of outputs
-                        // from a rejected vertex, which is conservative/safe).
+                        // Also roll back sled writes to prevent permanently marking
+                        // UTXOs as spent when the vertex application fails.
+                        if let Some(ref tree) = self.nullifier_storage {
+                            if let Err(e) = tree.remove(n.0) {
+                                tracing::error!(
+                                    error = %e,
+                                    "Failed to roll back nullifier from sled during vertex rollback"
+                                );
+                            }
+                        }
                     }
                     for c in self.commitments.drain(commitment_count_before..) {
                         self.commitment_index.remove(&c);
                     }
                     self.commitment_tree.truncate(tree_leaves_before);
                     // Undo validator registrations
-                    for (vid, is_rereg) in &registered_validators {
+                    for (vid, is_rereg, old_bond) in &registered_validators {
                         if *is_rereg {
-                            // Undo re-registration: set back to inactive
+                            // Undo re-registration: set back to inactive and restore old bond
                             if let Some(v) = self.validators.get_mut(vid) {
                                 v.active = false;
+                            }
+                            if *old_bond > 0 {
+                                self.validator_bonds.insert(*vid, *old_bond);
+                            } else {
+                                self.validator_bonds.remove(vid);
                             }
                         } else {
                             // Undo new registration: remove entirely
                             self.validators.remove(vid);
+                            self.validator_bonds.remove(vid);
                         }
-                        self.validator_bonds.remove(vid);
                     }
                     // Undo validator deregistrations (re-activate and restore bond)
                     for (vid, bond) in &deregistered_validators {
@@ -623,7 +637,16 @@ impl ChainState {
         }
         // Fall back to sled storage if available
         if let Some(ref tree) = self.nullifier_storage {
-            return tree.contains_key(nullifier.0).unwrap_or(false);
+            return match tree.contains_key(nullifier.0) {
+                Ok(found) => found,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Sled I/O error during nullifier lookup; treating as spent (fail-closed)"
+                    );
+                    true // fail-closed: treat I/O errors as spent to prevent double-spend
+                }
+            };
         }
         false
     }
@@ -956,8 +979,11 @@ impl ChainState {
         // Add commitment to the Merkle tree
         self.add_commitment(commitment).ok()?;
 
-        // Track total minted
-        self.total_minted = self.total_minted.saturating_add(amount);
+        // Track total minted with supply cap enforcement
+        self.total_minted = self
+            .total_minted
+            .checked_add(amount)
+            .filter(|&total| total <= crate::constants::MAX_TOTAL_SUPPLY)?;
 
         Some(TxOutput {
             commitment,
@@ -996,7 +1022,11 @@ impl ChainState {
 
         // Add commitment to the Merkle tree
         self.add_commitment(commitment).ok()?;
-        self.total_minted = self.total_minted.saturating_add(amount);
+        // Track total minted with supply cap enforcement
+        self.total_minted = self
+            .total_minted
+            .checked_add(amount)
+            .filter(|&total| total <= crate::constants::MAX_TOTAL_SUPPLY)?;
 
         Some(TxOutput {
             commitment,
