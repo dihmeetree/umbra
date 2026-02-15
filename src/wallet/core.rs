@@ -59,6 +59,14 @@ pub struct OwnedOutput {
     pub commitment_index: Option<usize>,
 }
 
+impl Drop for OwnedOutput {
+    fn drop(&mut self) {
+        self.value.zeroize();
+        self.spend_auth.zeroize();
+        // blinding: BlindingFactor already implements ZeroizeOnDrop
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ReceivedMessage {
     pub tx_hash: Hash,

@@ -47,8 +47,9 @@ pub struct NodeState {
     pub peer_highest_round: u64,
     /// Time the node was started (for health/metrics reporting).
     pub node_start_time: Instant,
-    /// Protocol version signal counts per epoch (F16).
-    pub version_signals: HashMap<u32, u64>,
+    /// Protocol version signals per epoch (F16).
+    /// Maps version -> set of proposer fingerprints that signaled it.
+    pub version_signals: HashMap<u32, HashSet<Hash>>,
 }
 
 /// Sync progress tracking for catching up with the network.
@@ -124,6 +125,8 @@ pub struct Node {
     chunk_request_timestamps: HashMap<crate::network::PeerId, Instant>,
     /// UPnP gateway handle for lease renewal and cleanup (None if UPnP is not active).
     upnp_gateway: Option<(crate::network::nat::UpnpGateway, SocketAddr)>,
+    /// Last epoch for which VRF was refreshed (avoids redundant evaluations).
+    last_vrf_epoch: u64,
 }
 
 /// Node configuration.
@@ -464,6 +467,7 @@ impl Node {
             snapshot_cache: None,
             chunk_request_timestamps: HashMap::new(),
             upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
+            last_vrf_epoch: 0,
         })
     }
 
@@ -584,10 +588,16 @@ impl Node {
         match event {
             P2pEvent::MessageReceived { from, message } => {
                 self.handle_message(from, *message).await;
-                // After message handling, sync our VRF output with BFT state.
-                // Epoch transitions in finalize_vertex_inner update bft but
-                // cannot update self.our_vrf_output since it takes &self.
-                self.refresh_vrf_from_bft().await;
+                // After message handling, sync our VRF output with BFT state
+                // only when the epoch has changed. This avoids redundant
+                // Dilithium5 VRF evaluations on every incoming message.
+                {
+                    let current_epoch = self.state.read().await.bft.epoch;
+                    if current_epoch != self.last_vrf_epoch {
+                        self.last_vrf_epoch = current_epoch;
+                        self.refresh_vrf_from_bft().await;
+                    }
+                }
             }
             P2pEvent::PeerConnected(peer_id) => {
                 tracing::info!(peer = "<redacted>", "Peer connected");
@@ -881,18 +891,16 @@ impl Node {
             }
             Message::GetPeers => {
                 if let Ok(peers) = self.p2p.get_peers().await {
-                    // Redact IP addresses from peer info to prevent
-                    // validator deanonymization via peer list gossip.
-                    let redacted: Vec<_> = peers
+                    // Share peer addresses for discovery. Listening addresses
+                    // are inherently public for nodes that accept connections.
+                    // Only share peers that have a valid address.
+                    let shareable: Vec<_> = peers
                         .into_iter()
-                        .map(|mut p| {
-                            p.address = String::new();
-                            p
-                        })
+                        .filter(|p| !p.address.is_empty())
                         .collect();
                     let _ = self
                         .p2p
-                        .send_to(from, Message::PeersResponse(redacted))
+                        .send_to(from, Message::PeersResponse(shareable))
                         .await;
                 }
             }
@@ -1138,11 +1146,16 @@ impl Node {
                                 break;
                             }
                         }
+                        let mut tx_valid = true;
                         for tx in &vertex.transactions {
                             if let Err(e) = tx.validate_structure(vertex.epoch) {
                                 tracing::warn!(error = %e, seq, "Sync: rejected vertex with invalid tx");
+                                tx_valid = false;
                                 break;
                             }
+                        }
+                        if !tx_valid {
+                            break;
                         }
 
                         last_seq = seq;
@@ -1877,12 +1890,17 @@ impl Node {
                         .await;
                 }
 
-                // Track protocol version signal (F16), capped to prevent memory exhaustion
+                // Track protocol version signal (F16), deduplicated per validator
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
                     if state.version_signals.contains_key(&v.protocol_version)
                         || state.version_signals.len() < crate::constants::MAX_VERSION_SIGNALS
                     {
-                        *state.version_signals.entry(v.protocol_version).or_insert(0) += 1;
+                        let proposer_fp = v.proposer.fingerprint();
+                        state
+                            .version_signals
+                            .entry(v.protocol_version)
+                            .or_default()
+                            .insert(proposer_fp);
                     }
                 }
 
@@ -1904,6 +1922,7 @@ impl Node {
                     // Update BFT for the new epoch
                     state.bft.epoch = dag_epoch;
                     state.bft.set_epoch_context(new_seed, total_validators);
+                    state.bft.clear_epoch_caches();
 
                     // Fix 2: Update committee from current active validators
                     state.bft.committee = state
@@ -1936,18 +1955,25 @@ impl Node {
                         "Epoch validator summary"
                     );
 
-                    // F16: Check protocol upgrade signals
-                    let total_signals: u64 = state.version_signals.values().sum();
-                    if total_signals > 0 {
-                        for (&ver, &count) in &state.version_signals {
+                    // F16: Check protocol upgrade signals (per-validator counts)
+                    let total_validators_signaling: usize = state
+                        .version_signals
+                        .values()
+                        .flat_map(|s| s.iter())
+                        .collect::<HashSet<_>>()
+                        .len();
+                    if total_validators_signaling > 0 {
+                        for (&ver, signalers) in &state.version_signals {
+                            let count = signalers.len() as u64;
+                            let total = total_validators_signaling as u64;
                             if ver > crate::constants::PROTOCOL_VERSION_ID
                                 && count * crate::constants::UPGRADE_THRESHOLD_DEN
-                                    > total_signals * crate::constants::UPGRADE_THRESHOLD_NUM
+                                    > total * crate::constants::UPGRADE_THRESHOLD_NUM
                             {
                                 tracing::warn!(
                                     version = ver,
                                     count = count,
-                                    total = total_signals,
+                                    total = total,
                                     effective_epoch = dag_epoch + 2,
                                     "Protocol upgrade signaled"
                                 );
@@ -2064,8 +2090,10 @@ impl Node {
     }
 
     /// Fix 3: Dandelion++ stem-forward: send tx to one *random* peer, track hops.
+    ///
+    /// The delayed send is spawned as a background task to avoid blocking the
+    /// event loop during the exponential-distribution sleep.
     async fn stem_forward(&mut self, tx: crate::transaction::Transaction, hops_remaining: u8) {
-        use rand::prelude::IndexedRandom;
         let tx_hash = tx.tx_id().0;
         if hops_remaining == 0 {
             // Fluff: broadcast to all
@@ -2080,9 +2108,9 @@ impl Node {
             }
             self.stem_txs
                 .insert(tx_hash, (hops_remaining, Instant::now()));
-            // Exponential-distribution delay to prevent timing-based sender
-            // deanonymization. Exponential is preferred over uniform because it
-            // makes cumulative multi-hop delays harder to decompose.
+            // Spawn delayed send in background to avoid blocking the event loop.
+            let p2p = self.p2p.clone();
+            // Compute delay before spawning to keep RNG out of the async block
             let delay_ms = {
                 use rand::RngExt;
                 let lambda = 1.0 / crate::constants::DANDELION_STEM_DELAY_MAX_MS as f64;
@@ -2093,23 +2121,27 @@ impl Node {
                     crate::constants::DANDELION_STEM_DELAY_MAX_MS * 3,
                 )
             };
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            if let Ok(peers) = self.p2p.get_peers().await {
-                if let Some(peer) = peers.choose(&mut rand::rng()) {
-                    let _ = self
-                        .p2p
-                        .send_to(peer.peer_id, Message::NewTransaction(tx))
-                        .await;
-                    return;
+            tokio::spawn(async move {
+                use rand::prelude::IndexedRandom;
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                if let Ok(peers) = p2p.get_peers().await {
+                    // Scope the RNG so it doesn't live across the await
+                    let chosen_id = { peers.choose(&mut rand::rng()).map(|p| p.peer_id) };
+                    if let Some(peer_id) = chosen_id {
+                        let _ = p2p.send_to(peer_id, Message::NewTransaction(tx)).await;
+                        return;
+                    }
                 }
-            }
-            // No peers: fluff immediately
-            self.stem_txs.remove(&tx_hash);
-            let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
+                // No peers: fluff immediately
+                let _ = p2p.broadcast(Message::NewTransaction(tx), None).await;
+            });
         }
     }
 
     /// Flush timed-out Dandelion++ stem transactions (fluff them).
+    ///
+    /// Collects expired entries and spawns a background task for the jittered
+    /// broadcasts to avoid blocking the event loop.
     async fn flush_dandelion_stems(&mut self) {
         let timeout = std::time::Duration::from_millis(crate::constants::DANDELION_TIMEOUT_MS);
         let expired: Vec<Hash> = self
@@ -2119,21 +2151,37 @@ impl Node {
             .map(|(hash, _)| *hash)
             .collect();
 
-        for hash in expired {
-            self.stem_txs.remove(&hash);
-            // Random delay before fluffing to prevent timing correlation
-            // between stem timeout and originator identification.
-            let jitter_ms = {
-                use rand::RngExt;
-                rand::rng().random_range(50u64..=500u64)
-            };
-            tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
-            // The tx is already in our mempool, broadcast it
+        if expired.is_empty() {
+            return;
+        }
+
+        // Collect transactions to fluff before removing from stem_txs
+        let mut txs_to_fluff = Vec::new();
+        {
             let state = self.state.read().await;
-            if let Some(tx) = state.mempool.get(&TxId(hash)).cloned() {
-                drop(state);
-                let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
+            for hash in &expired {
+                self.stem_txs.remove(hash);
+                if let Some(tx) = state.mempool.get(&TxId(*hash)).cloned() {
+                    txs_to_fluff.push(tx);
+                }
             }
+        }
+
+        // Spawn background task for jittered broadcasts
+        if !txs_to_fluff.is_empty() {
+            let p2p = self.p2p.clone();
+            tokio::spawn(async move {
+                for tx in txs_to_fluff {
+                    // Random delay before fluffing to prevent timing correlation
+                    // between stem timeout and originator identification.
+                    let jitter_ms = {
+                        use rand::RngExt;
+                        rand::rng().random_range(50u64..=500u64)
+                    };
+                    tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+                    let _ = p2p.broadcast(Message::NewTransaction(tx), None).await;
+                }
+            });
         }
     }
 

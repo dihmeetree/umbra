@@ -607,6 +607,18 @@ impl BftState {
         self.vrf_commitments.clear();
     }
 
+    /// Clear per-epoch caches without resetting round (preserves monotonicity).
+    ///
+    /// Used during epoch transitions in `finalize_vertex_inner` where we cannot
+    /// call `advance_epoch()` because it resets the round to 0.
+    pub fn clear_epoch_caches(&mut self) {
+        self.votes.clear();
+        self.certificates.clear();
+        self.round_votes.clear();
+        self.equivocations.clear();
+        self.vrf_commitments.clear();
+    }
+
     /// Get a certificate for a vertex.
     pub fn get_certificate(&self, vertex_id: &VertexId) -> Option<&Certificate> {
         self.certificates.get(vertex_id)

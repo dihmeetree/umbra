@@ -14,6 +14,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
+use zeroize::Zeroize;
+
 use crate::crypto::keys::{KemKeypair, SigningKeypair, SigningPublicKey};
 use crate::network::nat::NatState;
 use crate::network::{self, Message, PeerId, PeerInfo, PROTOCOL_VERSION};
@@ -66,6 +68,15 @@ struct SessionKeys {
     recv_key: [u8; 32],
     send_mac_key: [u8; 32],
     recv_mac_key: [u8; 32],
+}
+
+impl Drop for SessionKeys {
+    fn drop(&mut self) {
+        self.send_key.zeroize();
+        self.recv_key.zeroize();
+        self.send_mac_key.zeroize();
+        self.recv_mac_key.zeroize();
+    }
 }
 
 impl SessionKeys {
@@ -529,6 +540,9 @@ async fn p2p_loop(
     // NAT state: tracks our external address via manual config, UPnP, or peer observation.
     let mut nat_state = NatState::new(config.listen_port, config.external_addr);
 
+    // Rate limit NAT punch requests per peer (max 5 per 60 seconds).
+    let mut nat_punch_counts: HashMap<PeerId, (u32, std::time::Instant)> = HashMap::new();
+
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -703,6 +717,20 @@ async fn p2p_loop(
                                 continue;
                             }
                             Message::NatPunchRequest { target_peer_id, requester_external_addr } => {
+                                // Rate limit: max 5 punch requests per peer per 60 seconds
+                                let now = std::time::Instant::now();
+                                let entry = nat_punch_counts.entry(from).or_insert((0, now));
+                                if entry.1.elapsed() > std::time::Duration::from_secs(60) {
+                                    *entry = (0, now);
+                                }
+                                entry.0 += 1;
+                                if entry.0 > 5 {
+                                    tracing::debug!(
+                                        peer = %hex::encode(&from[..8]),
+                                        "NAT punch request rate limited"
+                                    );
+                                    continue;
+                                }
                                 // We are the rendezvous: forward a NatPunchNotify to the target
                                 if let Some(target_peer) = peers.get(target_peer_id) {
                                     let _ = target_peer.msg_tx.try_send(Message::NatPunchNotify {
@@ -882,6 +910,10 @@ async fn handle_inbound_inner(
             if !(2..=PROTOCOL_VERSION).contains(&version) {
                 return Err(P2pError::InvalidHandshake);
             }
+            // Verify peer_id matches the fingerprint of their public key
+            if peer_id != public_key.fingerprint() {
+                return Err(P2pError::InvalidHandshake);
+            }
             (peer_id, public_key)
         }
         _ => return Err(P2pError::InvalidHandshake),
@@ -970,6 +1002,10 @@ async fn handle_outbound(
         } => {
             // Accept v2 (pre-NAT) and v3+ peers
             if !(2..=PROTOCOL_VERSION).contains(&version) {
+                return Err(P2pError::InvalidHandshake);
+            }
+            // Verify peer_id matches the fingerprint of their public key
+            if peer_id != public_key.fingerprint() {
                 return Err(P2pError::InvalidHandshake);
             }
             (peer_id, public_key, kem_public_key)
@@ -1150,6 +1186,11 @@ async fn spawn_encrypted_connection_tasks(
 
 // ── Plaintext I/O (used during handshake only) ──
 
+/// Maximum size for handshake messages (Hello, KeyExchange, AuthChallenge).
+/// Much smaller than MAX_NETWORK_MESSAGE_BYTES to limit pre-authentication
+/// memory allocation from unauthenticated connections.
+const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024; // 64 KiB
+
 /// Read a single plaintext framed message from a TCP stream.
 async fn read_message(stream: &mut OwnedReadHalf) -> Result<Message, P2pError> {
     let mut len_buf = [0u8; 4];
@@ -1158,8 +1199,10 @@ async fn read_message(stream: &mut OwnedReadHalf) -> Result<Message, P2pError> {
         .await
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len > crate::constants::MAX_NETWORK_MESSAGE_BYTES {
-        return Err(P2pError::ConnectionFailed("message too large".into()));
+    if len > MAX_HANDSHAKE_MESSAGE_BYTES {
+        return Err(P2pError::ConnectionFailed(
+            "handshake message too large".into(),
+        ));
     }
     let mut payload = vec![0u8; len];
     stream
