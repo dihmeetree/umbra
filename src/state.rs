@@ -127,6 +127,9 @@ pub struct ChainState {
     /// When present, new nullifiers are written to both memory and sled,
     /// and `is_spent()` falls back to sled for lookups.
     nullifier_storage: Option<sled::Tree>,
+    /// Number of nullifiers migrated to sled-only storage (no longer in `nullifiers` set).
+    /// Used so `nullifier_count()` returns the true total even after migration.
+    migrated_nullifier_count: usize,
     /// Incremental hash accumulator over nullifiers (for state root)
     nullifier_hash: Hash,
     /// Registered validators
@@ -166,6 +169,7 @@ impl ChainState {
             commitment_tree: IncrementalMerkleTree::new(),
             nullifiers: NullifierSet::new(),
             nullifier_storage: None,
+            migrated_nullifier_count: 0,
             nullifier_hash: [0u8; 32],
             validators: HashMap::new(),
             validator_bonds: HashMap::new(),
@@ -708,9 +712,9 @@ impl ChainState {
         self.commitments.len()
     }
 
-    /// Get the total number of spent nullifiers.
+    /// Get the total number of spent nullifiers (in-memory + migrated to sled).
     pub fn nullifier_count(&self) -> usize {
-        self.nullifiers.len()
+        self.nullifiers.len() + self.migrated_nullifier_count
     }
 
     /// Get accumulated fees for the current epoch.
@@ -810,6 +814,7 @@ impl ChainState {
             tree.insert(nullifier.0, &[1u8])
                 .map_err(|e| format!("sled write failed during migration: {}", e))?;
         }
+        self.migrated_nullifier_count += count;
         self.nullifiers = NullifierSet::new();
         self.nullifier_storage = Some(tree);
         Ok(count)
@@ -830,7 +835,7 @@ impl ChainState {
             state_root: self.state_root(),
             commitment_root: self.commitment_root(),
             commitment_count: self.commitments.len() as u64,
-            nullifier_count: self.nullifiers.len() as u64,
+            nullifier_count: self.nullifier_count() as u64,
             nullifier_hash: self.nullifier_hash,
             epoch_fees: self.epoch_fees,
             validator_count: self.validators.values().filter(|v| v.active).count() as u64,
@@ -1081,6 +1086,7 @@ impl ChainState {
             commitment_tree,
             nullifiers,
             nullifier_storage: None,
+            migrated_nullifier_count: 0,
             nullifier_hash: meta.nullifier_hash,
             validators,
             validator_bonds,

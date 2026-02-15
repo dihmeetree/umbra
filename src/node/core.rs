@@ -782,11 +782,12 @@ impl Node {
                 }
             }
             Message::BftCertificate(cert) => {
-                // Fix 6: Gossip deduplication for certificates
-                if self.is_seen(&cert.vertex_id.0) {
+                // Domain-separated dedup key so certificates don't collide with vertices
+                let cert_dedup_key = crate::hash_concat(&[b"cert", &cert.vertex_id.0]);
+                if self.is_seen(&cert_dedup_key) {
                     return; // Already processed certificate for this vertex
                 }
-                self.mark_seen(cert.vertex_id.0);
+                self.mark_seen(cert_dedup_key);
 
                 let mut state = self.state.write().await;
                 // C1: Verify certificate before finalizing

@@ -20,6 +20,8 @@ pub enum MempoolError {
     ValidationFailed(#[from] crate::transaction::TxValidationError),
     #[error("transaction fee {fee} below mempool minimum {min_fee}")]
     FeeTooLow { fee: u64, min_fee: u64 },
+    #[error("mempool full: all transactions have maximum fee, no eviction possible")]
+    MempoolFullMaxFee,
 }
 
 /// A transaction entry in the mempool with metadata.
@@ -156,9 +158,12 @@ impl Mempool {
             if let Some((&lowest_key, _)) = self.fee_index.last_key_value() {
                 let lowest_fee = lowest_key.fee();
                 if fee <= lowest_fee {
+                    if lowest_fee == u64::MAX {
+                        return Err(MempoolError::MempoolFullMaxFee);
+                    }
                     return Err(MempoolError::FeeTooLow {
                         fee,
-                        min_fee: lowest_fee.saturating_add(1),
+                        min_fee: lowest_fee + 1,
                     });
                 }
                 // Evict the lowest-fee tx

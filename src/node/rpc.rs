@@ -47,6 +47,8 @@ use crate::transaction::TxId;
 const COMMITMENT_PROOF_RATE_LIMIT: u32 = 60;
 /// Rate limit window duration in seconds.
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+/// Maximum number of entries in the rate limiter map before eviction.
+const RATE_LIMITER_MAX_ENTRIES: usize = 50_000;
 
 /// Shared RPC state.
 #[derive(Clone)]
@@ -205,20 +207,24 @@ async fn submit_tx(
         return Err((StatusCode::BAD_REQUEST, "transaction too large".to_string()));
     }
 
-    let tx_bytes = hex::decode(&req.tx_hex)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid hex: {}", e)))?;
+    let tx_bytes = hex::decode(&req.tx_hex).map_err(|e| {
+        tracing::debug!(error = %e, "RPC submit_tx: invalid hex encoding");
+        (StatusCode::BAD_REQUEST, "invalid hex encoding".to_string())
+    })?;
     let tx: crate::transaction::Transaction = crate::deserialize(&tx_bytes).map_err(|e| {
+        tracing::debug!(error = %e, "RPC submit_tx: failed to decode transaction");
         (
             StatusCode::BAD_REQUEST,
-            format!("invalid transaction: {}", e),
+            "invalid transaction encoding".to_string(),
         )
     })?;
 
     let tx_id = tx.tx_id();
     let mut node = state.node.write().await;
-    node.mempool
-        .insert(tx.clone())
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("rejected: {}", e)))?;
+    node.mempool.insert(tx.clone()).map_err(|e| {
+        tracing::debug!(error = %e, "RPC submit_tx: transaction rejected by mempool");
+        (StatusCode::BAD_REQUEST, "transaction rejected".to_string())
+    })?;
 
     // Dandelion++ stem phase: send to a single random peer instead of broadcasting
     // to all peers. This prevents the RPC-connected node from being identified as
@@ -282,9 +288,10 @@ async fn get_tx(
     // Check mempool first
     if let Some(tx) = node.mempool.get(&tx_id) {
         let tx_hex = crate::serialize(tx).map(hex::encode).map_err(|e| {
+            tracing::error!(error = %e, "RPC get_tx: failed to serialize mempool transaction");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {}", e),
+                "internal error".to_string(),
             )
         })?;
         return Ok(Json(GetTxResponse {
@@ -297,9 +304,10 @@ async fn get_tx(
     // Then storage
     if let Ok(Some(tx)) = node.storage.get_transaction(&tx_id) {
         let tx_hex = crate::serialize(&tx).map(hex::encode).map_err(|e| {
+            tracing::error!(error = %e, "RPC get_tx: failed to serialize stored transaction");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {}", e),
+                "internal error".to_string(),
             )
         })?;
         return Ok(Json(GetTxResponse {
@@ -469,9 +477,10 @@ async fn get_finalized_vertices(
         .storage
         .get_finalized_vertices_after(params.after, limit)
         .map_err(|e| {
+            tracing::error!(error = %e, "RPC get_finalized_vertices: storage read failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("storage error: {}", e),
+                "internal error".to_string(),
             )
         })?;
 
@@ -648,9 +657,10 @@ async fn get_vertex_by_id(
     match vertex {
         Some(v) => {
             let hex = crate::serialize(&v).map(hex::encode).map_err(|e| {
+                tracing::error!(error = %e, "RPC get_vertex_by_id: failed to serialize vertex");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("serialize: {}", e),
+                    "internal error".to_string(),
                 )
             })?;
             Ok(Json(serde_json::json!({
@@ -699,10 +709,18 @@ async fn get_commitment_proof(
                 ));
             }
         }
-        // Periodic cleanup: remove stale entries
-        if limiter.len() > 10_000 {
-            let cutoff = now - std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS * 2);
+        // Prevent unbounded growth: evict stale entries when over capacity
+        if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
+            let cutoff = now - std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
             limiter.retain(|_, (_, start)| *start > cutoff);
+            // If still over capacity after evicting expired entries, clear entirely
+            if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
+                tracing::warn!(
+                    entries = limiter.len(),
+                    "rate limiter still over capacity after eviction, clearing"
+                );
+                limiter.clear();
+            }
         }
     }
 
@@ -1167,7 +1185,7 @@ mod tests {
         let (status, body) = post_tx_hex(&app, &garbage_hex).await;
         assert_eq!(status, HttpStatus::BAD_REQUEST);
         assert!(
-            body.contains("invalid transaction"),
+            body.contains("invalid transaction encoding"),
             "unexpected error body: {}",
             body
         );
@@ -1190,9 +1208,7 @@ mod tests {
         let (status2, body2) = post_tx_hex(&app2, &tx_hex).await;
         assert_eq!(status2, HttpStatus::BAD_REQUEST);
         assert!(
-            body2.contains("already in mempool")
-                || body2.contains("Duplicate")
-                || body2.contains("duplicate"),
+            body2.contains("transaction rejected"),
             "unexpected error body: {}",
             body2
         );

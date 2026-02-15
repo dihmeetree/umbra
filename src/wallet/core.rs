@@ -363,10 +363,11 @@ impl Wallet {
         }
         let tx = builder.build().map_err(WalletError::Build)?;
         let tx_binding = tx.tx_binding;
+        let epoch = state.map(|s| s.epoch()).unwrap_or(0);
         for &idx in &selected {
             self.outputs[idx].status = SpendStatus::Pending {
                 tx_binding,
-                created_epoch: 0,
+                created_epoch: epoch,
             };
         }
         self.push_history(TxHistoryEntry {
@@ -374,7 +375,7 @@ impl Wallet {
             direction: TxDirection::Send,
             amount,
             fee: tx.fee,
-            epoch: 0,
+            epoch,
         });
         Ok(tx)
     }
@@ -502,10 +503,11 @@ impl Wallet {
         builder = builder.add_output(self.keypair.kem.public.clone(), consolidated_amount);
         let tx = builder.build().map_err(WalletError::Build)?;
         let tx_binding = tx.tx_binding;
+        let epoch = state.map(|s| s.epoch()).unwrap_or(0);
         for &idx in &unspent {
             self.outputs[idx].status = SpendStatus::Pending {
                 tx_binding,
-                created_epoch: 0,
+                created_epoch: epoch,
             };
         }
         self.push_history(TxHistoryEntry {
@@ -513,7 +515,7 @@ impl Wallet {
             direction: TxDirection::Send,
             amount: consolidated_amount,
             fee,
-            epoch: 0,
+            epoch,
         });
         Ok(tx)
     }
