@@ -753,4 +753,110 @@ mod tests {
         let fee2 = constants::compute_weight_fee(1, 1000);
         assert!(fee2 > fee1);
     }
+
+    #[test]
+    fn hash_domain_different_data_different_hash() {
+        let h1 = hash_domain(b"same.domain", b"data1");
+        let h2 = hash_domain(b"same.domain", b"data2");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn hash_concat_no_parts() {
+        // Empty slice should still produce a hash
+        let h = hash_concat(&[]);
+        assert_ne!(h, [0u8; 32]);
+    }
+
+    #[test]
+    fn deserialize_truncated_input() {
+        // Serialize a u64, then truncate
+        let bytes = serialize(&42u64).unwrap();
+        let truncated = &bytes[..bytes.len() / 2];
+        let result: Result<u64, _> = deserialize(truncated);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_wrong_type() {
+        // Serialize a u64 then try to deserialize as bool
+        let bytes = serialize(&42u64).unwrap();
+        let result: Result<bool, _> = deserialize(&bytes);
+        // May succeed or fail depending on bincode, but shouldn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn block_reward_exact_halving_boundary() {
+        // At exactly the halving interval, reward should be half
+        let r0 = constants::block_reward_for_epoch(0);
+        let r_at_halving = constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS);
+        assert_eq!(r_at_halving, r0 / 2);
+        // One epoch before halving should still be full reward
+        let r_before = constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS - 1);
+        assert_eq!(r_before, r0);
+    }
+
+    #[test]
+    fn block_reward_multiple_halvings() {
+        let r0 = constants::block_reward_for_epoch(0);
+        let r1 = constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS);
+        let r2 = constants::block_reward_for_epoch(constants::HALVING_INTERVAL_EPOCHS * 2);
+        assert_eq!(r1, r0 / 2);
+        assert_eq!(r2, r0 / 4);
+    }
+
+    #[test]
+    fn constant_time_eq_equal_arrays() {
+        let a = [1u8, 2, 3, 4];
+        let b = [1u8, 2, 3, 4];
+        assert!(constant_time_eq(&a, &b));
+    }
+
+    #[test]
+    fn constant_time_eq_different_arrays() {
+        let a = [1u8, 2, 3, 4];
+        let b = [1u8, 2, 3, 5];
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    #[test]
+    fn chain_id_nonzero() {
+        let id = constants::chain_id();
+        assert_ne!(id, [0u8; 32]);
+    }
+
+    #[test]
+    fn required_bond_zero_validators() {
+        let bond = constants::required_validator_bond(0);
+        assert!(bond > 0);
+    }
+
+    #[test]
+    fn compute_weight_fee_single_input_no_messages() {
+        let fee = constants::compute_weight_fee(1, 0);
+        assert!(fee > 0);
+    }
+
+    #[test]
+    fn protocol_constants_reasonable() {
+        // Use runtime checks to avoid clippy::assertions_on_constants
+        let max_tx_io = constants::MAX_TX_IO;
+        let committee_size = constants::COMMITTEE_SIZE;
+        let min_committee = constants::MIN_COMMITTEE_SIZE;
+        let epoch_len = constants::EPOCH_LENGTH;
+        let max_peers = constants::MAX_PEERS;
+        let max_msg = constants::MAX_NETWORK_MESSAGE_BYTES;
+        let protocol_ver = constants::PROTOCOL_VERSION_ID;
+
+        assert!(max_tx_io > 0);
+        assert!(max_tx_io <= 256);
+        assert!(committee_size > 0);
+        assert!(min_committee > 0);
+        assert!(min_committee <= committee_size);
+        assert!(epoch_len > 0);
+        assert!(max_peers > 0);
+        assert!(max_msg > 0);
+        assert!(protocol_ver > 0);
+    }
 }

@@ -138,4 +138,62 @@ mod tests {
         let c2 = Commitment::commit(200, &blind);
         assert_ne!(c1, c2);
     }
+
+    #[test]
+    fn multiple_random_blindings_different_commitments() {
+        let c1 = Commitment::commit(100, &BlindingFactor::random());
+        let c2 = Commitment::commit(100, &BlindingFactor::random());
+        let c3 = Commitment::commit(100, &BlindingFactor::random());
+        // Three random blindings should produce three different commitments
+        assert_ne!(c1, c2);
+        assert_ne!(c2, c3);
+        assert_ne!(c1, c3);
+    }
+
+    #[test]
+    fn zero_commitment_equals_commit_zero() {
+        let blind = BlindingFactor::from_bytes([99u8; 32]);
+        let zero_c = Commitment::zero(&blind);
+        let explicit_c = Commitment::commit(0, &blind);
+        assert_eq!(zero_c, explicit_c);
+    }
+
+    #[test]
+    fn commitment_verify_wrong_blinding_fails() {
+        let b1 = BlindingFactor::from_bytes([1u8; 32]);
+        let b2 = BlindingFactor::from_bytes([2u8; 32]);
+        let c = Commitment::commit(42, &b1);
+        assert!(!c.verify(42, &b2));
+    }
+
+    #[test]
+    fn commitment_zero_value_nonzero_hash() {
+        let blind = BlindingFactor::from_bytes([0u8; 32]);
+        let c = Commitment::commit(0, &blind);
+        // Commitment hash should not be all zeros even for zero inputs
+        assert_ne!(c.0, [0u8; 32]);
+    }
+
+    #[test]
+    fn blinding_factor_from_bytes_roundtrip() {
+        let bytes = [77u8; 32];
+        let bf = BlindingFactor::from_bytes(bytes);
+        assert_eq!(bf.0, bytes);
+    }
+
+    #[test]
+    fn blinding_factor_debug_redacted() {
+        let bf = BlindingFactor::from_bytes([42u8; 32]);
+        let debug_str = format!("{:?}", bf);
+        assert!(debug_str.contains("REDACTED"));
+        assert!(!debug_str.contains("42"));
+    }
+
+    #[test]
+    fn blinding_factor_to_felts_deterministic() {
+        let bf = BlindingFactor::from_bytes([7u8; 32]);
+        let f1 = bf.to_felts();
+        let f2 = bf.to_felts();
+        assert_eq!(f1, f2);
+    }
 }

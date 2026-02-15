@@ -2889,4 +2889,147 @@ mod tests {
         assert!(result2.is_some());
         assert_eq!(state.total_minted(), amount + amount2);
     }
+
+    #[test]
+    fn ledger_new_has_genesis() {
+        let ledger = Ledger::new();
+        assert_eq!(ledger.dag.len(), 1);
+        assert_eq!(ledger.state.commitment_count(), 0);
+        assert_eq!(ledger.state.nullifier_count(), 0);
+    }
+
+    #[test]
+    fn ledger_finalize_vertex_unchecked_double_finalize_is_noop() {
+        use crate::consensus::dag::Dag;
+        let mut ledger = Ledger::new();
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+
+        // Insert a vertex
+        let kp = SigningKeypair::generate();
+        let vertex = Vertex {
+            id: VertexId(crate::hash_domain(b"test", b"v1")),
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: kp.public.clone(),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature::empty(),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        let vid = vertex.id;
+        ledger.dag.insert_unchecked(vertex).unwrap();
+
+        // First finalize
+        let result1 = ledger.finalize_vertex_unchecked(&vid);
+        assert!(result1.is_ok());
+
+        // Second finalize should return Ok(None) (already finalized)
+        let result2 = ledger.finalize_vertex_unchecked(&vid);
+        assert!(result2.is_ok());
+        assert!(result2.unwrap().is_none());
+    }
+
+    #[test]
+    fn chain_state_double_nullifier_idempotent() {
+        let mut state = ChainState::new();
+        let n = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        assert!(state.mark_nullifier(n).is_ok());
+        // Duplicate nullifier is idempotent (returns Ok, not error)
+        assert!(state.mark_nullifier(n).is_ok());
+        assert_eq!(state.nullifier_count(), 1);
+    }
+
+    #[test]
+    fn chain_state_is_spent() {
+        let mut state = ChainState::new();
+        let n = Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        assert!(!state.is_spent(&n));
+        state.mark_nullifier(n).unwrap();
+        assert!(state.is_spent(&n));
+    }
+
+    #[test]
+    fn chain_state_epoch_starts_at_zero() {
+        let state = ChainState::new();
+        assert_eq!(state.epoch(), 0);
+    }
+
+    #[test]
+    fn chain_state_advance_epoch() {
+        let mut state = ChainState::new();
+        assert_eq!(state.epoch(), 0);
+        state.advance_epoch();
+        assert_eq!(state.epoch(), 1);
+        state.advance_epoch();
+        assert_eq!(state.epoch(), 2);
+    }
+
+    #[test]
+    fn chain_state_state_root_deterministic() {
+        let state = ChainState::new();
+        let r1 = state.state_root();
+        let r2 = state.state_root();
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn chain_state_state_root_changes_with_commits() {
+        let mut state = ChainState::new();
+        let root_before = state.state_root();
+        let c = Commitment::commit(100, &BlindingFactor::random());
+        state.add_commitment(c).unwrap();
+        let root_after = state.state_root();
+        assert_ne!(root_before, root_after);
+    }
+
+    #[test]
+    fn chain_state_eligible_validators_empty() {
+        let state = ChainState::new();
+        assert!(state.eligible_validators(0).is_empty());
+    }
+
+    #[test]
+    fn chain_state_total_validators_empty() {
+        let state = ChainState::new();
+        assert_eq!(state.total_validators(), 0);
+    }
+
+    #[test]
+    fn chain_state_active_validators_empty() {
+        let state = ChainState::new();
+        assert!(state.active_validators().is_empty());
+    }
+
+    #[test]
+    fn chain_state_all_validators_empty() {
+        let state = ChainState::new();
+        assert!(state.all_validators().is_empty());
+    }
+
+    #[test]
+    fn chain_state_find_commitment_returns_correct_index() {
+        let mut state = ChainState::new();
+        let c0 = Commitment::commit(100, &BlindingFactor::random());
+        let c1 = Commitment::commit(200, &BlindingFactor::random());
+        state.add_commitment(c0).unwrap();
+        state.add_commitment(c1).unwrap();
+        assert_eq!(state.find_commitment(&c0), Some(0));
+        assert_eq!(state.find_commitment(&c1), Some(1));
+        let c_missing = Commitment::commit(999, &BlindingFactor::random());
+        assert_eq!(state.find_commitment(&c_missing), None);
+    }
+
+    #[test]
+    fn chain_state_commitment_path() {
+        let mut state = ChainState::new();
+        let c = Commitment::commit(100, &BlindingFactor::random());
+        state.add_commitment(c).unwrap();
+        let path = state.commitment_path(0);
+        assert!(path.is_some());
+        assert!(state.commitment_path(1).is_none());
+    }
 }

@@ -2438,4 +2438,151 @@ mod tests {
         assert_eq!(v.activation_epoch, 0);
         assert_eq!(v.id, kp.public.fingerprint());
     }
+
+    #[test]
+    fn set_epoch_context_stores_values() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+
+        let seed = EpochSeed::genesis();
+        bft.set_epoch_context(seed.clone(), 100);
+
+        assert_eq!(bft.total_validators, 100);
+        assert!(bft.epoch_seed.is_some());
+        assert_eq!(bft.epoch_seed.as_ref().unwrap().epoch, seed.epoch);
+    }
+
+    #[test]
+    fn clear_epoch_caches_preserves_committee() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Create some state
+        let vertex_id = VertexId([1u8; 32]);
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = keypairs[0].sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+        bft.receive_vote(vote);
+
+        // Register a VRF commitment
+        bft.register_vrf_commitment([99u8; 32], [88u8; 32]);
+
+        // Clear caches
+        bft.clear_epoch_caches();
+
+        // Votes and VRF commitments should be cleared
+        assert_eq!(bft.rejection_count(&vertex_id), 0);
+        assert!(bft.vrf_commitment(&[99u8; 32]).is_none());
+        // But committee should still be there
+        assert_eq!(bft.committee.len(), 4);
+    }
+
+    #[test]
+    fn try_certify_already_certified_returns_none() {
+        // Build a scenario where we certify a vertex, then try again
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        let vertex_id = VertexId([1u8; 32]);
+
+        // Send 3 accept votes (quorum for committee of 4)
+        for (i, kp) in keypairs.iter().enumerate().take(3) {
+            let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            let vote = Vote {
+                vertex_id,
+                voter_id: validators[i].id,
+                epoch: 0,
+                round: 0,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            };
+            bft.receive_vote(vote);
+        }
+
+        // Should be certified now
+        assert!(bft.get_certificate(&vertex_id).is_some());
+
+        // Sending another vote should not create a second certificate
+        let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = keypairs[3].sign(&msg);
+        let vote = Vote {
+            vertex_id,
+            voter_id: validators[3].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+        let cert = bft.receive_vote(vote);
+        assert!(cert.is_none()); // already certified, returns None
+    }
+
+    #[test]
+    fn dynamic_quorum_edge_cases() {
+        assert_eq!(dynamic_quorum(0), 1); // 0 * 2 / 3 + 1 = 1
+        assert_eq!(dynamic_quorum(1), 1); // 1 * 2 / 3 + 1 = 1
+        assert_eq!(dynamic_quorum(3), 3); // 3 * 2 / 3 + 1 = 3
+        assert_eq!(dynamic_quorum(4), 3); // 4 * 2 / 3 + 1 = 3
+        assert_eq!(dynamic_quorum(10), 7); // 10 * 2 / 3 + 1 = 7
+        assert_eq!(dynamic_quorum(21), 15); // 21 * 2 / 3 + 1 = 15
+    }
+
+    #[test]
+    fn leader_wraps_around() {
+        let (_keypairs, validators) = make_committee(3);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Leaders should rotate through committee
+        let l0 = bft.leader().unwrap().id;
+        bft.round = 1;
+        let l1 = bft.leader().unwrap().id;
+        bft.round = 3;
+        let l3 = bft.leader().unwrap().id;
+
+        // l3 should wrap around to l0 (3 % 3 == 0 % 3)
+        assert_eq!(l0, l3);
+        // Different rounds should have different leaders (committee > 1)
+        assert_ne!(l0, l1);
+    }
+
+    #[test]
+    fn all_certificates_empty_initially() {
+        let (_keypairs, validators) = make_committee(3);
+        let bft = BftState::new(0, validators, test_chain_id());
+        assert!(bft.all_certificates().is_empty());
+    }
+
+    #[test]
+    fn register_vrf_commitment_duplicate_same_value() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+        let vid = [1u8; 32];
+        let commitment = [42u8; 32];
+        assert!(bft.register_vrf_commitment(vid, commitment));
+        // Same commitment should return true
+        assert!(bft.register_vrf_commitment(vid, commitment));
+    }
+
+    #[test]
+    fn register_vrf_commitment_duplicate_different_value() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators, test_chain_id());
+        let vid = [1u8; 32];
+        assert!(bft.register_vrf_commitment(vid, [42u8; 32]));
+        // Different commitment should return false
+        assert!(!bft.register_vrf_commitment(vid, [99u8; 32]));
+    }
 }

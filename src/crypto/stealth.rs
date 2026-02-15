@@ -296,4 +296,47 @@ mod tests {
         // All should have different KEM ciphertexts
         assert_ne!(r0.address.kem_ciphertext.0, r1.address.kem_ciphertext.0);
     }
+
+    #[test]
+    fn stealth_try_detect_at_max_tx_io_minus_one() {
+        let recipient = KemKeypair::generate();
+        let max_idx = crate::constants::MAX_TX_IO as u32 - 1;
+        let result = StealthAddress::generate(&recipient.public, max_idx).unwrap();
+        // try_detect scans 0..MAX_TX_IO so max_idx should be found
+        let info = result.address.try_detect(&recipient).unwrap();
+        assert_eq!(info.one_time_key, result.address.one_time_key);
+    }
+
+    #[test]
+    fn stealth_try_detect_at_index_beyond_max_fails_scan() {
+        let recipient = KemKeypair::generate();
+        // Generate at index MAX_TX_IO (out of scan range 0..MAX_TX_IO)
+        let out_of_range_idx = crate::constants::MAX_TX_IO as u32;
+        let result = StealthAddress::generate(&recipient.public, out_of_range_idx).unwrap();
+        // try_detect only scans 0..MAX_TX_IO, so it should NOT find index MAX_TX_IO
+        assert!(result.address.try_detect(&recipient).is_none());
+        // But try_detect_at_index with the exact index should work
+        assert!(result
+            .address
+            .try_detect_at_index(&recipient, out_of_range_idx)
+            .is_some());
+    }
+
+    #[test]
+    fn derive_spend_auth_all_zero_inputs_nonzero() {
+        let secret = [0u8; 32];
+        let fp = [0u8; 32];
+        let auth = derive_spend_auth(&secret, &fp, 0);
+        assert_ne!(auth, [0u8; 32]);
+    }
+
+    #[test]
+    fn stealth_generate_different_recipients_different_keys() {
+        let r1 = KemKeypair::generate();
+        let r2 = KemKeypair::generate();
+        let s1 = StealthAddress::generate(&r1.public, 0).unwrap();
+        let s2 = StealthAddress::generate(&r2.public, 0).unwrap();
+        // Different recipients should produce different one-time keys
+        assert_ne!(s1.address.one_time_key, s2.address.one_time_key);
+    }
 }

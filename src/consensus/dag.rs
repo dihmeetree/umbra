@@ -1942,4 +1942,117 @@ mod tests {
         let unknown = VertexId([0xFFu8; 32]);
         assert!(!dag.finalize(&unknown));
     }
+
+    #[test]
+    fn ancestors_bounded_max_zero() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex(vec![gid], 1);
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+
+        // With max_visited=0, should return empty
+        let anc = dag.ancestors_bounded(&v1_id, 0);
+        assert!(anc.is_empty());
+    }
+
+    #[test]
+    fn dag_double_finalize_is_noop() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v = make_vertex(vec![gid], 1);
+        let vid = v.id;
+        dag.insert_unchecked(v).unwrap();
+
+        assert!(dag.finalize(&vid));
+        // Second finalize should still return true (already finalized)
+        assert!(dag.finalize(&vid));
+        assert!(dag.is_finalized(&vid));
+        // Should appear only once in finalized order
+        assert_eq!(
+            dag.finalized_order()
+                .iter()
+                .filter(|id| **id == vid)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dag_insert_duplicate_vertex_fails() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v = make_vertex(vec![gid], 1);
+        let v_clone = Vertex {
+            id: v.id,
+            parents: v.parents.clone(),
+            epoch: v.epoch,
+            round: v.round,
+            proposer: v.proposer.clone(),
+            transactions: vec![],
+            timestamp: v.timestamp,
+            state_root: v.state_root,
+            signature: v.signature.clone(),
+            vrf_proof: None,
+            protocol_version: v.protocol_version,
+        };
+
+        dag.insert_unchecked(v).unwrap();
+        let result = dag.insert_unchecked(v_clone);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dag_genesis_is_finalized() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let dag = Dag::new(genesis);
+        assert!(dag.is_finalized(&gid));
+    }
+
+    #[test]
+    fn dag_is_empty_after_genesis_only() {
+        let genesis = Dag::genesis_vertex();
+        let dag = Dag::new(genesis);
+        assert!(!dag.is_empty());
+        assert_eq!(dag.len(), 1);
+    }
+
+    #[test]
+    fn dag_epoch_starts_at_zero() {
+        let genesis = Dag::genesis_vertex();
+        let dag = Dag::new(genesis);
+        assert_eq!(dag.epoch(), 0);
+    }
+
+    #[test]
+    fn dag_advance_round_increments() {
+        let genesis = Dag::genesis_vertex();
+        let mut dag = Dag::new(genesis);
+        let epoch_before = dag.epoch();
+        dag.advance_round();
+        // After one advance, still epoch 0 (epoch changes at EPOCH_LENGTH)
+        assert_eq!(dag.epoch(), epoch_before);
+    }
+
+    #[test]
+    fn vertex_tx_root_empty_transactions() {
+        let genesis = Dag::genesis_vertex();
+        assert!(genesis.transactions.is_empty());
+        let root = genesis.tx_root();
+        // tx_root of empty transactions should still produce a valid hash
+        assert_eq!(root.len(), 32);
+    }
+
+    #[test]
+    fn vertex_tx_ids_empty() {
+        let genesis = Dag::genesis_vertex();
+        assert!(genesis.tx_ids().is_empty());
+    }
 }

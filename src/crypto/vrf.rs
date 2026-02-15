@@ -497,4 +497,56 @@ mod tests {
         let output = VrfOutput::evaluate(&kp, b"commitment-value-test");
         assert_ne!(output.value, output.proof_commitment);
     }
+
+    #[test]
+    fn is_selected_committee_size_zero() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"zero-committee");
+        // committee_size=0, total=100 → should never be selected
+        // (0 * (u64::MAX+1) = 0, any value >= 0 is not < 0)
+        assert!(!output.is_selected(0, 100));
+    }
+
+    #[test]
+    fn sort_key_uniqueness_across_keys() {
+        let mut sort_keys = std::collections::HashSet::new();
+        for i in 0..20u32 {
+            let kp = SigningKeypair::generate();
+            let input = format!("unique-{}", i);
+            let output = VrfOutput::evaluate(&kp, input.as_bytes());
+            sort_keys.insert(output.sort_key());
+        }
+        // With 20 random keys, all sort keys should be unique
+        assert_eq!(sort_keys.len(), 20);
+    }
+
+    #[test]
+    fn vrf_verify_with_empty_proof_fails() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"empty-proof");
+        let commitment = output.proof_commitment;
+        output.proof = vec![];
+        assert!(!output.verify(&kp.public, b"empty-proof", &commitment));
+        assert!(!output.verify_proof_only(&kp.public, b"empty-proof"));
+    }
+
+    #[test]
+    fn vrf_verify_with_single_byte_proof_fails() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"one-byte-proof");
+        let commitment = output.proof_commitment;
+        output.proof = vec![0x42];
+        assert!(!output.verify(&kp.public, b"one-byte-proof", &commitment));
+        assert!(!output.verify_proof_only(&kp.public, b"one-byte-proof"));
+    }
+
+    #[test]
+    fn epoch_seed_next_increments_epoch() {
+        let genesis = EpochSeed::genesis();
+        assert_eq!(genesis.epoch, 0);
+        let e1 = genesis.next(&[0u8; 32]);
+        assert_eq!(e1.epoch, 1);
+        let e2 = e1.next(&[0u8; 32]);
+        assert_eq!(e2.epoch, 2);
+    }
 }

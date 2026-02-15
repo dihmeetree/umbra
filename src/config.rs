@@ -364,4 +364,74 @@ p2p_port = 9732
         let err = tls.validate().unwrap_err();
         assert!(err.contains("not found"));
     }
+
+    #[test]
+    fn malformed_toml_returns_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("umbra.toml");
+        std::fs::write(&config_path, "this is not valid toml {{{{").unwrap();
+        let config = UmbraConfig::load(dir.path());
+        // Should fall back to defaults
+        assert_eq!(config.node.p2p_port, crate::constants::DEFAULT_P2P_PORT);
+    }
+
+    #[test]
+    fn empty_toml_returns_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("umbra.toml");
+        std::fs::write(&config_path, "").unwrap();
+        let config = UmbraConfig::load(dir.path());
+        assert_eq!(config.node.p2p_port, crate::constants::DEFAULT_P2P_PORT);
+        assert_eq!(config.node.rpc_port, crate::constants::DEFAULT_RPC_PORT);
+    }
+
+    #[test]
+    fn ipv6_bootstrap_peer() {
+        let mut config = UmbraConfig::default();
+        config.node.bootstrap_peers = vec!["[::1]:9732".into()];
+        let peers = config.parse_bootstrap_peers();
+        assert_eq!(peers.len(), 1);
+    }
+
+    #[test]
+    fn parse_toml_unknown_fields_ignored() {
+        let toml_str = r#"
+[node]
+p2p_port = 9999
+unknown_field = "ignored"
+
+[wallet]
+web_port = 8080
+"#;
+        // serde(default) + deny_unknown_fields is NOT set, so unknowns are OK
+        let result: Result<UmbraConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.node.p2p_port, 9999);
+    }
+
+    #[test]
+    fn rpc_is_loopback_bracket_ipv6() {
+        let config = NodeConfig {
+            rpc_host: "[::1]".into(),
+            ..NodeConfig::default()
+        };
+        assert!(config.rpc_is_loopback());
+    }
+
+    #[test]
+    fn default_wallet_config() {
+        let config = WalletConfig::default();
+        assert_eq!(config.web_host, "127.0.0.1");
+        assert_eq!(config.web_port, 9734);
+        assert!(config.tls.is_none());
+    }
+
+    #[test]
+    fn default_node_config_max_peers() {
+        let config = NodeConfig::default();
+        assert_eq!(config.max_peers, crate::constants::MAX_PEERS);
+        assert!(config.tls.is_none());
+        assert!(config.bootstrap_peers.is_empty());
+    }
 }

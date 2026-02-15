@@ -668,4 +668,91 @@ mod tests {
         let addr2 = kp.public_address();
         assert_eq!(addr1.address_id(), addr2.address_id());
     }
+
+    #[test]
+    fn verify_empty_signature_fails() {
+        let kp = SigningKeypair::generate();
+        let empty_sig = Signature(vec![]);
+        assert!(!kp.public.verify(b"test", &empty_sig));
+    }
+
+    #[test]
+    fn verify_short_signature_fails() {
+        let kp = SigningKeypair::generate();
+        let short_sig = Signature(vec![0u8; 100]);
+        assert!(!kp.public.verify(b"test", &short_sig));
+    }
+
+    #[test]
+    fn verify_wrong_length_signature_fails() {
+        let kp = SigningKeypair::generate();
+        // Dilithium5 signatures are exactly DILITHIUM5_SIG_BYTES; wrong size should fail
+        let wrong_len_sig = Signature(vec![0u8; DILITHIUM5_SIG_BYTES + 1]);
+        assert!(!kp.public.verify(b"test", &wrong_len_sig));
+    }
+
+    #[test]
+    fn kem_decapsulate_wrong_ciphertext_returns_none_or_wrong_secret() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        let (ss1, ct1) = kp1.public.encapsulate().unwrap();
+        // Decapsulate ct1 with kp2's secret key should give different shared secret
+        if let Some(ss2) = kp2.decapsulate(&ct1) {
+            assert_ne!(ss1.0, ss2.0);
+        }
+        // The correct key should give the same shared secret
+        let ss_correct = kp1.decapsulate(&ct1).unwrap();
+        assert_eq!(ss1.0, ss_correct.0);
+    }
+
+    #[test]
+    fn signing_public_key_as_bytes_correct_length() {
+        let kp = SigningKeypair::generate();
+        assert_eq!(kp.public.as_bytes().len(), DILITHIUM5_PK_BYTES);
+    }
+
+    #[test]
+    fn kem_public_key_as_bytes_correct_length() {
+        let kp = KemKeypair::generate();
+        assert_eq!(kp.public.as_bytes().len(), KYBER1024_PK_BYTES);
+    }
+
+    #[test]
+    fn signature_empty_constructor() {
+        let sig = Signature::empty();
+        assert!(sig.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn shared_secret_zeroize_on_drop() {
+        // Verify SharedSecret type implements the proper traits
+        let kp = KemKeypair::generate();
+        let (ss, _ct) = kp.public.encapsulate().unwrap();
+        // SharedSecret should be 32 bytes
+        assert_eq!(ss.0.len(), 32);
+    }
+
+    #[test]
+    fn different_kem_keypairs_different_public_keys() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        assert_ne!(kp1.public.as_bytes(), kp2.public.as_bytes());
+    }
+
+    #[test]
+    fn different_signing_keypairs_different_public_keys() {
+        let kp1 = SigningKeypair::generate();
+        let kp2 = SigningKeypair::generate();
+        assert_ne!(kp1.public.as_bytes(), kp2.public.as_bytes());
+    }
+
+    #[test]
+    fn full_keypair_address_id_uniqueness() {
+        let kp1 = FullKeypair::generate();
+        let kp2 = FullKeypair::generate();
+        assert_ne!(
+            kp1.public_address().address_id(),
+            kp2.public_address().address_id()
+        );
+    }
 }

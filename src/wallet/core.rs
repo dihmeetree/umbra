@@ -1919,4 +1919,90 @@ mod tests {
         assert_eq!(seq2, 7);
         assert_eq!(loaded2.address().address_id(), original_addr);
     }
+
+    #[test]
+    fn wallet_new_has_zero_balance() {
+        let wallet = Wallet::new();
+        assert_eq!(wallet.balance(), 0);
+        assert_eq!(wallet.output_count(), 0);
+        assert!(wallet.received_messages().is_empty());
+        assert!(wallet.history().is_empty());
+    }
+
+    #[test]
+    fn wallet_address_deterministic() {
+        let wallet = Wallet::new();
+        let a1 = wallet.address().address_id();
+        let a2 = wallet.address().address_id();
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn wallet_different_instances_different_addresses() {
+        let w1 = Wallet::new();
+        let w2 = Wallet::new();
+        assert_ne!(w1.address().address_id(), w2.address().address_id());
+    }
+
+    #[test]
+    fn wallet_kem_public_key_available() {
+        let wallet = Wallet::new();
+        let pk = wallet.kem_public_key();
+        assert!(!pk.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn wallet_keypair_accessible() {
+        let wallet = Wallet::new();
+        let kp = wallet.keypair();
+        let fp = kp.signing.public.fingerprint();
+        assert_ne!(fp, [0u8; 32]);
+    }
+
+    #[test]
+    fn wallet_scan_unrelated_transaction_adds_nothing() {
+        let mut alice = Wallet::new();
+        let bob = Wallet::new();
+        let charlie = Wallet::new();
+
+        // Fund alice
+        let coinbase_blind = BlindingFactor::random();
+        let coinbase_auth = crate::hash_domain(b"coinbase", b"genesis-auth");
+        let funding_tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 10_000,
+                blinding: coinbase_blind,
+                spend_auth: coinbase_auth,
+                merkle_path: vec![],
+            })
+            .add_output(alice.kem_public_key().clone(), 9_800)
+            .build()
+            .unwrap();
+        alice.scan_transaction(&funding_tx);
+
+        // Alice sends to bob
+        let tx = alice
+            .build_transaction(bob.kem_public_key(), 5_000, None)
+            .unwrap();
+
+        // Charlie scans — should find nothing
+        let mut charlie_wallet = charlie;
+        let before_count = charlie_wallet.output_count();
+        charlie_wallet.scan_transaction(&tx);
+        assert_eq!(charlie_wallet.output_count(), before_count);
+        assert_eq!(charlie_wallet.balance(), 0);
+    }
+
+    #[test]
+    fn select_coins_insufficient_funds() {
+        let wallet = wallet_with_utxos(&[100]);
+        // 100 is not enough to send 100 + any fee
+        assert!(wallet.select_coins(100, 0).is_err());
+    }
+
+    #[test]
+    fn select_coins_empty_wallet() {
+        let wallet = Wallet::new();
+        assert!(wallet.select_coins(1, 0).is_err());
+    }
 }

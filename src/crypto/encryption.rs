@@ -583,4 +583,65 @@ mod tests {
         }
         assert!(encrypted.decrypt(&kp).is_none());
     }
+
+    #[test]
+    fn nonce_uniqueness() {
+        let kp = KemKeypair::generate();
+        let msg = b"nonce test";
+        let nonces: Vec<[u8; NONCE_SIZE]> = (0..10)
+            .map(|_| EncryptedPayload::encrypt(&kp.public, msg).unwrap().nonce)
+            .collect();
+        // All nonces should be unique
+        for i in 0..nonces.len() {
+            for j in (i + 1)..nonces.len() {
+                assert_ne!(nonces[i], nonces[j], "nonce collision at {} and {}", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn decrypt_with_truncated_ciphertext_fails() {
+        let kp = KemKeypair::generate();
+        let msg = b"truncation test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        // Truncate ciphertext to 1 byte (corrupt the length prefix)
+        encrypted.ciphertext = vec![0u8];
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn decrypt_with_empty_ciphertext_fails() {
+        let kp = KemKeypair::generate();
+        let msg = b"empty ct test";
+        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        encrypted.ciphertext = vec![];
+        assert!(encrypted.decrypt(&kp).is_none());
+    }
+
+    #[test]
+    fn shared_secret_decrypt_with_wrong_secret_fails() {
+        let kp1 = KemKeypair::generate();
+        let kp2 = KemKeypair::generate();
+        let (ss1, ct1) = kp1.public.encapsulate().unwrap();
+        let (ss2, _) = kp2.public.encapsulate().unwrap();
+        let msg = b"cross-secret test";
+        let encrypted = EncryptedPayload::encrypt_with_shared_secret(&ss1, ct1, msg).unwrap();
+        // Decrypt with wrong shared secret
+        assert!(encrypted.decrypt_with_shared_secret(&ss2).is_none());
+    }
+
+    #[test]
+    fn repeated_encrypt_same_plaintext_different_output() {
+        let kp = KemKeypair::generate();
+        let msg = b"repeat test";
+        let e1 = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        let e2 = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
+        // Different nonces, ciphertexts, MACs, and KEM ciphertexts
+        assert_ne!(e1.nonce, e2.nonce);
+        assert_ne!(e1.ciphertext, e2.ciphertext);
+        assert_ne!(e1.mac, e2.mac);
+        // Both should still decrypt correctly
+        assert_eq!(e1.decrypt(&kp).unwrap(), msg);
+        assert_eq!(e2.decrypt(&kp).unwrap(), msg);
+    }
 }

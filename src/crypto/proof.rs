@@ -758,4 +758,99 @@ mod tests {
         let fake_leaf = [0xFFu8; 32];
         assert_ne!(compute_merkle_root(&fake_leaf, &paths[0]), root);
     }
+
+    #[test]
+    fn incremental_tree_empty_last_appended_path() {
+        let tree = IncrementalMerkleTree::new();
+        assert!(tree.last_appended_path().is_empty());
+        assert_eq!(tree.num_leaves(), 0);
+    }
+
+    #[test]
+    fn incremental_tree_restore_empty() {
+        let tree = IncrementalMerkleTree::restore(0, |_, _| None);
+        assert_eq!(tree.num_leaves(), 0);
+        assert_eq!(tree.root(), IncrementalMerkleTree::new().root());
+    }
+
+    #[test]
+    fn incremental_tree_restore_with_data() {
+        // Build a tree normally
+        let mut original = IncrementalMerkleTree::new();
+        let leaves: Vec<Hash> = (0..3u64)
+            .map(|i| Commitment::commit(i * 100, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+        for l in &leaves {
+            original.append(*l).unwrap();
+        }
+
+        // Capture all nodes
+        let mut stored: std::collections::HashMap<(usize, usize), Hash> =
+            std::collections::HashMap::new();
+        for level in 0..=MERKLE_DEPTH {
+            for idx in 0..original.level_len(level) {
+                stored.insert((level, idx), original.get_node_public(level, idx));
+            }
+        }
+
+        // Restore from stored data
+        let restored =
+            IncrementalMerkleTree::restore(3, |level, idx| stored.get(&(level, idx)).copied());
+        assert_eq!(restored.root(), original.root());
+        assert_eq!(restored.num_leaves(), 3);
+    }
+
+    #[test]
+    fn compute_merkle_root_empty_path() {
+        let leaf = [42u8; 32];
+        let root = compute_merkle_root(&leaf, &[]);
+        // With empty path, root should equal the leaf itself
+        assert_eq!(root, leaf);
+    }
+
+    #[test]
+    fn path_to_stark_witness_length_matches_depth() {
+        let mut tree = IncrementalMerkleTree::new();
+        let c = Commitment::commit(1, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        let path = tree.path(0).unwrap();
+        let witness = path_to_stark_witness(&path);
+        assert_eq!(witness.len(), MERKLE_DEPTH);
+    }
+
+    #[test]
+    fn canonical_root_below_max_depth_differs() {
+        let hash = [42u8; 32];
+        let padded = canonical_root(&hash, 0);
+        assert_ne!(padded, hash); // padding should change the root
+    }
+
+    #[test]
+    fn incremental_tree_restore_sparse_loader() {
+        // Restore with a loader that returns None for all nodes
+        let tree = IncrementalMerkleTree::restore(5, |_, _| None);
+        assert_eq!(tree.num_leaves(), 5);
+        // Root should be non-zero (zero-hashes fill missing nodes)
+        assert_ne!(tree.root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn incremental_tree_default_matches_new() {
+        let from_new = IncrementalMerkleTree::new();
+        let from_default = IncrementalMerkleTree::default();
+        assert_eq!(from_new.root(), from_default.root());
+        assert_eq!(from_new.num_leaves(), from_default.num_leaves());
+    }
+
+    #[test]
+    fn pad_merkle_path_at_depth_is_noop() {
+        let path: Vec<MerkleNode> = (0..MERKLE_DEPTH)
+            .map(|_| MerkleNode {
+                hash: [0u8; 32],
+                is_left: false,
+            })
+            .collect();
+        let padded = pad_merkle_path(&path, MERKLE_DEPTH);
+        assert_eq!(padded.len(), MERKLE_DEPTH);
+    }
 }

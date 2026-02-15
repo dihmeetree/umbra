@@ -218,4 +218,47 @@ mod tests {
         let n2 = Nullifier::derive(&[2u8; 32], &commitment);
         assert_ne!(n1, n2);
     }
+
+    #[test]
+    fn nullifier_permuted_inputs_different() {
+        // Swapping auth and commitment should produce different nullifiers
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let n1 = Nullifier::derive(&a, &b);
+        let n2 = Nullifier::derive(&b, &a);
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn nullifier_set_insert_returns_correct_bool() {
+        let mut set = NullifierSet::new();
+        let n = Nullifier::derive(&[10u8; 32], &[20u8; 32]);
+        assert!(set.insert(n)); // first insert returns true
+        assert!(!set.insert(n)); // duplicate returns false
+        assert_eq!(set.len(), 1); // only one entry
+    }
+
+    #[test]
+    fn nullifier_set_multiple_inserts() {
+        let mut set = NullifierSet::new();
+        for i in 0..10u8 {
+            let n = Nullifier::derive(&[i; 32], &[0u8; 32]);
+            assert!(set.insert(n));
+        }
+        assert_eq!(set.len(), 10);
+        // Re-inserting all should return false
+        for i in 0..10u8 {
+            let n = Nullifier::derive(&[i; 32], &[0u8; 32]);
+            assert!(!set.insert(n));
+        }
+        assert_eq!(set.len(), 10);
+    }
+
+    #[test]
+    fn nullifier_verify_wrong_commitment_fails() {
+        let auth = [42u8; 32];
+        let commitment = [7u8; 32];
+        let n = Nullifier::derive(&auth, &commitment);
+        assert!(!n.verify(&auth, &[8u8; 32]));
+    }
 }

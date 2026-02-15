@@ -1419,4 +1419,76 @@ mod tests {
         assert!(tx.messages.is_empty());
         assert!(tx.validate_structure(0).is_ok());
     }
+
+    #[test]
+    fn deregister_sign_data_differs_by_chain_id() {
+        let vid = [1u8; 32];
+        let content = [2u8; 32];
+        let d1 = deregister_sign_data(&[0u8; 32], &vid, &content);
+        let d2 = deregister_sign_data(&[1u8; 32], &vid, &content);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn compute_fee_matches_weight_formula() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 300,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([100; 32]),
+                spend_auth: crate::hash_domain(b"test", &[100]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        // compute_fee should match the stored fee
+        assert_eq!(tx.compute_fee(), tx.fee);
+    }
+
+    #[test]
+    fn estimated_size_positive() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 300,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([55; 32]),
+                spend_auth: crate::hash_domain(b"test", &[55]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        assert!(tx.estimated_size() > 0);
+    }
+
+    #[test]
+    fn tx_id_differs_between_transactions() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx1 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 300,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([1; 32]),
+                spend_auth: crate::hash_domain(b"test", &[1]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        let tx2 = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 300,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([2; 32]),
+                spend_auth: crate::hash_domain(b"test", &[2]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        assert_ne!(tx1.tx_id(), tx2.tx_id());
+    }
 }
