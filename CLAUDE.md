@@ -21,23 +21,23 @@ Tests are slow in debug mode due to zk-STARK proof generation. Use `cargo test <
 
 ### Core modules (in dependency order)
 
-| Module | File | Role |
-|--------|------|------|
-| `lib.rs` | `src/lib.rs` | Protocol constants, `Hash` type, `hash_domain`, `hash_concat`, serialization helpers |
-| `crypto/` | `src/crypto/*.rs` | Post-quantum primitives: Dilithium5 signing, Kyber1024 KEM, stealth addresses, Rescue Prime commitments, nullifiers, Merkle proofs, VRF, encryption, zk-STARKs |
-| `transaction/` | `src/transaction/mod.rs` | Transaction types, validation (`validate_structure`), `TxInput`/`TxOutput` |
-| `transaction/builder.rs` | | `TransactionBuilder` API for constructing transactions with STARK proofs |
-| `consensus/dag.rs` | | DAG data structure (vertices, tips, finalized ordering, pruning) |
-| `consensus/bft.rs` | | BFT voting, certificates, equivocation detection, VRF committee selection |
-| `state.rs` | `src/state.rs` | `ChainState` (validators, bonds, slashing, epoch management), `Ledger` (DAG + state + Merkle tree), `restore_from_storage` |
-| `storage.rs` | `src/storage.rs` | `Storage` trait + `SledStorage` (sled embedded DB with 8 named trees) |
-| `mempool.rs` | `src/mempool.rs` | Fee-priority transaction pool with nullifier conflict detection |
-| `network.rs` | `src/network.rs` | Wire protocol `Message` enum, bincode encode/decode with size limits |
-| `p2p.rs` | `src/p2p.rs` | Encrypted TCP transport (Kyber KEM + Dilithium auth + BLAKE3 cipher) |
-| `node.rs` | `src/node.rs` | Node orchestrator: event loop, sync state machine, consensus participation, Dandelion++ |
-| `rpc.rs` | `src/rpc.rs` | JSON HTTP API (axum) |
-| `wallet.rs` | `src/wallet.rs` | Client-side key management, scanning, tx building, history |
-| `wallet_cli.rs` / `wallet_web.rs` | | CLI and web UI for the wallet |
+| Module                            | File                     | Role                                                                                                                                                           |
+| --------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib.rs`                          | `src/lib.rs`             | Protocol constants, `Hash` type, `hash_domain`, `hash_concat`, serialization helpers                                                                           |
+| `crypto/`                         | `src/crypto/*.rs`        | Post-quantum primitives: Dilithium5 signing, Kyber1024 KEM, stealth addresses, Rescue Prime commitments, nullifiers, Merkle proofs, VRF, encryption, zk-STARKs |
+| `transaction/`                    | `src/transaction/mod.rs` | Transaction types, validation (`validate_structure`), `TxInput`/`TxOutput`                                                                                     |
+| `transaction/builder.rs`          |                          | `TransactionBuilder` API for constructing transactions with STARK proofs                                                                                       |
+| `consensus/dag.rs`                |                          | DAG data structure (vertices, tips, finalized ordering, pruning)                                                                                               |
+| `consensus/bft.rs`                |                          | BFT voting, certificates, equivocation detection, VRF committee selection                                                                                      |
+| `state.rs`                        | `src/state.rs`           | `ChainState` (validators, bonds, slashing, epoch management), `Ledger` (DAG + state + Merkle tree), `restore_from_storage`                                     |
+| `storage.rs`                      | `src/storage.rs`         | `Storage` trait + `SledStorage` (sled embedded DB with 8 named trees)                                                                                          |
+| `mempool.rs`                      | `src/mempool.rs`         | Fee-priority transaction pool with nullifier conflict detection                                                                                                |
+| `network.rs`                      | `src/network.rs`         | Wire protocol `Message` enum, bincode encode/decode with size limits                                                                                           |
+| `p2p.rs`                          | `src/p2p.rs`             | Encrypted TCP transport (Kyber KEM + Dilithium auth + BLAKE3 cipher)                                                                                           |
+| `node.rs`                         | `src/node.rs`            | Node orchestrator: event loop, sync state machine, consensus participation, Dandelion++                                                                        |
+| `rpc.rs`                          | `src/rpc.rs`             | JSON HTTP API (axum)                                                                                                                                           |
+| `wallet.rs`                       | `src/wallet.rs`          | Client-side key management, scanning, tx building, history                                                                                                     |
+| `wallet_cli.rs` / `wallet_web.rs` |                          | CLI and web UI for the wallet                                                                                                                                  |
 
 ### Key patterns
 

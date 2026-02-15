@@ -20,9 +20,6 @@ pub mod spend_air;
 pub mod spend_prover;
 pub mod verify;
 
-#[cfg(test)]
-mod formal_verification;
-
 use winterfell::crypto::hashers::Rp64_256;
 use winterfell::crypto::DefaultRandomCoin;
 use winterfell::crypto::MerkleTree;
@@ -45,7 +42,6 @@ pub use spend_prover::prove_spend;
 ///
 /// NOT suitable for production use — provides weaker security guarantees.
 /// Uses reduced grinding factor for faster proof generation.
-#[cfg(test)]
 pub fn light_proof_options() -> ProofOptions {
     ProofOptions::new(
         42, // num_queries

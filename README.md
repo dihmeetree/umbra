@@ -94,7 +94,6 @@ umbra/
         spend_air.rs        AIR for spend proofs (nullifier + Merkle membership + proof_link)
         spend_prover.rs     Prover for spend STARK proofs
         verify.rs           STARK verification wrappers
-        formal_verification.rs  Formal verification of AIR constraint soundness (42 adversarial tests)
     transaction/
       mod.rs                Transaction, TxType, TxInput, TxOutput types and validation
       builder.rs            TransactionBuilder API for constructing transactions
@@ -124,6 +123,7 @@ umbra/
   tests/
     e2e.rs                  End-to-end integration tests (25 tests across 3 groups)
     consensus_properties.rs Consensus property tests: BFT safety, liveness, consistency (12 tests)
+    stark_constraints.rs    AIR constraint soundness verification (42 adversarial tests)
   fuzz/
     Cargo.toml              Fuzz crate configuration (cargo-fuzz / libfuzzer-sys)
     fuzz_targets/

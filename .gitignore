@@ -1,1 +1,33 @@
+# Build artifacts
 /target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+
+# IDE / editor
+/.vscode
+/.idea
+*.swp
+*.swo
+*~
+
+# Claude Code
+/.claude
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Database files
+*.db
+
+# Coverage
+/tarpaulin-report.*
+/lcov.info
+/coverage/

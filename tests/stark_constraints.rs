@@ -13,13 +13,15 @@
 use winterfell::math::FieldElement;
 use winterfell::{Air, Assertion, EvaluationFrame, Trace, TraceInfo, TraceTable};
 
-use super::balance_air::{BalanceAir, HASH_CYCLE, RANGE_BITS, TRACE_WIDTH};
-use super::balance_prover::build_balance_trace;
-use super::convert::Felt;
-use super::rescue;
-use super::spend_air::{SpendAir, MERKLE_DEPTH, SPEND_TRACE_WIDTH};
-use super::spend_prover::build_spend_trace;
-use super::types::{BalancePublicInputs, BalanceWitness, SpendPublicInputs, SpendWitness};
+use umbra::crypto::stark::balance_air::{BalanceAir, HASH_CYCLE, RANGE_BITS, TRACE_WIDTH};
+use umbra::crypto::stark::balance_prover::build_balance_trace;
+use umbra::crypto::stark::convert::Felt;
+use umbra::crypto::stark::rescue;
+use umbra::crypto::stark::spend_air::{SpendAir, MERKLE_DEPTH, SPEND_TRACE_WIDTH};
+use umbra::crypto::stark::spend_prover::build_spend_trace;
+use umbra::crypto::stark::types::{
+    BalancePublicInputs, BalanceWitness, SpendPublicInputs, SpendWitness,
+};
 
 // ── Column constants ──
 
@@ -205,7 +207,11 @@ fn build_simple_balance() -> (TraceTable<Felt>, BalanceAir, BalancePublicInputs)
 
     let trace = build_balance_trace(&witness, &pub_inputs).expect("honest trace should build");
     let trace_info = TraceInfo::new(TRACE_WIDTH, trace.length());
-    let air = BalanceAir::new(trace_info, pub_inputs.clone(), super::light_proof_options());
+    let air = BalanceAir::new(
+        trace_info,
+        pub_inputs.clone(),
+        umbra::crypto::stark::light_proof_options(),
+    );
 
     (trace, air, pub_inputs)
 }
@@ -271,7 +277,11 @@ fn build_multi_balance() -> (TraceTable<Felt>, BalanceAir, BalancePublicInputs) 
 
     let trace = build_balance_trace(&witness, &pub_inputs).expect("honest trace should build");
     let trace_info = TraceInfo::new(TRACE_WIDTH, trace.length());
-    let air = BalanceAir::new(trace_info, pub_inputs.clone(), super::light_proof_options());
+    let air = BalanceAir::new(
+        trace_info,
+        pub_inputs.clone(),
+        umbra::crypto::stark::light_proof_options(),
+    );
 
     (trace, air, pub_inputs)
 }
@@ -328,7 +338,11 @@ fn build_simple_spend() -> (TraceTable<Felt>, SpendAir, SpendPublicInputs) {
 
     let trace = build_spend_trace(&witness, &pub_inputs).expect("honest trace should build");
     let trace_info = TraceInfo::new(SPEND_TRACE_WIDTH, trace.length());
-    let air = SpendAir::new(trace_info, pub_inputs.clone(), super::light_proof_options());
+    let air = SpendAir::new(
+        trace_info,
+        pub_inputs.clone(),
+        umbra::crypto::stark::light_proof_options(),
+    );
 
     (trace, air, pub_inputs)
 }
@@ -393,8 +407,8 @@ fn balance_inflation_increase_output() {
     for row in output_start..output_start + HASH_CYCLE {
         trace.set(24, row, Felt::ZERO - Felt::new(105));
     }
-    // This should violate constraint 25 (block_value² ≠ state[4]²)
-    // or the final boundary assertion (net_balance ≠ fee)
+    // This should violate constraint 25 (block_value^2 != state[4]^2)
+    // or the final boundary assertion (net_balance != fee)
     let c25_violated = any_constraint_violated(&air, &trace, &[25]);
     let assertions = air.get_assertions();
     let boundary_violated = !check_boundary_violations(&assertions, &trace).is_empty();
@@ -477,7 +491,7 @@ fn balance_range_wrong_reconstruction() {
     for r in row..row + HASH_CYCLE {
         trace.set(BIT_COL_START + 5, r, flipped);
     }
-    // Constraint 87 (reconstruction ≠ state[4]) should fire
+    // Constraint 87 (reconstruction != state[4]) should fire
     assert!(
         any_constraint_violated(&air, &trace, &[87]),
         "wrong bit reconstruction must be caught by constraint 87"
@@ -492,13 +506,13 @@ fn balance_range_overflow_value() {
     // At block 0 first row, set all 59 bits to 1 (value = 2^59 - 1)
     // Then add an extra by setting bit 0 to 0 but state[4] to something wrong.
     // Actually: set bits to represent 2^59 - 1 but state[4] to hash(100, blinding).
-    // The honest trace has value=100. Setting bits to 2^59-1 means reconstruction ≠ state[4].
+    // The honest trace has value=100. Setting bits to 2^59-1 means reconstruction != state[4].
     for j in 0..RANGE_BITS {
         for r in 0..HASH_CYCLE {
             trace.set(BIT_COL_START + j, r, Felt::ONE);
         }
     }
-    // Now reconstruction = 2^59-1 but state[4] = hash(100, blinding)[0] ≠ 2^59-1
+    // Now reconstruction = 2^59-1 but state[4] = hash(100, blinding)[0] != 2^59-1
     assert!(
         any_constraint_violated(&air, &trace, &[87]),
         "overflow value must be caught by reconstruction constraint 87"
@@ -516,7 +530,7 @@ fn balance_range_bits_change_mid_block() {
         Felt::ZERO
     };
     trace.set(BIT_COL_START, 3, flipped);
-    // Constraint 88 (bit 0 constancy) should fire at row 2→3 or 3→4
+    // Constraint 88 (bit 0 constancy) should fire at row 2->3 or 3->4
     assert!(
         any_constraint_violated(&air, &trace, &[88]),
         "mid-block bit change must be caught by constancy constraint 88"
@@ -570,7 +584,7 @@ fn balance_proof_link_wrong_digest() {
     let boundary_row = HASH_CYCLE - 1; // row 7
     let original = trace.get(4, boundary_row);
     trace.set(4, boundary_row, original + Felt::ONE);
-    // Constraint 149 (digest chaining) should fire at boundary row→next block
+    // Constraint 149 (digest chaining) should fire at boundary row->next block
     assert!(
         any_constraint_violated(&air, &trace, &[149, 150, 151, 152]),
         "wrong digest must be caught by digest chaining constraint 149-152"
@@ -640,7 +654,11 @@ fn balance_fee_wrong_final() {
         ..pub_inputs
     };
     let trace_info = TraceInfo::new(TRACE_WIDTH, trace.length());
-    let air = BalanceAir::new(trace_info, wrong_pub, super::light_proof_options());
+    let air = BalanceAir::new(
+        trace_info,
+        wrong_pub,
+        umbra::crypto::stark::light_proof_options(),
+    );
     // Boundary assertion on net_balance at last row should fail
     let assertions = air.get_assertions();
     let violations = check_boundary_violations(&assertions, &trace);
@@ -710,7 +728,7 @@ fn balance_vanishing_nonzero_block_value_at_padding() {
     for r in padding_start..padding_start + HASH_CYCLE {
         trace.set(24, r, Felt::new(1000));
     }
-    // Constraint 26 (net_balance update) fires: next[25] - current[25] - current[24] ≠ 0
+    // Constraint 26 (net_balance update) fires: next[25] - current[25] - current[24] != 0
     // because block_value changed but net_balance didn't update accordingly.
     let all_constraints: Vec<usize> = (0..154).collect();
     assert!(
@@ -733,7 +751,7 @@ fn balance_padding_nonzero_value() {
         trace.set(24, r, Felt::new(50));
     }
     // Constraint 26 catches this: at the padding block boundary,
-    // next[25] - current[25] - current[24] ≠ 0 because net_balance
+    // next[25] - current[25] - current[24] != 0 because net_balance
     // was not updated to reflect the injected block_value.
     let all_constraints: Vec<usize> = (0..154).collect();
     assert!(
@@ -768,7 +786,7 @@ fn balance_equation_multi_io_verified() {
     // Block 0 is the first input commitment block.
     let original = trace.get(24, 0);
     trace.set(24, 0, original + Felt::ONE); // 101 instead of 100
-                                            // This breaks constraint 25 (block_value² ≠ state[4]²) or boundary
+                                            // This breaks constraint 25 (block_value^2 != state[4]^2) or boundary
     let c25_violated = any_constraint_violated(&air, &trace, &[25]);
     let assertions = air.get_assertions();
     let b_violated = !check_boundary_violations(&assertions, &trace).is_empty();
@@ -787,7 +805,11 @@ fn balance_equation_off_by_one() {
         ..pub_inputs
     };
     let trace_info = TraceInfo::new(TRACE_WIDTH, trace.length());
-    let air = BalanceAir::new(trace_info, wrong_pub, super::light_proof_options());
+    let air = BalanceAir::new(
+        trace_info,
+        wrong_pub,
+        umbra::crypto::stark::light_proof_options(),
+    );
     let assertions = air.get_assertions();
     let violations = check_boundary_violations(&assertions, &trace);
     assert!(
@@ -804,8 +826,8 @@ fn balance_equation_off_by_one() {
 fn balance_tx_content_hash_fiat_shamir() {
     // Full prove+verify: prove with hash A, try to verify with hash B.
     // This tests Fiat-Shamir binding of public inputs.
-    use super::types::BalanceStarkProof;
-    use super::verify::verify_balance_proof;
+    use umbra::crypto::stark::types::BalanceStarkProof;
+    use umbra::crypto::stark::verify::verify_balance_proof;
 
     let input_values = vec![100u64];
     let output_values = vec![95u64];
@@ -845,8 +867,12 @@ fn balance_tx_content_hash_fiat_shamir() {
         output_blindings,
     };
 
-    let proof = super::prove_balance(&witness, &pub_inputs_a, super::light_proof_options())
-        .expect("proving should succeed");
+    let proof = umbra::crypto::stark::prove_balance(
+        &witness,
+        &pub_inputs_a,
+        umbra::crypto::stark::light_proof_options(),
+    )
+    .expect("proving should succeed");
 
     // Tamper: change tx_content_hash to B
     let pub_inputs_b = BalancePublicInputs {
@@ -931,7 +957,11 @@ fn spend_merkle_wrong_root() {
         ..pub_inputs
     };
     let trace_info = TraceInfo::new(SPEND_TRACE_WIDTH, trace.length());
-    let air = SpendAir::new(trace_info, wrong_pub, super::light_proof_options());
+    let air = SpendAir::new(
+        trace_info,
+        wrong_pub,
+        umbra::crypto::stark::light_proof_options(),
+    );
     let assertions = air.get_assertions();
     let violations = check_boundary_violations(&assertions, &trace);
     assert!(
@@ -1020,7 +1050,7 @@ fn spend_proof_link_wrong_commitment_reg() {
     let mid_row = 50;
     let original = trace.get(SPEND_REG_COL_START, mid_row);
     trace.set(SPEND_REG_COL_START, mid_row, original + Felt::ONE);
-    // Constraint 36 (register constancy) should fire at row 49→50
+    // Constraint 36 (register constancy) should fire at row 49->50
     let register_indices: Vec<usize> = (36..40).collect();
     assert!(
         any_spend_constraint_violated(&air, &trace, &register_indices),
@@ -1057,7 +1087,7 @@ fn spend_commitment_register_mid_trace() {
     // Change column 26 at row 50 — register must be constant
     let original = trace.get(SPEND_REG_COL_START, 50);
     trace.set(SPEND_REG_COL_START, 50, original + Felt::new(7));
-    // Constraint 36 fires at row 49→50 transition
+    // Constraint 36 fires at row 49->50 transition
     assert!(
         any_spend_constraint_violated(&air, &trace, &[36]),
         "commitment register change must be caught by constraint 36"
@@ -1120,7 +1150,7 @@ fn spend_merkle_chained_domain_wrong() {
     // chained block boundaries.
     let block3_start = 3 * HASH_CYCLE;
     trace.set(0, block3_start, Felt::ZERO);
-    // Constraint 32 fires at the row 7→8 boundary (block 2 last row → block 3 first row)
+    // Constraint 32 fires at the row 7->8 boundary (block 2 last row -> block 3 first row)
     let all_constraints: Vec<usize> = (0..52).collect();
     let c_violated = any_spend_constraint_violated(&air, &trace, &all_constraints);
     let assertions = air.get_assertions();
@@ -1169,8 +1199,8 @@ fn cross_proof_link_mismatch() {
 fn cross_proof_transplant() {
     // Full winterfell prove+verify: prove spend with correct root,
     // swap to wrong root in pub_inputs — should fail.
-    use super::types::SpendStarkProof;
-    use super::verify::verify_spend_proof;
+    use umbra::crypto::stark::types::SpendStarkProof;
+    use umbra::crypto::stark::verify::verify_spend_proof;
 
     let spend_auth = [
         Felt::new(100),
@@ -1219,8 +1249,12 @@ fn cross_proof_transplant() {
         merkle_path: path,
     };
 
-    let proof = super::prove_spend(&witness, &pub_inputs, super::light_proof_options())
-        .expect("proving should succeed");
+    let proof = umbra::crypto::stark::prove_spend(
+        &witness,
+        &pub_inputs,
+        umbra::crypto::stark::light_proof_options(),
+    )
+    .expect("proving should succeed");
 
     // Tamper: change merkle_root in public inputs
     let wrong_pub = SpendPublicInputs {
