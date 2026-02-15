@@ -158,12 +158,12 @@ impl Mempool {
             if let Some((&lowest_key, _)) = self.fee_index.last_key_value() {
                 let lowest_fee = lowest_key.fee();
                 if fee <= lowest_fee {
-                    if lowest_fee == u64::MAX {
+                    if lowest_fee >= u64::MAX - 1 {
                         return Err(MempoolError::MempoolFullMaxFee);
                     }
                     return Err(MempoolError::FeeTooLow {
                         fee,
-                        min_fee: lowest_fee + 1,
+                        min_fee: lowest_fee.saturating_add(1),
                     });
                 }
                 // Evict the lowest-fee tx

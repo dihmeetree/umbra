@@ -104,7 +104,10 @@ impl Default for NodeConfig {
 impl NodeConfig {
     /// Returns true if the RPC host is a loopback address.
     pub fn rpc_is_loopback(&self) -> bool {
-        matches!(self.rpc_host.as_str(), "127.0.0.1" | "::1" | "localhost")
+        matches!(
+            self.rpc_host.as_str(),
+            "127.0.0.1" | "::1" | "[::1]" | "localhost"
+        )
     }
 }
 

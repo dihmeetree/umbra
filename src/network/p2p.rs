@@ -600,7 +600,13 @@ async fn p2p_loop(
                     }
                     P2pCommand::SendTo(peer_id, msg) => {
                         if let Some(peer) = peers.get(&peer_id) {
-                            let _ = peer.msg_tx.try_send(msg);
+                            if let Err(e) = peer.msg_tx.try_send(msg) {
+                                tracing::debug!(
+                                    peer = %hex::encode(&peer_id[..8]),
+                                    error = %e,
+                                    "Failed to send message to peer (channel full or closed)"
+                                );
+                            }
                         }
                     }
                     P2pCommand::Broadcast { message, exclude } => {
@@ -608,7 +614,13 @@ async fn p2p_loop(
                             if exclude.as_ref() == Some(id) {
                                 continue;
                             }
-                            let _ = peer.msg_tx.try_send(message.clone());
+                            if let Err(e) = peer.msg_tx.try_send(message.clone()) {
+                                tracing::debug!(
+                                    peer = %hex::encode(&id[..8]),
+                                    error = %e,
+                                    "Failed to broadcast to peer (channel full or closed)"
+                                );
+                            }
                         }
                     }
                     P2pCommand::GetPeers(reply) => {
@@ -706,12 +718,29 @@ async fn p2p_loop(
                                 }
                                 // Record what the peer observes our address as
                                 if let Ok(observed) = observed_addr.parse::<SocketAddr>() {
-                                    let changed = nat_state.record_observed_addr(from, observed.ip());
-                                    if changed {
-                                        tracing::info!(
-                                            addr = %nat_state.external_addr().map(|a| a.to_string()).unwrap_or_default(),
-                                            "Observed external address established via peer quorum"
-                                        );
+                                    let ip = observed.ip();
+                                    // Reject loopback, unspecified, and private addresses
+                                    let is_valid = match ip {
+                                        std::net::IpAddr::V4(v4) => {
+                                            !v4.is_loopback()
+                                                && !v4.is_unspecified()
+                                                && !v4.is_private()
+                                                && !v4.is_link_local()
+                                                && !v4.is_broadcast()
+                                        }
+                                        std::net::IpAddr::V6(v6) => {
+                                            !v6.is_loopback() && !v6.is_unspecified()
+                                        }
+                                    };
+                                    if is_valid {
+                                        let changed =
+                                            nat_state.record_observed_addr(from, ip);
+                                        if changed {
+                                            tracing::info!(
+                                                addr = %nat_state.external_addr().map(|a| a.to_string()).unwrap_or_default(),
+                                                "Observed external address established via peer quorum"
+                                            );
+                                        }
                                     }
                                 }
                                 continue;
@@ -719,6 +748,10 @@ async fn p2p_loop(
                             Message::NatPunchRequest { target_peer_id, requester_external_addr } => {
                                 // Rate limit: max 5 punch requests per peer per 60 seconds
                                 let now = std::time::Instant::now();
+                                // Prune stale entries to prevent unbounded memory growth
+                                if nat_punch_counts.len() > 1000 {
+                                    nat_punch_counts.retain(|_, (_, ts)| ts.elapsed() < std::time::Duration::from_secs(120));
+                                }
                                 let entry = nat_punch_counts.entry(from).or_insert((0, now));
                                 if entry.1.elapsed() > std::time::Duration::from_secs(60) {
                                     *entry = (0, now);

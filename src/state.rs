@@ -977,7 +977,10 @@ impl ChainState {
         )?;
 
         // Add commitment to the Merkle tree
-        self.add_commitment(commitment).ok()?;
+        if let Err(e) = self.add_commitment(commitment) {
+            tracing::error!(error = %e, "Failed to add coinbase commitment to Merkle tree");
+            return None;
+        }
 
         // Track total minted with supply cap enforcement
         self.total_minted = self
@@ -1021,7 +1024,10 @@ impl ChainState {
         )?;
 
         // Add commitment to the Merkle tree
-        self.add_commitment(commitment).ok()?;
+        if let Err(e) = self.add_commitment(commitment) {
+            tracing::error!(error = %e, "Failed to add genesis coinbase commitment to Merkle tree");
+            return None;
+        }
         // Track total minted with supply cap enforcement
         self.total_minted = self
             .total_minted

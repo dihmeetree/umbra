@@ -119,10 +119,14 @@ pub fn run_demo() {
     println!("    Bob balance:   {} units", bob_wallet.balance());
 
     let msgs = bob_wallet.received_messages();
-    println!(
-        "    Bob received message: {:?}",
-        String::from_utf8_lossy(&msgs[0].content)
-    );
+    if let Some(first_msg) = msgs.first() {
+        println!(
+            "    Bob received message: {:?}",
+            String::from_utf8_lossy(&first_msg.content)
+        );
+    } else {
+        println!("    Bob received no messages (message decryption may have failed)");
+    }
 
     // ────────────────────────────────────────────────────────
     // 4. UNLINKABILITY DEMO

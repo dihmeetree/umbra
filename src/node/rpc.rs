@@ -239,10 +239,14 @@ async fn submit_tx(
         Some(peer_id) => {
             if let Err(e) = state
                 .p2p
-                .send_to(peer_id, crate::network::Message::NewTransaction(tx))
+                .send_to(peer_id, crate::network::Message::NewTransaction(tx.clone()))
                 .await
             {
-                tracing::warn!(error = %e, "Failed to stem-send transaction");
+                tracing::warn!(error = %e, "Failed to stem-send transaction, falling back to broadcast");
+                let _ = state
+                    .p2p
+                    .broadcast(crate::network::Message::NewTransaction(tx), None)
+                    .await;
             }
         }
         None => {
@@ -713,13 +717,11 @@ async fn get_commitment_proof(
         if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
             let cutoff = now - std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
             limiter.retain(|_, (_, start)| *start > cutoff);
-            // If still over capacity after evicting expired entries, clear entirely
             if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
                 tracing::warn!(
                     entries = limiter.len(),
-                    "rate limiter still over capacity after eviction, clearing"
+                    "rate limiter over capacity after eviction, rejecting new entries"
                 );
-                limiter.clear();
             }
         }
     }

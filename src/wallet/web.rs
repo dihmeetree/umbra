@@ -546,19 +546,24 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
         }
     };
 
-    // Validate message size before building transaction
+    // Validate message size before building transaction.
+    // The ciphertext after encryption is padded: ceil((len+4)/64)*64 bytes.
+    // validate_structure checks ciphertext.len() > MAX_MESSAGE_SIZE, so we
+    // must check the estimated ciphertext size, not the raw plaintext size.
     let msg_bytes = form
         .message
         .filter(|m| !m.is_empty())
         .map(|m| m.into_bytes());
     if let Some(ref msg) = msg_bytes {
-        if msg.len() > crate::constants::MAX_MESSAGE_SIZE {
+        let estimated_ciphertext_len = msg.len().saturating_add(4).div_ceil(64) * 64;
+        if estimated_ciphertext_len > crate::constants::MAX_MESSAGE_SIZE {
             return SendTemplate {
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!(
-                    "Message too large: {} bytes (max {})",
+                    "Message too large: {} bytes (encrypted ~{} bytes, max {})",
                     msg.len(),
+                    estimated_ciphertext_len,
                     crate::constants::MAX_MESSAGE_SIZE
                 )),
                 csrf_token: state.csrf_token.clone(),

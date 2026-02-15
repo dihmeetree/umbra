@@ -337,7 +337,7 @@ impl Wallet {
         // not counted in message_bytes for fee computation.
         let msg_bytes_estimate: usize = message
             .as_ref()
-            .map(|m| (m.len() + 4).div_ceil(64) * 64)
+            .map(|m| m.len().saturating_add(4).div_ceil(64).saturating_mul(64))
             .unwrap_or(0);
 
         let (selected, selected_total, num_outputs, fee) =

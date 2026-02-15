@@ -339,6 +339,10 @@ impl Storage for SledStorage {
         for entry in self.commitment_levels.iter() {
             let (key_bytes, value_bytes) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
             if key_bytes.len() != 16 {
+                tracing::warn!(
+                    key_len = key_bytes.len(),
+                    "Skipping corrupted commitment level entry with invalid key length"
+                );
                 continue;
             }
             let level = u64::from_le_bytes(
@@ -515,6 +519,10 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?;
         self.finalized_count
             .store(0, std::sync::atomic::Ordering::Release);
+        // Flush to ensure all clears are persisted before snapshot import
+        self.db
+            .flush()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         Ok(())
     }
 }
