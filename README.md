@@ -23,13 +23,13 @@ Umbra is a post-quantum private cryptocurrency with zk-STARKs and DAG-BFT consen
 
 All cryptographic primitives are post-quantum secure:
 
-| Primitive | Algorithm | Security |
-|-----------|-----------|----------|
-| Signatures | CRYSTALS-Dilithium5 (ML-DSA-87) | NIST Level 5 (~256-bit classical) |
-| Key encapsulation | CRYSTALS-Kyber1024 (ML-KEM-1024) | NIST Level 5 |
-| Commitments & Merkle tree | Rescue Prime (Rp64_256) | STARK-friendly, post-quantum |
-| General hashing | BLAKE3 | 256-bit (128-bit quantum via Grover) |
-| Zero-knowledge proofs | zk-STARKs (winterfell) | ~127-bit conjectured security |
+| Primitive                 | Algorithm                        | Security                             |
+| ------------------------- | -------------------------------- | ------------------------------------ |
+| Signatures                | CRYSTALS-Dilithium5 (ML-DSA-87)  | NIST Level 5 (~256-bit classical)    |
+| Key encapsulation         | CRYSTALS-Kyber1024 (ML-KEM-1024) | NIST Level 5                         |
+| Commitments & Merkle tree | Rescue Prime (Rp64_256)          | STARK-friendly, post-quantum         |
+| General hashing           | BLAKE3                           | 256-bit (128-bit quantum via Grover) |
+| Zero-knowledge proofs     | zk-STARKs (winterfell)           | ~127-bit conjectured security        |
 
 No trusted setup is required. All proofs are transparent. The P2P transport layer uses the same post-quantum primitives (Kyber1024 for key exchange, Dilithium5 for mutual authentication, BLAKE3 for encryption and MACs), so all node-to-node communication is quantum-resistant.
 
@@ -46,7 +46,7 @@ No trusted setup is required. All proofs are transparent. The P2P transport laye
 
 A novel consensus mechanism that is **neither Proof of Work nor Proof of Stake**:
 
-1. **Superlinear Sybil resistance** — validator bonds scale with network size (`required_bond = BASE_BOND * (1 + n / SCALING_FACTOR)`), making mass registration superlinearly expensive while keeping initial entry affordable. Consensus power is *not* proportional to wealth.
+1. **Superlinear Sybil resistance** — validator bonds scale with network size (`required_bond = BASE_BOND * (1 + n / SCALING_FACTOR)`), making mass registration superlinearly expensive while keeping initial entry affordable. Consensus power is _not_ proportional to wealth.
 2. **VRF committee selection** — each epoch, a committee of 21 validators is selected uniformly at random via a Verifiable Random Function. Selection is unbiased and unpredictable.
 3. **DAG structure** — the ledger is a Directed Acyclic Graph, not a linear chain. Multiple vertices can be produced in parallel, enabling high throughput.
 4. **Instant finality** — the committee runs asynchronous BFT. Once 2/3+1 members certify a vertex, it is irreversibly final. No probabilistic finality, no confirmation delays.
@@ -123,6 +123,17 @@ umbra/
       simulator.rs          Network simulator: multi-node BFT consensus, traffic, attack scenarios
   tests/
     e2e.rs                  End-to-end integration tests (25 tests across 3 groups)
+    consensus_properties.rs Consensus property tests: BFT safety, liveness, consistency (12 tests)
+  fuzz/
+    Cargo.toml              Fuzz crate configuration (cargo-fuzz / libfuzzer-sys)
+    fuzz_targets/
+      fuzz_decode_message.rs          Network message deserialization fuzzing
+      fuzz_deserialize_transaction.rs Transaction deserialization fuzzing
+      fuzz_deserialize_vertex.rs      DAG vertex deserialization fuzzing
+      fuzz_transaction_validate.rs    Transaction method fuzzing (non-STARK)
+  .github/
+    workflows/
+      rust.yml              CI pipeline: build, clippy, fmt, tests, cargo-audit
   templates/
     base.html               Base layout with navigation and CSS
     dashboard.html          Balance, outputs, chain state, scan button
@@ -135,7 +146,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **890 tests**.
+**~28,500 lines of Rust** across 43 source files with **902 tests**.
 
 ## Building
 
@@ -193,28 +204,28 @@ The binary uses subcommands (`node`, `wallet`). Running without a subcommand def
 
 **Global flags:**
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--data-dir` | `./umbra-data` | Data directory for persistent storage |
-| `--rpc-host` | `127.0.0.1` | RPC listen host (localhost by default for safety) |
-| `--rpc-port` | `9733` | RPC listen port |
-| `--demo` | *(off)* | Run the protocol demo walkthrough instead |
-| `--tls-cert` | *(none)* | Server TLS certificate file (PEM) |
-| `--tls-key` | *(none)* | Server TLS private key file (PEM) |
-| `--tls-ca-cert` | *(none)* | CA certificate for client verification (PEM) |
-| `--tls-client-cert` | *(none)* | Wallet client TLS certificate (PEM) |
-| `--tls-client-key` | *(none)* | Wallet client TLS private key (PEM) |
-| `--external-addr` | *(none)* | Manually specify external address (IP:port) for nodes behind NAT |
-| `--no-upnp` | *(off)* | Disable UPnP port mapping |
+| Flag                | Default        | Description                                                      |
+| ------------------- | -------------- | ---------------------------------------------------------------- |
+| `--data-dir`        | `./umbra-data` | Data directory for persistent storage                            |
+| `--rpc-host`        | `127.0.0.1`    | RPC listen host (localhost by default for safety)                |
+| `--rpc-port`        | `9733`         | RPC listen port                                                  |
+| `--demo`            | _(off)_        | Run the protocol demo walkthrough instead                        |
+| `--tls-cert`        | _(none)_       | Server TLS certificate file (PEM)                                |
+| `--tls-key`         | _(none)_       | Server TLS private key file (PEM)                                |
+| `--tls-ca-cert`     | _(none)_       | CA certificate for client verification (PEM)                     |
+| `--tls-client-cert` | _(none)_       | Wallet client TLS certificate (PEM)                              |
+| `--tls-client-key`  | _(none)_       | Wallet client TLS private key (PEM)                              |
+| `--external-addr`   | _(none)_       | Manually specify external address (IP:port) for nodes behind NAT |
+| `--no-upnp`         | _(off)_        | Disable UPnP port mapping                                        |
 
 **Node flags** (`umbra node`):
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--host` | `0.0.0.0` | P2P listen host |
-| `--port` | `9732` | P2P listen port |
-| `--peers` | *(none)* | Comma-separated bootstrap peer addresses |
-| `--genesis-validator` | *(off)* | Register as a genesis validator (for bootstrapping a new network) |
+| Flag                  | Default   | Description                                                       |
+| --------------------- | --------- | ----------------------------------------------------------------- |
+| `--host`              | `0.0.0.0` | P2P listen host                                                   |
+| `--port`              | `9732`    | P2P listen port                                                   |
+| `--peers`             | _(none)_  | Comma-separated bootstrap peer addresses                          |
+| `--genesis-validator` | _(off)_   | Register as a genesis validator (for bootstrapping a new network) |
 
 ### Examples
 
@@ -242,18 +253,18 @@ cargo run --release -- wallet <command>
 
 ### Wallet Commands
 
-| Command | Description |
-|---------|-------------|
-| `init` | Create a new wallet, display 24-word recovery phrase, and save encrypted backup |
-| `address` | Show wallet address ID and re-export address file |
-| `balance` | Scan the chain and show current balance |
-| `scan` | Scan the chain for new outputs (without showing balance) |
-| `send` | Build and submit a transaction |
-| `messages` | Show received encrypted messages |
-| `history` | Show transaction history (sends, receives, coinbase rewards) |
-| `consolidate` | Merge all unspent outputs into a single output |
-| `recover` | Recover a wallet from a 24-word mnemonic phrase and backup file |
-| `export` | Export wallet address to a file for sharing |
+| Command       | Description                                                                     |
+| ------------- | ------------------------------------------------------------------------------- |
+| `init`        | Create a new wallet, display 24-word recovery phrase, and save encrypted backup |
+| `address`     | Show wallet address ID and re-export address file                               |
+| `balance`     | Scan the chain and show current balance                                         |
+| `scan`        | Scan the chain for new outputs (without showing balance)                        |
+| `send`        | Build and submit a transaction                                                  |
+| `messages`    | Show received encrypted messages                                                |
+| `history`     | Show transaction history (sends, receives, coinbase rewards)                    |
+| `consolidate` | Merge all unspent outputs into a single output                                  |
+| `recover`     | Recover a wallet from a 24-word mnemonic phrase and backup file                 |
+| `export`      | Export wallet address to a file for sharing                                     |
 
 ### Wallet Examples
 
@@ -308,6 +319,7 @@ cargo run --release -- --rpc-host 127.0.0.1 --rpc-port 9733 wallet web --host 0.
 Open `http://127.0.0.1:9734` in your browser. If no wallet exists, you'll be prompted to create one.
 
 **Pages:**
+
 - **Dashboard** (`/`) — balance, output counts, chain state, scan button
 - **Send** (`/send`) — build and submit transactions with optional encrypted messages
 - **Messages** (`/messages`) — view received encrypted messages
@@ -382,22 +394,22 @@ Without a valid client certificate, the connection is rejected at the TLS layer.
 
 The node exposes a JSON HTTP API (default `127.0.0.1:9733`, localhost-only for safety). For non-localhost deployments, mTLS is required (see [TLS section](#tls--mtls-configuration) above).
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/tx` | Submit a hex-encoded bincode-serialized transaction |
-| `GET` | `/tx/{id}` | Look up a transaction by ID (checks mempool then storage) |
-| `GET` | `/state` | Query chain state (epoch, counts, roots, total minted) |
-| `GET` | `/peers` | List connected peers |
-| `GET` | `/mempool` | Get mempool statistics |
-| `GET` | `/validators` | List all validators with bond and status |
-| `GET` | `/validator/{id}` | Get a single validator's info |
-| `GET` | `/vertices/finalized` | Paginated finalized vertices with coinbase outputs (`?after=N&limit=N`) |
-| `GET` | `/health` | Health check: status, version, uptime, peer count, epoch, sync state |
-| `GET` | `/metrics` | Prometheus-format metrics: uptime, peers, epoch, mempool stats |
-| `GET` | `/fee-estimate` | Fee estimation: percentiles (p10–p90), median, suggested fee |
-| `GET` | `/vertex/{id}` | Look up a vertex by ID (checks DAG then storage) |
-| `GET` | `/commitment-proof/{index}` | Merkle inclusion proof for a commitment at the given index |
-| `GET` | `/state-summary` | Light client state summary: roots, epoch, counts, active validators |
+| Method | Endpoint                    | Description                                                             |
+| ------ | --------------------------- | ----------------------------------------------------------------------- |
+| `POST` | `/tx`                       | Submit a hex-encoded bincode-serialized transaction                     |
+| `GET`  | `/tx/{id}`                  | Look up a transaction by ID (checks mempool then storage)               |
+| `GET`  | `/state`                    | Query chain state (epoch, counts, roots, total minted)                  |
+| `GET`  | `/peers`                    | List connected peers                                                    |
+| `GET`  | `/mempool`                  | Get mempool statistics                                                  |
+| `GET`  | `/validators`               | List all validators with bond and status                                |
+| `GET`  | `/validator/{id}`           | Get a single validator's info                                           |
+| `GET`  | `/vertices/finalized`       | Paginated finalized vertices with coinbase outputs (`?after=N&limit=N`) |
+| `GET`  | `/health`                   | Health check: status, version, uptime, peer count, epoch, sync state    |
+| `GET`  | `/metrics`                  | Prometheus-format metrics: uptime, peers, epoch, mempool stats          |
+| `GET`  | `/fee-estimate`             | Fee estimation: percentiles (p10–p90), median, suggested fee            |
+| `GET`  | `/vertex/{id}`              | Look up a vertex by ID (checks DAG then storage)                        |
+| `GET`  | `/commitment-proof/{index}` | Merkle inclusion proof for a commitment at the given index              |
+| `GET`  | `/state-summary`            | Light client state summary: roots, epoch, counts, active validators     |
 
 ### Example
 
@@ -445,7 +457,7 @@ Fee-priority transaction pool with configurable limits:
 - Transactions are ordered by fee (highest first) using a `BTreeMap` with negated fee keys
 - Nullifier conflict detection prevents double-spend attempts within the pool
 - When full, the lowest-fee transaction is evicted to make room for higher-fee submissions
-- `drain_highest_fee(n)` extracts the top-*n* transactions for vertex proposal
+- `drain_highest_fee(n)` extracts the top-_n_ transactions for vertex proposal
 - Expired transaction eviction — `evict_expired()` removes transactions past their `expiry_epoch`
 - Configurable size limits: max 10,000 transactions / 50 MiB (default)
 
@@ -512,7 +524,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 890 tests cover:
+All 902 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -625,6 +637,7 @@ Umbra uses **zk-STARKs** (via the [winterfell](https://github.com/facebook/winte
 ### Balance Proof (1 per transaction)
 
 Proves in zero knowledge:
+
 1. Each input/output commitment opens correctly under Rescue Prime
 2. Sum of input values = sum of output values + fee
 3. All values are in [0, 2^59) — prevents inflation via field-arithmetic wraparound
@@ -633,126 +646,127 @@ Proves in zero knowledge:
 ### Spend Proof (1 per input)
 
 Proves in zero knowledge:
+
 1. The nullifier is correctly derived: `Rescue(spend_auth, commitment) == nullifier`
 2. The commitment exists as a leaf in the depth-20 Merkle tree with the given root
 3. The proof_link is correctly derived: `Rescue(commitment, link_nonce) == proof_link`
 
 ### Proof Characteristics
 
-| Property | Value |
-|----------|-------|
-| Trusted setup | None (transparent) |
-| Post-quantum | Yes (hash-based) |
-| Field | Goldilocks (p = 2^64 - 2^32 + 1) |
-| Hash in circuit | Rescue Prime (Rp64_256) |
-| Security | ~127-bit conjectured (Goldilocks quadratic extension max) |
-| Range proof | 59-bit via bit decomposition (integrated in balance AIR) |
-| Balance proof size | ~40 KB |
-| Spend proof size | ~33 KB |
+| Property           | Value                                                     |
+| ------------------ | --------------------------------------------------------- |
+| Trusted setup      | None (transparent)                                        |
+| Post-quantum       | Yes (hash-based)                                          |
+| Field              | Goldilocks (p = 2^64 - 2^32 + 1)                          |
+| Hash in circuit    | Rescue Prime (Rp64_256)                                   |
+| Security           | ~127-bit conjectured (Goldilocks quadratic extension max) |
+| Range proof        | 59-bit via bit decomposition (integrated in balance AIR)  |
+| Balance proof size | ~40 KB                                                    |
+| Spend proof size   | ~33 KB                                                    |
 
 ## Protocol Constants
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `COMMITTEE_SIZE` | 21 | BFT committee members per epoch |
-| `MIN_COMMITTEE_SIZE` | 4 | Minimum committee for BFT safety |
-| `BFT_QUORUM` | dynamic | `(committee_size * 2) / 3 + 1` votes for finality |
-| `EPOCH_LENGTH` | 1,000 | Vertices per epoch before rotation |
-| `MAX_PARENTS` | 8 | Max parent references per DAG vertex |
-| `MAX_TXS_PER_VERTEX` | 10,000 | Max transactions per vertex |
-| `VERTEX_INTERVAL_MS` | 500 | Target interval between vertices |
-| `MAX_MESSAGES_PER_TX` | 16 | Max messages per transaction |
-| `MAX_MESSAGE_SIZE` | 64 KiB | Max encrypted message per transaction |
-| `MAX_ENCRYPT_PLAINTEXT` | 1 MiB | Max plaintext for Kyber encryption |
-| `MAX_NETWORK_MESSAGE_BYTES` | 16 MiB | Max serialized network message |
-| `VALIDATOR_BASE_BOND` | 1,000,000 | Base bond for validator registration (scales with network size) |
-| `BOND_SCALING_FACTOR` | 100 | Scaling factor for superlinear bonding curve |
-| `MERKLE_DEPTH` | 20 | Canonical commitment tree depth (~1M outputs) |
-| `RANGE_BITS` | 59 | Bit width for value range proofs |
-| `MAX_TX_IO` | 16 | Max inputs or outputs per transaction (range-proof safe) |
-| `MIN_TX_FEE` | 1 | Minimum transaction fee (prevents zero-fee spam) |
-| `FEE_BASE` | 100 | Base component of deterministic fee formula |
-| `FEE_PER_INPUT` | 100 | Per-input component of deterministic fee formula |
-| `FEE_PER_MESSAGE_KB` | 10 | Per-KB message component of deterministic fee formula |
-| `INITIAL_BLOCK_REWARD` | 50,000 | Coinbase reward per vertex (halves over time) |
-| `HALVING_INTERVAL_EPOCHS` | 500 | Epochs between each reward halving |
-| `MAX_HALVINGS` | 63 | Halvings before reward reaches zero |
-| `GENESIS_MINT` | 100,000,000 | Initial coin distribution to the genesis validator |
-| `MEMPOOL_MAX_TXS` | 10,000 | Maximum transactions in the mempool |
-| `MEMPOOL_MAX_BYTES` | 50 MiB | Maximum total mempool size |
-| `DEFAULT_P2P_PORT` | 9,732 | Default P2P listen port |
-| `DEFAULT_RPC_PORT` | 9,733 | Default JSON RPC port |
-| `MAX_PEERS` | 64 | Maximum connected peers |
-| `PEER_CONNECT_TIMEOUT_MS` | 5,000 | Peer connection timeout |
-| `VERTEX_MAX_DRAIN` | 1,000 | Max transactions drained per vertex proposal |
-| `SYNC_BATCH_SIZE` | 100 | Finalized vertices per sync request batch |
-| `SYNC_REQUEST_TIMEOUT_MS` | 30,000 | Timeout for sync requests |
-| `SYNC_PEER_COOLDOWN_MS` | 60,000 | Cooldown before retrying a failed sync peer |
-| `SNAPSHOT_CHUNK_SIZE` | 4 MiB | Chunk size for snapshot transfer |
-| `SNAPSHOT_SYNC_THRESHOLD` | 500 | Minimum gap before preferring snapshot sync |
-| `SNAPSHOT_CACHE_TTL_SECS` | 120 | TTL for cached snapshot on serving node |
-| `PEER_MSG_RATE_LIMIT` | 100.0 | Per-peer message rate limit (msgs/sec refill) |
-| `PEER_MSG_BURST` | 200.0 | Per-peer max burst messages |
-| `PEER_RATE_LIMIT_STRIKES` | 5 | Rate violations before disconnecting peer |
-| `VIEW_CHANGE_TIMEOUT_INTERVALS` | 10 | Proposal ticks without finalization before fork resolution |
-| `MAX_ROUND_LAG` | 5 | Max rounds behind peers before triggering view change |
-| `PEER_EXCHANGE_INTERVAL_MS` | 60,000 | Interval between peer discovery gossip rounds |
-| `PEER_DISCOVERY_MAX` | 5 | Max new peers to connect per discovery round |
-| `DANDELION_STEM_HOPS` | 2 | Stem-phase hops before fluff broadcast |
-| `DANDELION_TIMEOUT_MS` | 5,000 | Max stem phase duration before forced fluff |
-| `PEER_INITIAL_REPUTATION` | 100 | Starting reputation score for new peers |
-| `PEER_BAN_THRESHOLD` | 20 | Reputation below which peers are temp-banned |
-| `PEER_BAN_DURATION_SECS` | 3,600 | Duration of temporary peer ban (1 hour) |
-| `PEER_PENALTY_RATE_LIMIT` | 10 | Reputation penalty for rate limit violation |
-| `PEER_PENALTY_INVALID_MSG` | 20 | Reputation penalty for invalid message |
-| `PEER_PENALTY_HANDSHAKE_FAIL` | 30 | Reputation penalty for handshake failure |
-| `PRUNING_RETAIN_EPOCHS` | 100 | Epochs of finalized vertices retained in memory |
-| `PROTOCOL_VERSION_ID` | 1 | Current protocol version for vertex signaling |
-| `UPGRADE_THRESHOLD` | 75% | Signal threshold for protocol upgrade activation |
-| `UPNP_TIMEOUT_MS` | 5,000 | UPnP gateway discovery timeout |
-| `UPNP_LEASE_DURATION_SECS` | 3,600 | UPnP port mapping lease duration (1 hour) |
-| `UPNP_RENEWAL_INTERVAL_SECS` | 3,000 | UPnP lease renewal interval (~50 minutes) |
-| `NAT_OBSERVED_ADDR_QUORUM` | 3 | Unique peers required to trust an observed IP |
-| `HOLE_PUNCH_TIMEOUT_MS` | 5,000 | TCP hole punch connection timeout |
-| `HOLE_PUNCH_RETRY_DELAY_MS` | 500 | Delay between hole punch retry attempts |
-| `HOLE_PUNCH_MAX_ATTEMPTS` | 3 | Maximum hole punch retry attempts |
-| `MAX_CONNECTIONS_PER_IP` | 4 | Maximum connections from a single IP address |
-| `MAX_PEERS_PER_SUBNET` | 8 | Maximum inbound peers from the same /16 subnet |
-| `MAX_RECENTLY_ATTEMPTED` | 1,000 | Maximum tracked recently-attempted peer addresses |
-| `MAX_SNAPSHOT_CHUNKS` | 256 | Maximum snapshot chunks (caps buffer allocation) |
-| `SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS` | 100 | Minimum interval between chunk requests per peer |
+| Constant                             | Value       | Description                                                     |
+| ------------------------------------ | ----------- | --------------------------------------------------------------- |
+| `COMMITTEE_SIZE`                     | 21          | BFT committee members per epoch                                 |
+| `MIN_COMMITTEE_SIZE`                 | 4           | Minimum committee for BFT safety                                |
+| `BFT_QUORUM`                         | dynamic     | `(committee_size * 2) / 3 + 1` votes for finality               |
+| `EPOCH_LENGTH`                       | 1,000       | Vertices per epoch before rotation                              |
+| `MAX_PARENTS`                        | 8           | Max parent references per DAG vertex                            |
+| `MAX_TXS_PER_VERTEX`                 | 10,000      | Max transactions per vertex                                     |
+| `VERTEX_INTERVAL_MS`                 | 500         | Target interval between vertices                                |
+| `MAX_MESSAGES_PER_TX`                | 16          | Max messages per transaction                                    |
+| `MAX_MESSAGE_SIZE`                   | 64 KiB      | Max encrypted message per transaction                           |
+| `MAX_ENCRYPT_PLAINTEXT`              | 1 MiB       | Max plaintext for Kyber encryption                              |
+| `MAX_NETWORK_MESSAGE_BYTES`          | 16 MiB      | Max serialized network message                                  |
+| `VALIDATOR_BASE_BOND`                | 1,000,000   | Base bond for validator registration (scales with network size) |
+| `BOND_SCALING_FACTOR`                | 100         | Scaling factor for superlinear bonding curve                    |
+| `MERKLE_DEPTH`                       | 20          | Canonical commitment tree depth (~1M outputs)                   |
+| `RANGE_BITS`                         | 59          | Bit width for value range proofs                                |
+| `MAX_TX_IO`                          | 16          | Max inputs or outputs per transaction (range-proof safe)        |
+| `MIN_TX_FEE`                         | 1           | Minimum transaction fee (prevents zero-fee spam)                |
+| `FEE_BASE`                           | 100         | Base component of deterministic fee formula                     |
+| `FEE_PER_INPUT`                      | 100         | Per-input component of deterministic fee formula                |
+| `FEE_PER_MESSAGE_KB`                 | 10          | Per-KB message component of deterministic fee formula           |
+| `INITIAL_BLOCK_REWARD`               | 50,000      | Coinbase reward per vertex (halves over time)                   |
+| `HALVING_INTERVAL_EPOCHS`            | 500         | Epochs between each reward halving                              |
+| `MAX_HALVINGS`                       | 63          | Halvings before reward reaches zero                             |
+| `GENESIS_MINT`                       | 100,000,000 | Initial coin distribution to the genesis validator              |
+| `MEMPOOL_MAX_TXS`                    | 10,000      | Maximum transactions in the mempool                             |
+| `MEMPOOL_MAX_BYTES`                  | 50 MiB      | Maximum total mempool size                                      |
+| `DEFAULT_P2P_PORT`                   | 9,732       | Default P2P listen port                                         |
+| `DEFAULT_RPC_PORT`                   | 9,733       | Default JSON RPC port                                           |
+| `MAX_PEERS`                          | 64          | Maximum connected peers                                         |
+| `PEER_CONNECT_TIMEOUT_MS`            | 5,000       | Peer connection timeout                                         |
+| `VERTEX_MAX_DRAIN`                   | 1,000       | Max transactions drained per vertex proposal                    |
+| `SYNC_BATCH_SIZE`                    | 100         | Finalized vertices per sync request batch                       |
+| `SYNC_REQUEST_TIMEOUT_MS`            | 30,000      | Timeout for sync requests                                       |
+| `SYNC_PEER_COOLDOWN_MS`              | 60,000      | Cooldown before retrying a failed sync peer                     |
+| `SNAPSHOT_CHUNK_SIZE`                | 4 MiB       | Chunk size for snapshot transfer                                |
+| `SNAPSHOT_SYNC_THRESHOLD`            | 500         | Minimum gap before preferring snapshot sync                     |
+| `SNAPSHOT_CACHE_TTL_SECS`            | 120         | TTL for cached snapshot on serving node                         |
+| `PEER_MSG_RATE_LIMIT`                | 100.0       | Per-peer message rate limit (msgs/sec refill)                   |
+| `PEER_MSG_BURST`                     | 200.0       | Per-peer max burst messages                                     |
+| `PEER_RATE_LIMIT_STRIKES`            | 5           | Rate violations before disconnecting peer                       |
+| `VIEW_CHANGE_TIMEOUT_INTERVALS`      | 10          | Proposal ticks without finalization before fork resolution      |
+| `MAX_ROUND_LAG`                      | 5           | Max rounds behind peers before triggering view change           |
+| `PEER_EXCHANGE_INTERVAL_MS`          | 60,000      | Interval between peer discovery gossip rounds                   |
+| `PEER_DISCOVERY_MAX`                 | 5           | Max new peers to connect per discovery round                    |
+| `DANDELION_STEM_HOPS`                | 2           | Stem-phase hops before fluff broadcast                          |
+| `DANDELION_TIMEOUT_MS`               | 5,000       | Max stem phase duration before forced fluff                     |
+| `PEER_INITIAL_REPUTATION`            | 100         | Starting reputation score for new peers                         |
+| `PEER_BAN_THRESHOLD`                 | 20          | Reputation below which peers are temp-banned                    |
+| `PEER_BAN_DURATION_SECS`             | 3,600       | Duration of temporary peer ban (1 hour)                         |
+| `PEER_PENALTY_RATE_LIMIT`            | 10          | Reputation penalty for rate limit violation                     |
+| `PEER_PENALTY_INVALID_MSG`           | 20          | Reputation penalty for invalid message                          |
+| `PEER_PENALTY_HANDSHAKE_FAIL`        | 30          | Reputation penalty for handshake failure                        |
+| `PRUNING_RETAIN_EPOCHS`              | 100         | Epochs of finalized vertices retained in memory                 |
+| `PROTOCOL_VERSION_ID`                | 1           | Current protocol version for vertex signaling                   |
+| `UPGRADE_THRESHOLD`                  | 75%         | Signal threshold for protocol upgrade activation                |
+| `UPNP_TIMEOUT_MS`                    | 5,000       | UPnP gateway discovery timeout                                  |
+| `UPNP_LEASE_DURATION_SECS`           | 3,600       | UPnP port mapping lease duration (1 hour)                       |
+| `UPNP_RENEWAL_INTERVAL_SECS`         | 3,000       | UPnP lease renewal interval (~50 minutes)                       |
+| `NAT_OBSERVED_ADDR_QUORUM`           | 3           | Unique peers required to trust an observed IP                   |
+| `HOLE_PUNCH_TIMEOUT_MS`              | 5,000       | TCP hole punch connection timeout                               |
+| `HOLE_PUNCH_RETRY_DELAY_MS`          | 500         | Delay between hole punch retry attempts                         |
+| `HOLE_PUNCH_MAX_ATTEMPTS`            | 3           | Maximum hole punch retry attempts                               |
+| `MAX_CONNECTIONS_PER_IP`             | 4           | Maximum connections from a single IP address                    |
+| `MAX_PEERS_PER_SUBNET`               | 8           | Maximum inbound peers from the same /16 subnet                  |
+| `MAX_RECENTLY_ATTEMPTED`             | 1,000       | Maximum tracked recently-attempted peer addresses               |
+| `MAX_SNAPSHOT_CHUNKS`                | 256         | Maximum snapshot chunks (caps buffer allocation)                |
+| `SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS` | 100         | Minimum interval between chunk requests per peer                |
 
 ## Dependencies
 
-| Crate | Purpose |
-|-------|---------|
-| `pqcrypto-dilithium` | CRYSTALS-Dilithium5 post-quantum signatures |
-| `pqcrypto-kyber` | CRYSTALS-Kyber1024 post-quantum key encapsulation |
-| `pqcrypto-traits` | Trait definitions for PQ crypto types |
-| `blake3` | Fast, quantum-secure hashing |
-| `winterfell` | zk-STARK prover/verifier (Rescue Prime, Goldilocks field) |
-| `zeroize` | Secure memory clearing for secret key material |
-| `serde` + `bincode` | Serialization |
-| `rand` | Cryptographic randomness |
-| `hex` | Hex encoding for display |
-| `thiserror` | Error type derivation |
-| `tokio` | Async runtime (P2P networking, node event loop) |
-| `sled` | Embedded database for persistent storage |
-| `axum` | JSON HTTP API framework |
-| `axum-server` | TLS server support (mTLS for RPC) |
-| `rustls` + `rustls-pemfile` | Pure-Rust TLS with PEM parsing |
-| `clap` | CLI argument parsing |
-| `serde_json` | JSON serialization for RPC |
-| `tracing` + `tracing-subscriber` | Structured logging |
-| `subtle` | Constant-time comparison for cryptographic checks |
-| `reqwest` | HTTP client (rustls) for wallet RPC communication |
-| `askama` + `askama_web` | Type-safe compiled HTML templates for wallet web UI |
-| `tokio-util` | Graceful shutdown via `CancellationToken` |
-| `toml` | TOML config file parsing |
-| `rayon` | Parallel proof verification for vertex validation |
-| `tempfile` | Temporary directories for simulator and testing |
-| `colored` | Terminal color output for simulator results |
-| `igd-next` | UPnP port mapping for NAT traversal |
+| Crate                            | Purpose                                                   |
+| -------------------------------- | --------------------------------------------------------- |
+| `pqcrypto-dilithium`             | CRYSTALS-Dilithium5 post-quantum signatures               |
+| `pqcrypto-kyber`                 | CRYSTALS-Kyber1024 post-quantum key encapsulation         |
+| `pqcrypto-traits`                | Trait definitions for PQ crypto types                     |
+| `blake3`                         | Fast, quantum-secure hashing                              |
+| `winterfell`                     | zk-STARK prover/verifier (Rescue Prime, Goldilocks field) |
+| `zeroize`                        | Secure memory clearing for secret key material            |
+| `serde` + `bincode`              | Serialization                                             |
+| `rand`                           | Cryptographic randomness                                  |
+| `hex`                            | Hex encoding for display                                  |
+| `thiserror`                      | Error type derivation                                     |
+| `tokio`                          | Async runtime (P2P networking, node event loop)           |
+| `sled`                           | Embedded database for persistent storage                  |
+| `axum`                           | JSON HTTP API framework                                   |
+| `axum-server`                    | TLS server support (mTLS for RPC)                         |
+| `rustls` + `rustls-pemfile`      | Pure-Rust TLS with PEM parsing                            |
+| `clap`                           | CLI argument parsing                                      |
+| `serde_json`                     | JSON serialization for RPC                                |
+| `tracing` + `tracing-subscriber` | Structured logging                                        |
+| `subtle`                         | Constant-time comparison for cryptographic checks         |
+| `reqwest`                        | HTTP client (rustls) for wallet RPC communication         |
+| `askama` + `askama_web`          | Type-safe compiled HTML templates for wallet web UI       |
+| `tokio-util`                     | Graceful shutdown via `CancellationToken`                 |
+| `toml`                           | TOML config file parsing                                  |
+| `rayon`                          | Parallel proof verification for vertex validation         |
+| `tempfile`                       | Temporary directories for simulator and testing           |
+| `colored`                        | Terminal color output for simulator results               |
+| `igd-next`                       | UPnP port mapping for NAT traversal                       |
 
 ## Security Model
 
@@ -789,12 +803,12 @@ All transaction validity is verified via zk-STARKs:
 - **Round monotonicity** — DAG vertices must have a strictly higher round number than all parents, preventing causal ordering violations
 - **Minimum committee size** — committee selection falls back to all active validators if VRF selects fewer than `MIN_COMMITTEE_SIZE`, guaranteeing BFT safety
 - **Canonical Merkle depth** — commitment tree is always padded to depth 20 with precomputed zero-subtree hashes, ensuring consistent STARK circuit verification regardless of tree size
-- **Range proofs** — all committed values are proven to be in [0, 2^59) via bit decomposition within the balance AIR; with MAX_IO = 16 per side, the maximum sum is 16 * 2^59 = 2^63 < p (Goldilocks), preventing inflation via field-arithmetic wraparound
+- **Range proofs** — all committed values are proven to be in [0, 2^59) via bit decomposition within the balance AIR; with MAX_IO = 16 per side, the maximum sum is 16 \* 2^59 = 2^63 < p (Goldilocks), preventing inflation via field-arithmetic wraparound
 - **Network message limits** — serialized messages are rejected above `MAX_NETWORK_MESSAGE_BYTES`; bincode deserialization uses size-limited options to prevent allocation-based DoS from crafted internal length fields
 - **Cryptographic type size validation** — public keys, signatures, and KEM ciphertexts are validated on deserialization, rejecting malformed or oversized payloads
 - **Deserialization bounds** — public input deserialization rejects counts exceeding `MAX_TX_IO` (16 inputs/outputs) to prevent allocation DoS
 - **Overflow protection** — all arithmetic uses `checked_add` to prevent overflow; fee accumulation overflow is an explicit error
-- **Transaction I/O limits** — inputs and outputs are capped at `MAX_TX_IO` (16), ensuring range proof sums stay within the Goldilocks field (16 * 2^59 < p) and preventing inflation via field-arithmetic wraparound
+- **Transaction I/O limits** — inputs and outputs are capped at `MAX_TX_IO` (16), ensuring range proof sums stay within the Goldilocks field (16 \* 2^59 < p) and preventing inflation via field-arithmetic wraparound
 - **Complete content hash binding** — `tx_content_hash` covers all encrypted payload fields including MACs and KEM ciphertexts, preventing undetected tampering of encrypted notes or messages
 - **Domain-separated hashing** — all critical hashes (`tx_id`, `vertex_id`, stealth key derivation, content hash) use BLAKE3 `new_derive_key` for proper cryptographic domain separation
 - **Rescue sponge domain separation** — all four Rescue Prime hash functions use distinct nonzero domain tags in the sponge capacity: `commitment` (`"commit"`), `nullifier` (`"null"`), `proof_link` (`"link"`), and `merge` (`"merge"`). This prevents cross-function collisions regardless of rate inputs, enforced in the STARK AIR via boundary assertions and transition constraints
@@ -886,6 +900,8 @@ All transaction validity is verified via zk-STARKs:
 - **Subnet eclipse mitigation** — inbound connections from a single /16 subnet are capped at `MAX_PEERS_PER_SUBNET` (8), limiting an attacker's ability to dominate the peer table from a single network range
 - **Snapshot chunk buffer OOM prevention** — `SnapshotManifest` rejects manifests with more than `MAX_SNAPSHOT_CHUNKS` (256) chunks and validates chunk count consistency against snapshot size, preventing memory exhaustion from malicious manifests
 - **Bounded peer discovery** — the `recently_attempted` set is capped at `MAX_RECENTLY_ATTEMPTED` (1,000 entries), preventing unbounded memory growth from peer discovery gossip
+- **Fuzz testing** — 4 cargo-fuzz targets exercise serialization boundaries: network message decoding (30+ variants with 4-byte length prefix), transaction deserialization (nested STARK proofs, stealth addresses, encrypted payloads), vertex deserialization (DAG structure with transaction vectors), and transaction method fuzzing (tx_id, content hash, fee computation on malformed inputs)
+- **Consensus property verification** — 12 property tests formally verify BFT safety (no conflicting certificates, quorum intersection for all committee sizes, epoch/chain vote isolation), liveness (honest majority certification, round-robin leader fairness, round advancement), and consistency (deterministic finalization order across different insertion orders, symmetric certificate and equivocation evidence verification)
 - **Snapshot chunk rate limiting** — chunk requests from the same peer are throttled to one per `SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS` (100ms), preventing CPU exhaustion from rapid chunk request spam
 - **Peer ID verification** — P2P handshake verifies that the remote peer's public key fingerprint matches the expected peer ID for both inbound and outbound connections, preventing MITM impersonation
 - **Deterministic DAG finalization** — `finalized_order()` BFS uses deterministic tie-breaking `(round, vertex_id)` when ordering siblings, ensuring all nodes produce identical finalization sequences
@@ -904,7 +920,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 890 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, and 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers; a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 902 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

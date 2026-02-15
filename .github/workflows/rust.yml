@@ -1,5 +1,5 @@
 # =============================================================================
-# Rust CI/CD Pipeline for API Server
+# Rust CI/CD Pipeline for Umbra
 #
 # This workflow ensures code quality, security, and functionality by running
 # comprehensive checks on every push and pull request to the main branch.
@@ -11,6 +11,7 @@
 # 4. Lint: Run clippy for code quality and best practices
 # 5. Test: Execute test suite to verify functionality
 # 6. Security: Scan for known vulnerabilities in dependencies
+# 7. Fuzz: Short fuzz runs on serialization boundaries
 # =============================================================================
 
 name: Rust
@@ -73,3 +74,31 @@ jobs:
       # Scan dependencies for known security vulnerabilities
       - name: Run security audit
         run: cargo audit
+
+  # Fuzz testing runs in parallel on nightly (libfuzzer requires nightly + Linux)
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_decode_message
+          - fuzz_deserialize_transaction
+          - fuzz_deserialize_vertex
+          - fuzz_transaction_validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Run each fuzz target for 60 seconds. Any panic or crash fails the job.
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60

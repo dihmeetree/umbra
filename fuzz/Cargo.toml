@@ -1,0 +1,38 @@
+[package]
+name = "umbra-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.umbra]
+path = ".."
+
+# Prevent the parent crate from treating this as a workspace member.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_decode_message"
+path = "fuzz_targets/fuzz_decode_message.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_deserialize_transaction"
+path = "fuzz_targets/fuzz_deserialize_transaction.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_deserialize_vertex"
+path = "fuzz_targets/fuzz_deserialize_vertex.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_transaction_validate"
+path = "fuzz_targets/fuzz_transaction_validate.rs"
+doc = false
