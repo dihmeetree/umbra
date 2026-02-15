@@ -361,11 +361,11 @@ mod tests {
     }
 
     /// Build a test Transfer transaction with 1 input and 1 output.
-    /// Deterministic fee = FEE_BASE + 1*FEE_PER_INPUT + 1*FEE_PER_OUTPUT = 300.
+    /// Deterministic fee = FEE_BASE + 1*FEE_PER_INPUT = 200.
     fn make_test_tx(seed: u8) -> Transaction {
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let output_value = 100u64;
-        let fee = 300u64; // deterministic: 100 + 100 + 100
+        let fee = 200u64; // deterministic: 100 + 100
         let input_value = output_value + fee;
         TransactionBuilder::new()
             .add_input(InputSpec {
@@ -380,25 +380,28 @@ mod tests {
             .unwrap()
     }
 
-    /// Build a test Transfer transaction with 1 input and `num_outputs` outputs.
+    /// Build a test Transfer transaction with `num_inputs` inputs and 1 output.
     /// This allows creating transactions with different deterministic fees:
-    ///   fee = FEE_BASE + FEE_PER_INPUT + num_outputs * FEE_PER_OUTPUT
-    ///       = 100 + 100 + num_outputs * 100 = 200 + num_outputs * 100
-    /// So: 1 output → 300, 2 outputs → 400, 3 outputs → 500, etc.
-    fn make_test_tx_n_outputs(num_outputs: usize, seed: u8) -> Transaction {
-        let output_value_each = 100u64;
-        let fee = 200 + (num_outputs as u64) * 100;
-        let input_value = output_value_each * num_outputs as u64 + fee;
-        let mut builder = TransactionBuilder::new().add_input(InputSpec {
-            value: input_value,
-            blinding: BlindingFactor::from_bytes([seed; 32]),
-            spend_auth: crate::hash_domain(b"test", &[seed]),
-            merkle_path: vec![],
-        });
-        for _ in 0..num_outputs {
-            let recipient = crate::crypto::keys::FullKeypair::generate();
-            builder = builder.add_output(recipient.kem.public.clone(), output_value_each);
+    ///   fee = FEE_BASE + num_inputs * FEE_PER_INPUT = 100 + num_inputs * 100
+    /// So: 1 input → 200, 2 inputs → 300, 3 inputs → 400, etc.
+    fn make_test_tx_n_inputs(num_inputs: usize, seed: u8) -> Transaction {
+        let output_value = 100u64;
+        let fee = 100 + (num_inputs as u64) * 100;
+        let input_value_each = (output_value + fee).div_ceil(num_inputs as u64);
+        let total_input = input_value_each * num_inputs as u64;
+        let actual_output = total_input - fee;
+        let mut builder = TransactionBuilder::new();
+        for i in 0..num_inputs {
+            let s = seed.wrapping_add(i as u8);
+            builder = builder.add_input(InputSpec {
+                value: input_value_each,
+                blinding: BlindingFactor::from_bytes([s; 32]),
+                spend_auth: crate::hash_domain(b"test", &[s]),
+                merkle_path: vec![],
+            });
         }
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        builder = builder.add_output(recipient.kem.public.clone(), actual_output);
         builder
             .set_proof_options(test_proof_options())
             .build()
@@ -439,10 +442,10 @@ mod tests {
         let recipient1 = crate::crypto::keys::FullKeypair::generate();
         let recipient2 = crate::crypto::keys::FullKeypair::generate();
 
-        // 1 input, 1 output → deterministic fee = 300
-        let fee = 300u64;
+        // 1 input, 1 output → deterministic fee = 200
+        let fee = 200u64;
         let output_value = 100u64;
-        let input_value = output_value + fee; // 400
+        let input_value = output_value + fee; // 300
 
         let tx1 = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -486,11 +489,11 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        // Different output counts → different deterministic fees:
-        // 1 output → fee=300, 2 outputs → fee=400, 3 outputs → fee=500
-        let tx_low = make_test_tx_n_outputs(1, 10); // fee=300
-        let tx_mid = make_test_tx_n_outputs(2, 11); // fee=400
-        let tx_high = make_test_tx_n_outputs(3, 12); // fee=500
+        // Different input counts → different deterministic fees:
+        // 1 input → fee=200, 2 inputs → fee=300, 3 inputs → fee=400
+        let tx_low = make_test_tx_n_inputs(1, 10); // fee=200
+        let tx_mid = make_test_tx_n_inputs(2, 11); // fee=300
+        let tx_high = make_test_tx_n_inputs(3, 12); // fee=400
 
         assert!(pool.insert(tx_low).is_ok());
         assert!(pool.insert(tx_mid.clone()).is_ok());
@@ -508,10 +511,10 @@ mod tests {
     fn drain_highest_fee_ordering() {
         let mut pool = Mempool::with_defaults();
 
-        // Different output counts → different deterministic fees
-        let tx1 = make_test_tx_n_outputs(1, 20); // fee=300
-        let tx2 = make_test_tx_n_outputs(3, 21); // fee=500
-        let tx3 = make_test_tx_n_outputs(2, 22); // fee=400
+        // Different input counts → different deterministic fees
+        let tx1 = make_test_tx_n_inputs(1, 20); // fee=200
+        let tx2 = make_test_tx_n_inputs(3, 21); // fee=400
+        let tx3 = make_test_tx_n_inputs(2, 22); // fee=300
 
         pool.insert(tx1).unwrap();
         pool.insert(tx2).unwrap();
@@ -519,8 +522,8 @@ mod tests {
 
         let drained = pool.drain_highest_fee(2);
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].fee, 500); // highest first
-        assert_eq!(drained[1].fee, 400);
+        assert_eq!(drained[0].fee, 400); // highest first
+        assert_eq!(drained[1].fee, 300);
         assert_eq!(pool.len(), 1); // one left
     }
 
@@ -564,7 +567,7 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.transaction_count, 1);
         assert!(stats.total_bytes > 0);
-        assert_eq!(stats.min_fee, Some(300)); // deterministic fee: 1 input, 1 output
+        assert_eq!(stats.min_fee, Some(200)); // deterministic fee: 1 input
     }
 
     #[test]
@@ -572,11 +575,11 @@ mod tests {
         let mut pool = Mempool::with_defaults();
 
         // Build a tx with expiry_epoch = 5 through the builder
-        // 1 input, 1 output → deterministic fee = 300
+        // 1 input, 1 output → deterministic fee = 200
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 400,
+                value: 300,
                 blinding: BlindingFactor::from_bytes([60; 32]),
                 spend_auth: crate::hash_domain(b"test", &[60]),
                 merkle_path: vec![],
@@ -631,7 +634,7 @@ mod tests {
         // Insert transactions with different deterministic fees via different output counts:
         // 1 output → 300, 2 outputs → 400, 3 outputs → 500, 4 outputs → 600, 5 outputs → 700
         for (i, num_outputs) in [1, 2, 3, 4, 5].iter().enumerate() {
-            pool.insert(make_test_tx_n_outputs(*num_outputs, 70 + i as u8))
+            pool.insert(make_test_tx_n_inputs(*num_outputs, 70 + i as u8))
                 .unwrap();
         }
 
@@ -646,20 +649,24 @@ mod tests {
 
     #[test]
     fn byte_limit_eviction() {
-        // Insert a single tx to measure its size (use largest variant for sizing)
-        let sample_tx = make_test_tx_n_outputs(3, 80);
-        let one_tx_size = sample_tx.estimated_size();
+        // Build all three transactions first to measure sizes
+        let tx_low = make_test_tx_n_inputs(1, 81); // fee=200
+        let tx_mid = make_test_tx_n_inputs(2, 82); // fee=300
+        let tx_high = make_test_tx_n_inputs(3, 83); // fee=400
 
-        // Set max_bytes to hold at most 2 transactions of the largest size
+        let _size_low = tx_low.estimated_size();
+        let size_mid = tx_mid.estimated_size();
+        let size_high = tx_high.estimated_size();
+
+        // Set max_bytes so it can hold tx_mid + tx_high but NOT all three.
+        // After inserting tx_low + tx_mid, adding tx_high should trigger eviction
+        // of tx_low (lowest fee) to make room.
         let config = MempoolConfig {
             max_transactions: usize::MAX,
-            max_bytes: one_tx_size * 2 + one_tx_size / 2, // ~2.5x one tx
+            max_bytes: size_mid + size_high + size_high / 4, // enough for 2 larger txs
         };
         let mut pool = Mempool::new(config);
 
-        // Different output counts → different deterministic fees for eviction ordering
-        let tx_low = make_test_tx_n_outputs(1, 81); // fee=300
-        let tx_mid = make_test_tx_n_outputs(2, 82); // fee=400
         pool.insert(tx_low.clone()).unwrap();
         pool.insert(tx_mid.clone()).unwrap();
         assert_eq!(pool.len(), 2);
@@ -667,10 +674,9 @@ mod tests {
         assert!(bytes_after_two > 0);
 
         // Inserting a third tx with a higher fee should evict the lowest-fee tx
-        let tx_high = make_test_tx_n_outputs(3, 83); // fee=500
         pool.insert(tx_high.clone()).unwrap();
         assert_eq!(pool.len(), 2);
-        // The lowest fee tx (fee=300) should have been evicted
+        // The lowest fee tx (fee=200) should have been evicted
         assert!(!pool.contains(&tx_low.tx_id()));
         assert!(pool.contains(&tx_mid.tx_id()));
         assert!(pool.contains(&tx_high.tx_id()));
@@ -686,33 +692,33 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        // Use different output counts for different fees:
-        // 1 output → fee=300, 3 outputs → fee=500
-        let tx_a = make_test_tx_n_outputs(1, 90); // fee=300
-        let tx_b = make_test_tx_n_outputs(3, 91); // fee=500
+        // Use different input counts for different fees:
+        // 1 input → fee=200, 3 inputs → fee=400
+        let tx_a = make_test_tx_n_inputs(1, 90); // fee=200
+        let tx_b = make_test_tx_n_inputs(3, 91); // fee=400
         pool.insert(tx_a.clone()).unwrap();
         pool.insert(tx_b.clone()).unwrap();
         assert_eq!(pool.len(), 2);
 
-        // The minimum fee in pool is 300. Inserting a tx with fee == 300 should
+        // The minimum fee in pool is 200. Inserting a tx with fee == 200 should
         // be rejected because the condition is `fee <= lowest_fee`.
-        let tx_equal = make_test_tx_n_outputs(1, 92); // fee=300
+        let tx_equal = make_test_tx_n_inputs(1, 92); // fee=200
         match pool.insert(tx_equal) {
             Err(MempoolError::FeeTooLow { fee, min_fee }) => {
-                assert_eq!(fee, 300);
-                assert_eq!(min_fee, 301); // lowest_fee + 1
+                assert_eq!(fee, 200);
+                assert_eq!(min_fee, 201); // lowest_fee + 1
             }
             other => panic!("expected FeeTooLow, got {:?}", other),
         }
         assert_eq!(pool.len(), 2);
 
-        // Inserting a tx with fee=400 (next tier above lowest) should succeed and evict fee=300
-        let tx_above = make_test_tx_n_outputs(2, 93); // fee=400
+        // Inserting a tx with fee=300 (next tier above lowest) should succeed and evict fee=200
+        let tx_above = make_test_tx_n_inputs(2, 93); // fee=300
         pool.insert(tx_above.clone()).unwrap();
         assert_eq!(pool.len(), 2);
-        assert!(!pool.contains(&tx_a.tx_id())); // fee=300 evicted
-        assert!(pool.contains(&tx_b.tx_id())); // fee=500 stays
-        assert!(pool.contains(&tx_above.tx_id())); // fee=400 accepted
+        assert!(!pool.contains(&tx_a.tx_id())); // fee=200 evicted
+        assert!(pool.contains(&tx_b.tx_id())); // fee=400 stays
+        assert!(pool.contains(&tx_above.tx_id())); // fee=300 accepted
     }
 
     #[test]
@@ -721,10 +727,10 @@ mod tests {
 
         // Build two transactions with the same nullifier (same value, blinding, spend_auth)
         // but different outputs (different recipients) so they have different tx_ids.
-        // 1 input, 1 output → deterministic fee = 300
-        let fee = 300u64;
+        // 1 input, 1 output → deterministic fee = 200
+        let fee = 200u64;
         let output_value = 100u64;
-        let value = output_value + fee; // 400
+        let value = output_value + fee; // 300
         let blinding = BlindingFactor::from_bytes([100; 32]);
         let spend_auth = crate::hash_domain(b"test", &[100]);
 
@@ -777,11 +783,11 @@ mod tests {
         pool.set_epoch(10);
 
         // Build a tx with expiry_epoch=5: it's already expired at epoch 10
-        // 1 input, 1 output → deterministic fee = 300
+        // 1 input, 1 output → deterministic fee = 200
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx_expired = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 400,
+                value: 300,
                 blinding: BlindingFactor::from_bytes([110; 32]),
                 spend_auth: crate::hash_domain(b"test", &[110]),
                 merkle_path: vec![],
@@ -819,9 +825,9 @@ mod tests {
         pool.insert(make_test_tx(120)).unwrap();
 
         let percentiles = pool.fee_percentiles().unwrap();
-        // With a single transaction (fee=300), all percentiles should be the same value
+        // With a single transaction (fee=200), all percentiles should be the same value
         for &p in &percentiles {
-            assert_eq!(p, 300);
+            assert_eq!(p, 200);
         }
     }
 
@@ -877,7 +883,7 @@ mod tests {
         assert_eq!(pool.len(), 1);
 
         // Insert a second tx with higher fee — should evict the first due to byte limit
-        let tx2 = make_test_tx_n_outputs(2, 141); // fee=400 > fee=300
+        let tx2 = make_test_tx_n_inputs(2, 141); // fee=300 > fee=200
         assert!(pool.insert(tx2.clone()).is_ok());
         assert_eq!(pool.len(), 1);
         assert!(pool.contains(&tx2.tx_id()));
@@ -887,7 +893,7 @@ mod tests {
     fn multiple_transactions_identical_fees() {
         let mut pool = Mempool::with_defaults();
 
-        // All 3 transactions have the same fee (1 input, 1 output → fee=300)
+        // All 3 transactions have the same fee (1 input, 1 output → fee=200)
         let tx1 = make_test_tx(150);
         let tx2 = make_test_tx(151);
         let tx3 = make_test_tx(152);
@@ -917,11 +923,11 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        // Insert two low-fee txs (both fee=300).
+        // Insert two low-fee txs (both fee=200).
         // With equal fees, eviction takes the last BTreeMap entry (higher
         // insertion_order = later inserted = tx_low2), so capture its nullifiers.
-        let tx_low1 = make_test_tx_n_outputs(1, 160);
-        let tx_low2 = make_test_tx_n_outputs(1, 161);
+        let tx_low1 = make_test_tx_n_inputs(1, 160);
+        let tx_low2 = make_test_tx_n_inputs(1, 161);
         let nullifiers2: Vec<Nullifier> = tx_low2.inputs.iter().map(|i| i.nullifier).collect();
 
         pool.insert(tx_low1).unwrap();
@@ -929,7 +935,7 @@ mod tests {
         assert_eq!(pool.len(), 2);
 
         // Insert a higher-fee tx, evicting the lowest-priority (tx_low2, later inserted)
-        let tx_high = make_test_tx_n_outputs(2, 162); // fee=400
+        let tx_high = make_test_tx_n_inputs(2, 162); // fee=300
         pool.insert(tx_high).unwrap();
         assert_eq!(pool.len(), 2);
 
@@ -939,7 +945,7 @@ mod tests {
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx_reuse = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 400,
+                value: 300,
                 blinding: BlindingFactor::from_bytes([161; 32]),
                 spend_auth: crate::hash_domain(b"test", &[161]),
                 merkle_path: vec![],
@@ -968,10 +974,11 @@ mod tests {
         let mut pool = Mempool::with_defaults();
 
         // Build a tx with expiry_epoch=10
+        // 1 input, 1 output → deterministic fee = 200
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 400,
+                value: 300,
                 blinding: BlindingFactor::from_bytes([170; 32]),
                 spend_auth: crate::hash_domain(b"test", &[170]),
                 merkle_path: vec![],
@@ -1038,16 +1045,16 @@ mod tests {
         let mut pool = Mempool::with_defaults();
 
         // Insert 2 transactions with different fees:
-        // 1 output → fee=300, 2 outputs → fee=400
-        pool.insert(make_test_tx_n_outputs(1, 200)).unwrap();
-        pool.insert(make_test_tx_n_outputs(2, 201)).unwrap();
+        // 1 input → fee=200, 2 inputs → fee=300
+        pool.insert(make_test_tx_n_inputs(1, 200)).unwrap();
+        pool.insert(make_test_tx_n_inputs(2, 201)).unwrap();
 
         let percentiles = pool.fee_percentiles().unwrap();
         assert_eq!(percentiles.len(), 5);
-        // With 2 txs (fees 300 and 400 in ascending order):
-        // All percentiles should be within [300, 400]
+        // With 2 txs (fees 200 and 300 in ascending order):
+        // All percentiles should be within [200, 300]
         for &p in &percentiles {
-            assert!((300..=400).contains(&p), "percentile {} out of range", p);
+            assert!((200..=300).contains(&p), "percentile {} out of range", p);
         }
     }
 
@@ -1056,11 +1063,10 @@ mod tests {
         let mut pool = Mempool::with_defaults();
 
         // Build a transaction with 2 inputs (2 nullifiers).
-        // 2 inputs, 1 output → fee = FEE_BASE + 2*FEE_PER_INPUT + 1*FEE_PER_OUTPUT = 400
+        // 2 inputs, 1 output → fee = FEE_BASE + 2*FEE_PER_INPUT = 300
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        let fee = 400u64; // 100 + 200 + 100
+        let fee = 300u64; // 100 + 200
         let output_value = 100u64;
-        let _input_value_each = (output_value + fee) / 2; // 250 each, 500 total = 100 + 400
 
         let tx_multi = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -1170,7 +1176,7 @@ mod tests {
         };
         let mut pool = Mempool::new(config);
 
-        // Insert 2 low-fee txs (1 output each, fee=300)
+        // Insert 2 low-fee txs (1 input each, fee=200)
         let tx1 = make_test_tx(10);
         let tx2 = make_test_tx(11);
         pool.insert(tx1).unwrap();
@@ -1178,7 +1184,7 @@ mod tests {
         assert_eq!(pool.len(), 2);
 
         // Insert a higher-fee tx that needs at least one eviction
-        let tx3 = make_test_tx_n_outputs(2, 12); // fee=400, larger size
+        let tx3 = make_test_tx_n_inputs(2, 12); // fee=300, larger size
         let result = pool.insert(tx3);
         // Should succeed by evicting one of the low-fee txs
         assert!(result.is_ok());

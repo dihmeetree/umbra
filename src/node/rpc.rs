@@ -591,9 +591,6 @@ struct FeeEstimateQuery {
     /// Number of inputs (default: 1)
     #[serde(default = "default_one")]
     inputs: usize,
-    /// Number of outputs (default: 1)
-    #[serde(default = "default_one")]
-    outputs: usize,
     /// Total message bytes (default: 0)
     #[serde(default)]
     message_bytes: usize,
@@ -608,18 +605,15 @@ struct FeeEstimateResponse {
     fee: u64,
     base: u64,
     per_input: u64,
-    per_output: u64,
     per_message_kb: u64,
 }
 
 async fn get_fee_estimate(Query(params): Query<FeeEstimateQuery>) -> Json<FeeEstimateResponse> {
-    let fee =
-        crate::constants::compute_weight_fee(params.inputs, params.outputs, params.message_bytes);
+    let fee = crate::constants::compute_weight_fee(params.inputs, params.message_bytes);
     Json(FeeEstimateResponse {
         fee,
         base: crate::constants::FEE_BASE,
         per_input: crate::constants::FEE_PER_INPUT,
-        per_output: crate::constants::FEE_PER_OUTPUT,
         per_message_kb: crate::constants::FEE_PER_MESSAGE_KB,
     })
 }
@@ -966,13 +960,12 @@ mod tests {
     async fn fee_estimate_default_params() {
         let state = test_rpc_state();
         let app = router(state);
-        // Default: 1 input, 1 output, 0 message bytes → fee = 100+100+100 = 300
+        // Default: 1 input, 0 message bytes → fee = 100+100 = 200
         let (status, json) = get_json(&app, "/fee-estimate").await;
         assert_eq!(status, HttpStatus::OK);
-        assert_eq!(json["fee"], 300);
+        assert_eq!(json["fee"], 200);
         assert_eq!(json["base"], 100);
         assert_eq!(json["per_input"], 100);
-        assert_eq!(json["per_output"], 100);
         assert_eq!(json["per_message_kb"], 10);
     }
 
@@ -980,11 +973,10 @@ mod tests {
     async fn fee_estimate_custom_params() {
         let state = test_rpc_state();
         let app = router(state);
-        // 2 inputs, 3 outputs, 2048 message bytes → fee = 100+200+300+20 = 620
-        let (status, json) =
-            get_json(&app, "/fee-estimate?inputs=2&outputs=3&message_bytes=2048").await;
+        // 2 inputs, 2048 message bytes → fee = 100+200+20 = 320
+        let (status, json) = get_json(&app, "/fee-estimate?inputs=2&message_bytes=2048").await;
         assert_eq!(status, HttpStatus::OK);
-        assert_eq!(json["fee"], 620);
+        assert_eq!(json["fee"], 320);
     }
 
     #[tokio::test]
@@ -1030,7 +1022,7 @@ mod tests {
 
         // Build a valid transaction
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        // 1 input, 1 output, no messages → deterministic fee = 300
+        // 1 input, 1 output, no messages → deterministic fee = 200
         let tx = crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: 1000,
@@ -1038,7 +1030,7 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 700)
+            .add_output(recipient.kem.public.clone(), 800)
             .set_proof_options(winterfell::ProofOptions::new(
                 42,
                 8,
@@ -1095,12 +1087,12 @@ mod tests {
     }
 
     /// Build a valid Transfer transaction with 1 input and 1 output.
-    /// Deterministic fee = 300 (FEE_BASE + 1*FEE_PER_INPUT + 1*FEE_PER_OUTPUT).
+    /// Deterministic fee = 200 (FEE_BASE + 1*FEE_PER_INPUT).
     fn make_valid_tx(seed: u8) -> crate::transaction::Transaction {
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        // 1 input, 1 output, no messages → fee = 300
+        // 1 input, 1 output, no messages → fee = 200
         let output_value = 100u64;
-        let input_value = output_value + 300; // 400
+        let input_value = output_value + 200; // 300
         crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: input_value,

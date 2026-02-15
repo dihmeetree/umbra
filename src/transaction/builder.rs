@@ -10,7 +10,7 @@
 //! ```
 //!
 //! For Transfer transactions, the fee is auto-computed from the transaction shape:
-//!   fee = FEE_BASE + num_inputs * FEE_PER_INPUT + num_outputs * FEE_PER_OUTPUT
+//!   fee = FEE_BASE + num_inputs * FEE_PER_INPUT
 //!         + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB
 //!
 //! For validator transactions (register/deregister), call `.set_fee(amount)` explicitly.
@@ -177,11 +177,7 @@ impl TransactionBuilder {
                 // Deterministic: computed from transaction shape
                 let message_bytes: usize =
                     tx_messages.iter().map(|m| m.payload.ciphertext.len()).sum();
-                crate::constants::compute_weight_fee(
-                    self.inputs.len(),
-                    self.outputs.len(),
-                    message_bytes,
-                )
+                crate::constants::compute_weight_fee(self.inputs.len(), message_bytes)
             }
             _ => {
                 // Validator register/deregister: explicit fee required
@@ -436,10 +432,10 @@ mod tests {
         let input_blinding = BlindingFactor::random();
         let spend_auth = crate::hash_domain(b"test.spend_auth", b"sender_secret");
 
-        // 1 input, 1 output, no messages → fee = 100 + 100 + 100 = 300
+        // 1 input, 1 output, no messages → fee = 100 + 100 = 200
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1200,
+                value: 1100,
                 blinding: input_blinding,
                 spend_auth,
                 merkle_path: vec![],
@@ -451,7 +447,7 @@ mod tests {
 
         assert_eq!(tx.inputs.len(), 1);
         assert_eq!(tx.outputs.len(), 1);
-        assert_eq!(tx.fee, 300);
+        assert_eq!(tx.fee, 200);
         assert_ne!(tx.chain_id, [0u8; 32]);
         assert_eq!(tx.expiry_epoch, 0);
         assert_eq!(tx.tx_binding, tx.tx_content_hash());
@@ -465,10 +461,10 @@ mod tests {
         let spend_auth = crate::hash_domain(b"test.spend_auth", b"secret");
 
         // 1 input, 1 output, 1 message (45 bytes plaintext → 64 bytes ciphertext)
-        // fee = 100 + 100 + 100 + ceil(64/1024)*10 = 310
+        // fee = 100 + 100 + ceil(64/1024)*10 = 210
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 710,
+                value: 610,
                 blinding: input_blinding,
                 spend_auth,
                 merkle_path: vec![],
@@ -493,8 +489,8 @@ mod tests {
     fn build_imbalanced_fails() {
         let recipient = FullKeypair::generate();
 
-        // 1 input, 1 output, no messages → auto fee = 300
-        // input=100, output=200 → 100 != 200 + 300 → Imbalanced
+        // 1 input, 1 output, no messages → auto fee = 200
+        // input=100, output=200 → 100 != 200 + 200 → Imbalanced
         let result = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 100,
@@ -522,10 +518,10 @@ mod tests {
     fn build_with_chain_id_and_expiry() {
         let recipient = FullKeypair::generate();
         let chain_id = crate::hash_domain(b"test.chain", b"my-chain");
-        // 1 input, 1 output, no messages → fee = 300
+        // 1 input, 1 output, no messages → fee = 200
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 700,
+                value: 600,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -545,7 +541,7 @@ mod tests {
     fn build_multi_input_multi_output() {
         let r1 = FullKeypair::generate();
         let r2 = FullKeypair::generate();
-        // 2 inputs, 2 outputs, no messages → fee = 100 + 200 + 200 = 500
+        // 2 inputs, 2 outputs, no messages → fee = 100 + 200 = 300
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
                 value: 800,
@@ -559,15 +555,15 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"auth2"),
                 merkle_path: vec![],
             })
-            .add_output(r1.kem.public.clone(), 500)
-            .add_output(r2.kem.public.clone(), 400)
+            .add_output(r1.kem.public.clone(), 600)
+            .add_output(r2.kem.public.clone(), 500)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
 
         assert_eq!(tx.inputs.len(), 2);
         assert_eq!(tx.outputs.len(), 2);
-        assert_eq!(tx.fee, 500);
+        assert_eq!(tx.fee, 300);
     }
 
     #[test]
@@ -611,7 +607,7 @@ mod tests {
 
     #[test]
     fn builder_auto_computes_fee() {
-        // 1 input, 1 output, no messages → fee = 100 + 100 + 100 = 300
+        // 1 input, 1 output, no messages → fee = 100 + 100 = 200
         let recipient = crate::crypto::keys::FullKeypair::generate();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -620,13 +616,13 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"fee-auto"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 700)
+            .add_output(recipient.kem.public.clone(), 800)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-        assert_eq!(tx.fee, 300);
+        assert_eq!(tx.fee, 200);
 
-        // 1 input, 2 outputs, no messages → fee = 100 + 100 + 200 = 400
+        // 1 input, 2 outputs, no messages → fee still 200 (output count excluded)
         let recipient2 = crate::crypto::keys::FullKeypair::generate();
         let tx2 = TransactionBuilder::new()
             .add_input(InputSpec {
@@ -635,12 +631,12 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", b"fee-auto-2"),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 300)
-            .add_output(recipient2.kem.public.clone(), 300)
+            .add_output(recipient.kem.public.clone(), 400)
+            .add_output(recipient2.kem.public.clone(), 400)
             .set_proof_options(test_proof_options())
             .build()
             .unwrap();
-        assert_eq!(tx2.fee, 400);
+        assert_eq!(tx2.fee, 200);
     }
 
     #[test]
@@ -741,7 +737,7 @@ mod tests {
     fn builder_default_creates_transfer() {
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 400,
+                value: 300,
                 blinding: crate::crypto::commitment::BlindingFactor::from_bytes([231; 32]),
                 spend_auth: crate::hash_domain(b"test", &[231]),
                 merkle_path: vec![],

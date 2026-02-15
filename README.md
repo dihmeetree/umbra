@@ -671,7 +671,6 @@ Proves in zero knowledge:
 | `MIN_TX_FEE` | 1 | Minimum transaction fee (prevents zero-fee spam) |
 | `FEE_BASE` | 100 | Base component of deterministic fee formula |
 | `FEE_PER_INPUT` | 100 | Per-input component of deterministic fee formula |
-| `FEE_PER_OUTPUT` | 100 | Per-output component of deterministic fee formula |
 | `FEE_PER_MESSAGE_KB` | 10 | Per-KB message component of deterministic fee formula |
 | `INITIAL_BLOCK_REWARD` | 50,000 | Coinbase reward per vertex (halves over time) |
 | `HALVING_INTERVAL_EPOCHS` | 500 | Epochs between each reward halving |
@@ -864,7 +863,7 @@ All transaction validity is verified via zk-STARKs:
 - **P2P frame padding** — encrypted P2P frames are padded to 1024-byte bucket boundaries, preventing traffic analysis from distinguishing message types by size
 - **Dandelion++ timing jitter** — stem-phase forwarding adds exponentially-distributed random delays before relaying to the next hop, preventing timing decomposition attacks for sender deanonymization
 - **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation work on KEM decapsulation failure, equalizing timing with the success path
-- **Deterministic weight-based fees** — transfer fees are computed deterministically from transaction shape (`fee = FEE_BASE + inputs * FEE_PER_INPUT + outputs * FEE_PER_OUTPUT + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB`), eliminating fee-based fingerprinting entirely since every transaction of the same shape pays the exact same fee with no user choice involved
+- **Deterministic weight-based fees** — transfer fees are computed deterministically from transaction shape (`fee = FEE_BASE + inputs * FEE_PER_INPUT + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB`), eliminating fee-based fingerprinting entirely since every transaction of the same shape pays the exact same fee with no user choice involved
 - **RPC rate limiting** — commitment-proof queries are rate-limited per IP (60 requests per 60-second window) to prevent Merkle tree enumeration attacks that could map wallet activity to commitment indices
 - **Peer address redaction** — peer discovery responses and RPC endpoints strip IP addresses, preventing validator deanonymization via address correlation
 - **NatInfo privacy** — NatInfo messages send empty observed addresses, preventing peers from learning their own externally-visible IP through the P2P layer

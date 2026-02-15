@@ -210,15 +210,17 @@ impl Wallet {
     /// 1. Sort unspent UTXOs by value descending (prefer fewer, larger inputs)
     /// 2. Try single-UTXO solutions first (1 STARK proof = cheapest)
     /// 3. Fall back to multi-UTXO combinations, starting from 2 inputs
-    /// 4. Explicitly avoids the "dead zone" where input_sum falls between
-    ///    amount+fee_1(n) and amount+fee_2(n), making no valid shape possible
+    ///
+    /// Because fee does not depend on output count, there is no circular
+    /// dependency and no "dead zone": for a given input count, the fee is
+    /// fixed, and we simply check input_sum >= amount + fee.
     fn select_coins(
         &self,
         amount: u64,
         msg_bytes: usize,
     ) -> Result<(Vec<usize>, u64, usize, u64), WalletError> {
         // Early overflow check: if amount + minimum possible fee overflows, bail.
-        let min_fee = crate::constants::compute_weight_fee(1, 1, msg_bytes);
+        let min_fee = crate::constants::compute_weight_fee(1, msg_bytes);
         amount
             .checked_add(min_fee)
             .ok_or(WalletError::ArithmeticOverflow)?;
@@ -236,87 +238,45 @@ impl Wallet {
         let total_available: u64 = candidates.iter().map(|(_, v)| *v).sum();
 
         // Phase 1: Try single-UTXO solutions (1 input = 1 STARK proof, cheapest).
-        if let Some(result) = self.try_single_utxo(&candidates, amount, msg_bytes) {
+        if let Some(result) = Self::try_single_utxo(&candidates, amount, msg_bytes) {
             return Ok(result);
         }
 
         // Phase 2: Try multi-UTXO combinations for k = 2..MAX_TX_IO inputs.
         let max_inputs = candidates.len().min(crate::constants::MAX_TX_IO);
         for k in 2..=max_inputs {
-            if let Some(result) = self.try_multi_utxo(&candidates, amount, msg_bytes, k) {
+            if let Some(result) = Self::try_multi_utxo(&candidates, amount, msg_bytes, k) {
                 return Ok(result);
             }
         }
 
         // No feasible combination found.
-        let min_fee = crate::constants::compute_weight_fee(1, 1, msg_bytes);
         Err(WalletError::InsufficientFunds {
             available: total_available,
             needed: amount.saturating_add(min_fee),
         })
     }
 
-    /// Classify what transaction shape is possible for a given input sum.
-    ///
-    /// Returns:
-    /// - `Some((1, fee))` if input_sum == amount + fee_1 (exact, no change)
-    /// - `Some((2, fee))` if input_sum >= amount + fee_2 (with change)
-    /// - `None` if input_sum is insufficient or falls in the dead zone
-    fn classify_inputs(
-        amount: u64,
-        input_sum: u64,
-        num_inputs: usize,
-        msg_bytes: usize,
-    ) -> Option<(usize, u64)> {
-        let fee_1 = crate::constants::compute_weight_fee(num_inputs, 1, msg_bytes);
-        let fee_2 = crate::constants::compute_weight_fee(num_inputs, 2, msg_bytes);
-        let needed_1 = amount.checked_add(fee_1)?;
-        let needed_2 = amount.checked_add(fee_2)?;
-
-        if input_sum == needed_1 {
-            // Exact match: no change output needed.
-            Some((1, fee_1))
-        } else if input_sum > needed_2 {
-            // Strictly more than amount + 2-output fee; change > 0.
-            Some((2, fee_2))
-        } else {
-            // Either insufficient (< needed_1), in the dead zone
-            // (needed_1 < input_sum < needed_2), or would produce zero change
-            // (input_sum == needed_2). No valid shape exists with these inputs.
-            None
-        }
-    }
-
     /// Phase 1: Find a single UTXO that can fund the transaction.
+    /// Picks the smallest UTXO where value >= amount + fee(1), preferring
+    /// exact matches (no change output needed).
     fn try_single_utxo(
-        &self,
         candidates: &[(usize, u64)],
         amount: u64,
         msg_bytes: usize,
     ) -> Option<(Vec<usize>, u64, usize, u64)> {
-        // Candidates are sorted descending by value. Scan for the smallest
-        // UTXO that produces a valid classification.
-        let mut best: Option<(usize, u64, usize, u64)> = None;
+        let fee = crate::constants::compute_weight_fee(1, msg_bytes);
+        let needed = amount.checked_add(fee)?;
+        // Candidates are sorted descending. Find the smallest that covers needed.
+        let mut best: Option<(usize, u64)> = None;
         for &(idx, value) in candidates {
-            if let Some((num_outputs, fee)) = Self::classify_inputs(amount, value, 1, msg_bytes) {
-                // Prefer 1-output (exact match) over 2-output (with change),
-                // and among same type prefer smaller UTXO.
-                match best {
-                    None => best = Some((idx, value, num_outputs, fee)),
-                    Some((_, _, 2, _)) if num_outputs == 1 => {
-                        // Exact match is always better than change.
-                        best = Some((idx, value, num_outputs, fee));
-                    }
-                    Some((_, best_val, best_out, _))
-                        if num_outputs == best_out && value < best_val =>
-                    {
-                        best = Some((idx, value, num_outputs, fee));
-                    }
-                    _ => {}
-                }
+            if value >= needed {
+                best = Some((idx, value));
             }
         }
-        best.map(|(idx, value, num_outputs, fee)| (vec![idx], value, num_outputs, fee))
+        let (idx, value) = best?;
+        let num_outputs = if value == needed { 1 } else { 2 };
+        Some((vec![idx], value, num_outputs, fee))
     }
 
     /// Phase 2: Find a combination of exactly `k` UTXOs that funds the transaction.
@@ -324,7 +284,6 @@ impl Wallet {
     /// Strategy: take the (k-1) smallest candidates as a fixed base, then find
     /// the smallest remaining UTXO that pushes the total past the threshold.
     fn try_multi_utxo(
-        &self,
         candidates: &[(usize, u64)],
         amount: u64,
         msg_bytes: usize,
@@ -333,36 +292,28 @@ impl Wallet {
         if candidates.len() < k {
             return None;
         }
+        let fee = crate::constants::compute_weight_fee(k, msg_bytes);
+        let needed = amount.checked_add(fee)?;
+
         // candidates is sorted descending. The (k-1) smallest are the last (k-1).
         let base_start = candidates.len() - (k - 1);
         let base = &candidates[base_start..];
         let base_sum: u64 = base.iter().map(|(_, v)| *v).sum();
         let base_indices: Vec<usize> = base.iter().map(|(idx, _)| *idx).collect();
 
-        // Try each remaining candidate (in ascending value order = reverse of
-        // descending slice) as the variable UTXO. Pick smallest that works.
+        // Try each remaining candidate (ascending = reverse of descending slice).
+        // Pick the smallest that pushes total past needed.
         let remaining = &candidates[..base_start];
-        let mut best: Option<(Vec<usize>, u64, usize, u64)> = None;
         for &(idx, value) in remaining.iter().rev() {
             let total = base_sum.saturating_add(value);
-            if let Some((num_outputs, fee)) = Self::classify_inputs(amount, total, k, msg_bytes) {
+            if total >= needed {
                 let mut indices = base_indices.clone();
                 indices.push(idx);
-                match best {
-                    None => best = Some((indices, total, num_outputs, fee)),
-                    Some((_, _, 2, _)) if num_outputs == 1 => {
-                        best = Some((indices, total, num_outputs, fee));
-                    }
-                    Some((_, best_total, best_out, _))
-                        if num_outputs == best_out && total < best_total =>
-                    {
-                        best = Some((indices, total, num_outputs, fee));
-                    }
-                    _ => {}
-                }
+                let num_outputs = if total == needed { 1 } else { 2 };
+                return Some((indices, total, num_outputs, fee));
             }
         }
-        best
+        None
     }
 
     pub fn build_transaction_with_state(
@@ -525,7 +476,7 @@ impl Wallet {
             .map(|&i| self.outputs[i].value)
             .try_fold(0u64, |acc, v| acc.checked_add(v))
             .ok_or(WalletError::ArithmeticOverflow)?;
-        let fee = crate::constants::compute_weight_fee(unspent.len(), 1, 0);
+        let fee = crate::constants::compute_weight_fee(unspent.len(), 0);
         if total <= fee {
             return Err(WalletError::InsufficientFunds {
                 available: total,
@@ -1144,7 +1095,7 @@ mod tests {
         let mut receiver_wallet = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1200,
+                value: 1100,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1163,7 +1114,7 @@ mod tests {
         let mut receiver_wallet = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 400,
+                value: 300,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1190,7 +1141,7 @@ mod tests {
         let mut bystander = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 390,
+                value: 290,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1209,7 +1160,7 @@ mod tests {
         let bob = Wallet::new();
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10300,
+                value: 10200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1223,12 +1174,12 @@ mod tests {
         let tx = alice
             .build_transaction(bob.kem_public_key(), 3000, None)
             .unwrap();
-        assert_eq!(tx.fee, 400);
+        assert_eq!(tx.fee, 200);
         assert_eq!(tx.outputs.len(), 2);
         assert_eq!(alice.balance(), 0);
         alice.confirm_transaction(&tx.tx_binding);
         alice.scan_transaction(&tx);
-        assert_eq!(alice.balance(), 6600);
+        assert_eq!(alice.balance(), 6800);
     }
 
     #[test]
@@ -1236,7 +1187,7 @@ mod tests {
         let mut wallet = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 4310,
+                value: 4210,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1268,7 +1219,7 @@ mod tests {
         let bob = Wallet::new();
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10300,
+                value: 10200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1286,7 +1237,7 @@ mod tests {
         alice.confirm_transaction(&tx.tx_binding);
         assert_eq!(alice.balance(), 0);
         alice.scan_transaction(&tx);
-        assert_eq!(alice.balance(), 6600);
+        assert_eq!(alice.balance(), 6800);
     }
 
     #[test]
@@ -1303,7 +1254,7 @@ mod tests {
         let bob = Wallet::new();
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 5300,
+                value: 5200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1327,7 +1278,7 @@ mod tests {
         let bob = Wallet::new();
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10300,
+                value: 10200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1351,7 +1302,7 @@ mod tests {
         let mut wallet = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1200,
+                value: 1100,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1372,7 +1323,7 @@ mod tests {
         let bob = Wallet::new();
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 10300,
+                value: 10200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1389,7 +1340,7 @@ mod tests {
         assert_eq!(alice.history()[0].direction, TxDirection::Receive);
         assert_eq!(alice.history()[1].direction, TxDirection::Send);
         assert_eq!(alice.history()[1].amount, 3000);
-        assert_eq!(alice.history()[1].fee, 400);
+        assert_eq!(alice.history()[1].fee, 200);
     }
 
     #[test]
@@ -1397,7 +1348,7 @@ mod tests {
         let mut wallet = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1200,
+                value: 1100,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1474,7 +1425,7 @@ mod tests {
         let mut wallet = Wallet::new();
         let tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: 1200,
+                value: 1100,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1495,7 +1446,7 @@ mod tests {
         let mut wallet = Wallet::new();
         let funding_tx = TransactionBuilder::new()
             .add_input(InputSpec {
-                value: amount + 300,
+                value: amount + 200,
                 blinding: BlindingFactor::random(),
                 spend_auth: crate::hash_domain(b"test", b"auth"),
                 merkle_path: vec![],
@@ -1578,8 +1529,8 @@ mod tests {
     fn build_transaction_insufficient_funds() {
         let mut alice = funded_wallet(5000);
         let bob = Wallet::new();
-        // Minimum fee is F(1,1,0)=300, so sending 5000 from a 5000 UTXO is insufficient.
-        let min_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        // Minimum fee is F(1)=200, so sending 5000 from a 5000 UTXO is insufficient.
+        let min_fee = crate::constants::compute_weight_fee(1, 0);
         assert!(matches!(
             alice.build_transaction(bob.kem_public_key(), 5000, None),
             Err(WalletError::InsufficientFunds {
@@ -1635,7 +1586,7 @@ mod tests {
         for i in 0..3 {
             let funding_tx = TransactionBuilder::new()
                 .add_input(InputSpec {
-                    value: 1300,
+                    value: 1200,
                     blinding: BlindingFactor::from_bytes([i + 10; 32]),
                     spend_auth: crate::hash_domain(b"test", &[i]),
                     merkle_path: vec![],
@@ -1650,7 +1601,7 @@ mod tests {
         assert_eq!(wallet.balance(), 3000);
         let history_before = wallet.history().len();
         let tx = wallet.build_consolidation_tx(None).unwrap();
-        let expected_fee = crate::constants::compute_weight_fee(3, 1, 0);
+        let expected_fee = crate::constants::compute_weight_fee(3, 0);
         assert_eq!(tx.fee, expected_fee);
         assert_eq!(tx.outputs.len(), 1);
         assert_eq!(
@@ -1675,7 +1626,7 @@ mod tests {
         for i in 0..2 {
             let funding_tx = TransactionBuilder::new()
                 .add_input(InputSpec {
-                    value: 400,
+                    value: 300,
                     blinding: BlindingFactor::from_bytes([i + 20; 32]),
                     spend_auth: crate::hash_domain(b"test", &[i + 20]),
                     merkle_path: vec![],
@@ -1687,7 +1638,7 @@ mod tests {
             wallet.scan_transaction(&funding_tx);
         }
         assert_eq!(wallet.balance(), 200);
-        let expected_fee = crate::constants::compute_weight_fee(2, 1, 0);
+        let expected_fee = crate::constants::compute_weight_fee(2, 0);
         let result = wallet.build_consolidation_tx(None);
         assert!(matches!(
             result,
@@ -1815,54 +1766,51 @@ mod tests {
 
     #[test]
     fn coin_selection_exact_match_no_change() {
-        // UTXO value == amount + F(1,1,0) → 1 output, no change.
-        // F(1,1,0) = 100 + 100 + 100 = 300
-        let wallet = wallet_with_utxos(&[1300]);
+        // UTXO value == amount + F(1) → 1 output, no change.
+        // F(1) = 100 + 100 = 200
+        let wallet = wallet_with_utxos(&[1200]);
         let (indices, sum, num_outputs, fee) = wallet.select_coins(1000, 0).unwrap();
         assert_eq!(indices.len(), 1);
-        assert_eq!(sum, 1300);
+        assert_eq!(sum, 1200);
         assert_eq!(num_outputs, 1);
-        assert_eq!(fee, 300);
+        assert_eq!(fee, 200);
     }
 
     #[test]
     fn coin_selection_with_change() {
-        // UTXO value > amount + F(1,2,0) → 2 outputs (recipient + change).
-        // F(1,2,0) = 100 + 100 + 200 = 400
+        // UTXO value > amount + F(1) → 2 outputs (recipient + change).
+        // F(1) = 200. 2000 > 1200 → change = 800.
         let wallet = wallet_with_utxos(&[2000]);
         let (indices, sum, num_outputs, fee) = wallet.select_coins(1000, 0).unwrap();
         assert_eq!(indices.len(), 1);
         assert_eq!(sum, 2000);
         assert_eq!(num_outputs, 2);
-        assert_eq!(fee, 400);
+        assert_eq!(fee, 200);
     }
 
     #[test]
-    fn coin_selection_skips_dead_zone() {
-        // A UTXO that falls in the dead zone (between amount+F(1,1,0) and amount+F(1,2,0))
-        // must be skipped. F(1,1,0)=300, F(1,2,0)=400. For amount=1000:
-        // Dead zone is (1300, 1400) exclusive. A 1350 UTXO is in the dead zone.
-        // The algorithm should skip it and pick the 2000 UTXO instead.
-        let wallet = wallet_with_utxos(&[1350, 2000]);
+    fn coin_selection_no_dead_zone() {
+        // With output-independent fees, there is no dead zone. Any UTXO >= amount + fee works.
+        // F(1)=200. A 1350 UTXO covers 1000+200=1200 with change=150.
+        let wallet = wallet_with_utxos(&[1350]);
         let (indices, sum, num_outputs, fee) = wallet.select_coins(1000, 0).unwrap();
         assert_eq!(indices.len(), 1);
-        assert_eq!(sum, 2000);
+        assert_eq!(sum, 1350);
         assert_eq!(num_outputs, 2);
-        assert_eq!(fee, 400);
+        assert_eq!(fee, 200);
     }
 
     #[test]
-    fn coin_selection_dead_zone_multi_input() {
-        // Only UTXO in dead zone for single input, but two UTXOs together work.
-        // F(1,1,0)=300, F(1,2,0)=400. Dead zone for amount=1000 is (1300, 1400).
-        // 1350 is in dead zone for 1 input. But 1350 + 200 = 1550.
-        // F(2,2,0)=100+200+200=500. needed_2 = 1500. 1550 >= 1500. Works with 2 inputs.
-        let wallet = wallet_with_utxos(&[1350, 200]);
+    fn coin_selection_multi_input_fallback() {
+        // Single UTXO too small, but two together work.
+        // F(1)=200. 1100 < 1200 needed. But 1100 + 200 = 1300.
+        // F(2)=300. needed=1300. 1300 >= 1300 → exact match, 1 output.
+        let wallet = wallet_with_utxos(&[1100, 200]);
         let (indices, sum, num_outputs, fee) = wallet.select_coins(1000, 0).unwrap();
         assert_eq!(indices.len(), 2);
-        assert_eq!(sum, 1550);
-        assert_eq!(num_outputs, 2);
-        assert_eq!(fee, 500);
+        assert_eq!(sum, 1300);
+        assert_eq!(num_outputs, 1);
+        assert_eq!(fee, 300);
     }
 
     #[test]
@@ -1875,15 +1823,15 @@ mod tests {
 
     #[test]
     fn coin_selection_multi_input_accumulation() {
-        // No single UTXO is sufficient; must combine. F(2,2,0)=500.
-        // 600 + 600 = 1200. needed_2 = 1000 + 500 = 1500. Not enough.
-        // 600 + 600 + 600 = 1800. F(3,2,0)=100+300+200=600. needed_2 = 1600. 1800 >= 1600.
+        // No single UTXO is sufficient; must combine.
+        // F(2)=300. 600+600=1200. needed=1300. Not enough.
+        // F(3)=400. 600+600+600=1800. needed=1400. 1800 >= 1400. Works with change=400.
         let wallet = wallet_with_utxos(&[600, 600, 600]);
         let (indices, sum, num_outputs, fee) = wallet.select_coins(1000, 0).unwrap();
         assert_eq!(indices.len(), 3);
         assert_eq!(sum, 1800);
         assert_eq!(num_outputs, 2);
-        assert_eq!(fee, 600);
+        assert_eq!(fee, 400);
     }
 
     #[test]
@@ -1895,60 +1843,54 @@ mod tests {
         let tx = wallet
             .build_transaction(bob.kem_public_key(), 1000, None)
             .unwrap();
-        // F(1,2,0)=400, change=5000-1000-400=3600
-        assert_eq!(tx.fee, 400);
+        // F(1)=200, change=5000-1000-200=3800
+        assert_eq!(tx.fee, 200);
         assert_eq!(tx.outputs.len(), 2);
     }
 
     #[test]
     fn coin_selection_with_message_fee() {
         // Message bytes factor into fee. A 100-byte message → padded to 128 bytes
-        // (4+100=104, ceil to 128). 128 bytes → ceil(128/1024)=1 KB. F(1,2,128)=410.
+        // (4+100=104, ceil to 128). 128 bytes → ceil(128/1024)=1 KB. F(1,128)=210.
         let wallet = wallet_with_utxos(&[2000]);
         let msg_bytes = (100 + 4_usize).div_ceil(64) * 64; // 128
-        let (_, _, num_outputs, fee) = wallet.select_coins(1000, msg_bytes).unwrap();
-        let expected_fee = crate::constants::compute_weight_fee(1, num_outputs, msg_bytes);
+        let (_, _, _num_outputs, fee) = wallet.select_coins(1000, msg_bytes).unwrap();
+        let expected_fee = crate::constants::compute_weight_fee(1, msg_bytes);
         assert_eq!(fee, expected_fee);
     }
 
     #[test]
     fn coin_selection_simulator_scenario() {
-        // The exact scenario that caused the infinite loop: Alice has a 500-value
-        // UTXO and sends 100. F(1,1,0)=300, F(1,2,0)=400.
-        // needed_1=400, needed_2=500. UTXO 500 == needed_2 → dead zone
-        // (would produce zero-value change). Algorithm skips 500, picks 10000.
+        // The scenario that previously caused an infinite loop: Alice has a 500-value
+        // UTXO and sends 100. F(1)=200. needed=300. 500 >= 300 → works, change=200.
+        // No dead zone with output-independent fees.
         let wallet = wallet_with_utxos(&[500, 10000]);
         let (_indices, sum, num_outputs, fee) = wallet.select_coins(100, 0).unwrap();
-        assert_eq!(sum, 10000);
+        // Should pick 500 (smallest sufficient UTXO)
+        assert_eq!(sum, 500);
         assert_eq!(num_outputs, 2);
-        assert_eq!(fee, 400);
-        // Change should be 10000 - 100 - 400 = 9500 > 0
-        assert_eq!(sum - 100 - fee, 9500);
+        assert_eq!(fee, 200);
+        assert_eq!(sum - 100 - fee, 200);
     }
 
     #[test]
-    fn coin_selection_dead_zone_boundary() {
-        // When the ONLY UTXO falls exactly in the dead zone, InsufficientFunds
-        // is returned because no valid transaction shape exists.
-        // F(1,1,0)=300, F(1,2,0)=400. For amount=100: dead zone is (400, 500].
-        let wallet = wallet_with_utxos(&[500]);
-        assert!(wallet.select_coins(100, 0).is_err());
-
-        // 401 is in the dead zone interior and also fails.
-        let wallet2 = wallet_with_utxos(&[401]);
-        assert!(wallet2.select_coins(100, 0).is_err());
-
-        // 400 is exact match (1 output) and succeeds.
-        let wallet3 = wallet_with_utxos(&[400]);
-        let (_, _, num_out, fee) = wallet3.select_coins(100, 0).unwrap();
+    fn coin_selection_exact_and_change_boundary() {
+        // F(1)=200. For amount=100: needed=300.
+        // UTXO=300 → exact match (1 output).
+        let wallet = wallet_with_utxos(&[300]);
+        let (_, _, num_out, fee) = wallet.select_coins(100, 0).unwrap();
         assert_eq!(num_out, 1);
-        assert_eq!(fee, 300);
+        assert_eq!(fee, 200);
 
-        // 501 is above dead zone (2 outputs, change=1) and succeeds.
-        let wallet4 = wallet_with_utxos(&[501]);
-        let (_, _, num_out, fee) = wallet4.select_coins(100, 0).unwrap();
+        // UTXO=301 → change=1 (2 outputs).
+        let wallet2 = wallet_with_utxos(&[301]);
+        let (_, _, num_out, fee) = wallet2.select_coins(100, 0).unwrap();
         assert_eq!(num_out, 2);
-        assert_eq!(fee, 400);
+        assert_eq!(fee, 200);
+
+        // UTXO=299 → insufficient.
+        let wallet3 = wallet_with_utxos(&[299]);
+        assert!(wallet3.select_coins(100, 0).is_err());
     }
 
     #[test]

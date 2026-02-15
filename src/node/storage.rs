@@ -766,12 +766,12 @@ mod tests {
     }
 
     /// Build a valid Transfer transaction with 1 input and 1 output.
-    /// Deterministic fee = 300 (FEE_BASE + 1*FEE_PER_INPUT + 1*FEE_PER_OUTPUT).
+    /// Deterministic fee = 200 (FEE_BASE + 1*FEE_PER_INPUT).
     fn make_test_tx(seed: u8) -> Transaction {
         let recipient = crate::crypto::keys::FullKeypair::generate();
-        // 1 input, 1 output, no messages → fee = 300
+        // 1 input, 1 output, no messages → fee = 200
         let output_value = 100u64;
-        let input_value = output_value + 300; // 400
+        let input_value = output_value + 200; // 300
         crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: input_value,
@@ -822,7 +822,7 @@ mod tests {
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.tx_id(), tx_id);
-        assert_eq!(retrieved.fee, 300); // deterministic: 1 input, 1 output
+        assert_eq!(retrieved.fee, 200); // deterministic: 1 input
         assert_eq!(retrieved.inputs.len(), tx.inputs.len());
         assert_eq!(retrieved.outputs.len(), tx.outputs.len());
     }

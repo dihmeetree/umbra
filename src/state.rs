@@ -1291,7 +1291,7 @@ mod tests {
     /// `value` must be greater than 300 so there is a positive output amount.
     fn build_valid_tx_for_state(state: &mut ChainState, value: u64, seed: u8) -> Transaction {
         // Deterministic fee for 1 input, 1 output, no messages = 300
-        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        let det_fee = crate::constants::compute_weight_fee(1, 0);
         assert!(
             value > det_fee,
             "input value must exceed deterministic fee ({})",
@@ -1749,7 +1749,7 @@ mod tests {
 
         // Build a valid transaction against the current state
         // Deterministic fee for 1 input, 1 output, no messages = 300
-        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        let det_fee = crate::constants::compute_weight_fee(1, 0);
         let tx = build_valid_tx_for_state(&mut state, 1000, 1);
         let tx_nullifier = tx.inputs[0].nullifier;
         let tx_output_commitment = tx.outputs[0].commitment;
@@ -1843,7 +1843,7 @@ mod tests {
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
         // Build and apply first vertex (deterministic fee for 1-in/1-out = 300)
-        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        let det_fee = crate::constants::compute_weight_fee(1, 0);
         let tx1 = build_valid_tx_for_state(&mut state, 500, 10);
         let v1 = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx1]);
         state.apply_vertex(&v1).unwrap();
@@ -1872,7 +1872,7 @@ mod tests {
 
         // Build a valid transaction but with a wrong chain_id
         // Deterministic fee for 1 input, 1 output = 300
-        let det_fee = crate::constants::compute_weight_fee(1, 1, 0);
+        let det_fee = crate::constants::compute_weight_fee(1, 0);
         let recipient = FullKeypair::generate();
         let wrong_chain_id = crate::hash_domain(b"wrong.chain", b"not-umbra");
         let tx = TransactionBuilder::new()
