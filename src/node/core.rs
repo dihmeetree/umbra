@@ -669,14 +669,6 @@ impl Node {
 
                 let mut state = self.state.write().await;
 
-                // Track peer's highest round for view change detection.
-                // Bound the accepted round delta to prevent a malicious peer from
-                // setting an absurdly high round that would permanently trigger re-sync.
-                let max_acceptable_round = state.bft.round + crate::constants::MAX_ROUND_LAG * 10;
-                if vertex.round > state.peer_highest_round && vertex.round <= max_acceptable_round {
-                    state.peer_highest_round = vertex.round;
-                }
-
                 // C3: Validate VRF proof before accepting the vertex.
                 // Genesis vertex (round=0) has no VRF proof.
                 if vertex.round > 0 {
@@ -712,6 +704,16 @@ impl Node {
                 // Insert into DAG (but don't finalize yet -- wait for BFT)
                 match state.ledger.insert_vertex(*vertex.clone()) {
                     Ok(_) => {
+                        // Track peer's highest round only after successful insertion.
+                        // Updating before validation inflates peer_highest_round from
+                        // rejected vertices, causing spurious view-change warnings.
+                        let max_acceptable_round =
+                            state.bft.round + crate::constants::MAX_ROUND_LAG * 10;
+                        if vertex.round > state.peer_highest_round
+                            && vertex.round <= max_acceptable_round
+                        {
+                            state.peer_highest_round = vertex.round;
+                        }
                         // If we're on committee, vote Accept
                         if let Some(vrf) = &self.our_vrf_output {
                             let vote = bft::create_vote(
@@ -756,12 +758,7 @@ impl Node {
                 self.mark_seen(vote_dedup_key);
 
                 let mut state = self.state.write().await;
-                // Track peer's highest round for view change detection.
-                // Bound accepted round to prevent manipulation.
-                let max_acceptable_round = state.bft.round + crate::constants::MAX_ROUND_LAG * 10;
-                if vote.round > state.peer_highest_round && vote.round <= max_acceptable_round {
-                    state.peer_highest_round = vote.round;
-                }
+                let vote_round = vote.round;
                 // H5: Only re-broadcast if the vote was accepted
                 if let Some(cert) = state.bft.receive_vote(vote.clone()) {
                     // Quorum reached -- finalize
@@ -774,6 +771,12 @@ impl Node {
                     // Broadcast the vote that completed the certificate
                     let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                 } else if state.bft.is_vote_accepted(&vote) {
+                    // Track peer's highest round only after vote acceptance.
+                    let max_acceptable_round =
+                        state.bft.round + crate::constants::MAX_ROUND_LAG * 10;
+                    if vote_round > state.peer_highest_round && vote_round <= max_acceptable_round {
+                        state.peer_highest_round = vote_round;
+                    }
                     // Vote was accepted (not rejected) -- forward to peers
                     let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                 }
