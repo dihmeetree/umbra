@@ -450,24 +450,27 @@ impl BftState {
                     .iter()
                     .any(|e| e.voter_id == vote.voter_id);
                 if !already_recorded {
-                    // Retrieve the first signature and vote type from stored votes
-                    let (first_signature, first_vote_type) = self
+                    // Retrieve the first signature and vote type from stored votes.
+                    // Only produce evidence if the first signature is available;
+                    // evidence with an empty signature is non-verifiable and useless
+                    // for network-wide slashing.
+                    if let Some(first_vote) = self
                         .votes
                         .get(&prev_vertex)
                         .and_then(|vs| vs.iter().find(|v| v.voter_id == vote.voter_id))
-                        .map(|v| (v.signature.clone(), v.vote_type.clone()))
-                        .unwrap_or_else(|| (Signature(vec![]), VoteType::Accept));
-                    self.equivocations.push(EquivocationEvidence {
-                        voter_id: vote.voter_id,
-                        epoch: vote.epoch,
-                        round: vote.round,
-                        first_vertex: prev_vertex,
-                        second_vertex: vote.vertex_id,
-                        first_vote_type,
-                        second_vote_type: vote.vote_type.clone(),
-                        first_signature,
-                        second_signature: vote.signature.clone(),
-                    });
+                    {
+                        self.equivocations.push(EquivocationEvidence {
+                            voter_id: vote.voter_id,
+                            epoch: vote.epoch,
+                            round: vote.round,
+                            first_vertex: prev_vertex,
+                            second_vertex: vote.vertex_id,
+                            first_vote_type: first_vote.vote_type.clone(),
+                            second_vote_type: vote.vote_type.clone(),
+                            first_signature: first_vote.signature.clone(),
+                            second_signature: vote.signature.clone(),
+                        });
+                    }
                 }
                 return None; // Reject equivocating vote
             }

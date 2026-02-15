@@ -734,8 +734,14 @@ impl Node {
                                     .p2p
                                     .broadcast(Message::BftCertificate(cert), None)
                                     .await;
+                                // Broadcast the vote that completed the certificate
+                                let _ =
+                                    self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
+                            } else if state.bft.is_vote_accepted(&vote) {
+                                // Only broadcast if the vote was accepted (correct epoch/round)
+                                let _ =
+                                    self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                             }
-                            let _ = self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
                         }
 
                         // Gossip vertex
@@ -750,8 +756,14 @@ impl Node {
                 }
             }
             Message::BftVote(vote) => {
-                // Fix 6: Gossip deduplication for votes
-                let vote_dedup_key = crate::hash_concat(&[&vote.voter_id, &vote.vertex_id.0]);
+                // Fix 6: Gossip deduplication for votes.
+                // Include epoch/round to prevent cross-epoch vote suppression.
+                let vote_dedup_key = crate::hash_concat(&[
+                    &vote.voter_id,
+                    &vote.vertex_id.0,
+                    &vote.epoch.to_le_bytes(),
+                    &vote.round.to_le_bytes(),
+                ]);
                 if self.is_seen(&vote_dedup_key) {
                     return; // Already processed this vote
                 }
@@ -790,6 +802,15 @@ impl Node {
                 self.mark_seen(cert_dedup_key);
 
                 let mut state = self.state.write().await;
+                // Reject certificates from wrong epoch to prevent stale replay
+                if cert.epoch != state.bft.epoch {
+                    tracing::debug!(
+                        cert_epoch = cert.epoch,
+                        our_epoch = state.bft.epoch,
+                        "Rejected BFT certificate from wrong epoch"
+                    );
+                    return;
+                }
                 // C1: Verify certificate before finalizing
                 let committee = state.bft.committee.clone();
                 let chain_id = state.bft.chain_id;
@@ -1109,6 +1130,21 @@ impl Node {
                             break;
                         }
 
+                        // Validate vertex structure (signature, ID) and transactions
+                        // to prevent a malicious sync peer from injecting bad data.
+                        if vertex.round > 0 {
+                            if let Err(e) = vertex.validate_structure(false) {
+                                tracing::warn!(error = %e, seq, "Sync: rejected vertex with invalid structure");
+                                break;
+                            }
+                        }
+                        for tx in &vertex.transactions {
+                            if let Err(e) = tx.validate_structure(vertex.epoch) {
+                                tracing::warn!(error = %e, seq, "Sync: rejected vertex with invalid tx");
+                                break;
+                            }
+                        }
+
                         last_seq = seq;
                         let mut state = self.state.write().await;
 
@@ -1278,12 +1314,17 @@ impl Node {
                 }
             }
             Message::TipsResponse(tips) => {
-                // View change: check for tips we don't have
+                // View change: check for tips we don't have.
+                // Cap processing to prevent a malicious peer from triggering
+                // excessive GetVertex requests via fabricated tip IDs.
+                const MAX_TIPS_TO_FETCH: usize = 16;
                 let state = self.state.read().await;
                 let missing: Vec<VertexId> = tips
                     .iter()
+                    .take(MAX_TIPS_TO_FETCH * 2) // pre-filter limit
                     .filter(|tip| state.ledger.dag.get(tip).is_none())
                     .copied()
+                    .take(MAX_TIPS_TO_FETCH)
                     .collect();
                 drop(state);
 
@@ -1318,7 +1359,19 @@ impl Node {
                                     .register_vrf_commitment(proposer_id, vrf.proof_commitment);
                             }
                         }
-                        let _ = state.ledger.insert_vertex(*vertex);
+                        // Validate all transactions structurally (same as NewVertex handler)
+                        let current_epoch = state.ledger.state.epoch();
+                        let mut valid = true;
+                        for tx in &vertex.transactions {
+                            if let Err(e) = tx.validate_structure(current_epoch) {
+                                tracing::debug!(error = %e, "VertexResponse rejected: invalid tx");
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if valid {
+                            let _ = state.ledger.insert_vertex(*vertex);
+                        }
                     }
                 }
             }
@@ -2188,6 +2241,8 @@ impl Node {
             &proposer_fingerprint,
             &tx_root,
             Some(&vrf.value),
+            &vertex.state_root,
+            vertex.protocol_version,
         );
 
         // Sign vertex

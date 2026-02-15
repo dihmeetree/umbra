@@ -1195,6 +1195,11 @@ impl Ledger {
         &mut self,
         vertex_id: &VertexId,
     ) -> Result<Option<TxOutput>, StateError> {
+        // Guard against double-application: if the vertex is already finalized,
+        // applying its transactions again would corrupt state (double-spend, etc.).
+        if self.dag.is_finalized(vertex_id) {
+            return Ok(None);
+        }
         self.dag.finalize(vertex_id);
         if let Some(v) = self.dag.get(vertex_id) {
             let v = v.clone();
@@ -1375,7 +1380,16 @@ mod tests {
             let (root, _) = crate::crypto::proof::build_merkle_tree(&tx_hashes);
             root
         };
-        let id = Vertex::compute_id(&parents, epoch, round, &proposer_fp, &tx_root, None);
+        let id = Vertex::compute_id(
+            &parents,
+            epoch,
+            round,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         Vertex {
             id,
             parents,

@@ -56,6 +56,11 @@ fn default_protocol_version() -> u32 {
 
 impl Vertex {
     /// Compute the vertex ID from its header fields.
+    ///
+    /// All consensus-relevant fields are included so the proposer's signature
+    /// (over the vertex ID) covers them. In particular, `state_root` and
+    /// `protocol_version` are included to prevent relay-level tampering.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_id(
         parents: &[VertexId],
         epoch: u64,
@@ -63,6 +68,8 @@ impl Vertex {
         proposer_fingerprint: &Hash,
         tx_root: &Hash,
         vrf_value: Option<&Hash>,
+        state_root: &Hash,
+        protocol_version: u32,
     ) -> VertexId {
         let mut hasher = blake3::Hasher::new_derive_key("umbra.vertex.id");
         for p in parents {
@@ -75,6 +82,8 @@ impl Vertex {
         if let Some(vrf_val) = vrf_value {
             hasher.update(vrf_val);
         }
+        hasher.update(state_root);
+        hasher.update(&protocol_version.to_le_bytes());
         VertexId(*hasher.finalize().as_bytes())
     }
 
@@ -119,6 +128,8 @@ impl Vertex {
                 &self.proposer.fingerprint(),
                 &self.tx_root(),
                 vrf_value,
+                &self.state_root,
+                self.protocol_version,
             );
             if expected_id != self.id {
                 return Err(VertexError::InvalidId);
@@ -372,14 +383,26 @@ impl Dag {
         while let Some(vid) = queue.pop_front() {
             ordered.push(vid);
             if let Some(children) = self.children.get(&vid) {
+                // Collect children whose in-degree drops to zero, then sort
+                // deterministically by (round, vertex_id) before enqueueing.
+                // Without this sort, children are enqueued in insertion order
+                // (network arrival order), which differs across nodes and
+                // causes consensus-breaking ordering divergence.
+                let mut ready: Vec<VertexId> = Vec::new();
                 for child in children {
                     if let Some(degree) = in_degree.get_mut(child) {
                         *degree -= 1;
                         if *degree == 0 {
-                            queue.push_back(*child);
+                            ready.push(*child);
                         }
                     }
                 }
+                ready.sort_by(|a, b| {
+                    let ra = self.vertices.get(a).map(|v| v.round).unwrap_or(0);
+                    let rb = self.vertices.get(b).map(|v| v.round).unwrap_or(0);
+                    ra.cmp(&rb).then_with(|| a.0.cmp(&b.0))
+                });
+                queue.extend(ready);
             }
         }
 
@@ -515,7 +538,16 @@ mod tests {
     use super::*;
 
     fn make_vertex_with_nonce(parents: Vec<VertexId>, round: u64, nonce: u8) -> Vertex {
-        let id = Vertex::compute_id(&parents, 0, round, &[nonce; 32], &[round as u8; 32], None);
+        let id = Vertex::compute_id(
+            &parents,
+            0,
+            round,
+            &[nonce; 32],
+            &[round as u8; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         Vertex {
             id,
             parents,
@@ -749,7 +781,16 @@ mod tests {
         let mut dag = Dag::new(genesis);
 
         // Create vertex at epoch 5
-        let id5 = Vertex::compute_id(&[gid], 5, 1, &[1; 32], &[1; 32], None);
+        let id5 = Vertex::compute_id(
+            &[gid],
+            5,
+            1,
+            &[1; 32],
+            &[1; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v1 = Vertex {
             id: id5,
             parents: vec![gid],
@@ -767,7 +808,16 @@ mod tests {
         dag.finalize(&v1.id);
 
         // Create vertex at epoch 200
-        let id200 = Vertex::compute_id(&[v1.id], 200, 2, &[2; 32], &[2; 32], None);
+        let id200 = Vertex::compute_id(
+            &[v1.id],
+            200,
+            2,
+            &[2; 32],
+            &[2; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v2 = Vertex {
             id: id200,
             parents: vec![v1.id],
@@ -824,7 +874,16 @@ mod tests {
         let mut dag = Dag::new(genesis);
 
         // Create a vertex with more than MAX_TXS_PER_VERTEX transactions
-        let id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[0; 32], None);
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &[0; 32],
+            &[0; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let dummy_tx = Transaction {
             inputs: vec![],
             outputs: vec![],
@@ -869,7 +928,16 @@ mod tests {
         dag.insert_unchecked(v1.clone()).unwrap();
 
         // Create a vertex with the same parent listed twice
-        let id = Vertex::compute_id(&[v1.id, v1.id], 0, 2, &[0; 32], &[0; 32], None);
+        let id = Vertex::compute_id(
+            &[v1.id, v1.id],
+            0,
+            2,
+            &[0; 32],
+            &[0; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let dup_parent_vertex = Vertex {
             id,
             parents: vec![v1.id, v1.id],
@@ -893,7 +961,16 @@ mod tests {
         let mut dag = Dag::new(genesis);
 
         // Create a vertex with round > 0 but no parents
-        let id = Vertex::compute_id(&[], 0, 1, &[0; 32], &[0; 32], None);
+        let id = Vertex::compute_id(
+            &[],
+            0,
+            1,
+            &[0; 32],
+            &[0; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v = Vertex {
             id,
             parents: vec![],
@@ -979,7 +1056,16 @@ mod tests {
         let mut dag = Dag::new(genesis);
 
         // Build: genesis -> v1 (epoch 0) -> v2 (epoch 100)
-        let id1 = Vertex::compute_id(&[gid], 0, 1, &[1; 32], &[1; 32], None);
+        let id1 = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &[1; 32],
+            &[1; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v1 = Vertex {
             id: id1,
             parents: vec![gid],
@@ -996,7 +1082,16 @@ mod tests {
         dag.insert_unchecked(v1.clone()).unwrap();
         dag.finalize(&v1.id);
 
-        let id2 = Vertex::compute_id(&[v1.id], 100, 2, &[2; 32], &[2; 32], None);
+        let id2 = Vertex::compute_id(
+            &[v1.id],
+            100,
+            2,
+            &[2; 32],
+            &[2; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v2 = Vertex {
             id: id2,
             parents: vec![v1.id],
@@ -1200,7 +1295,16 @@ mod tests {
         let proposer_fp = [0u8; 32];
         let tx_root = [0u8; 32];
 
-        let base_id = Vertex::compute_id(&parents, epoch, round, &proposer_fp, &tx_root, None);
+        let base_id = Vertex::compute_id(
+            &parents,
+            epoch,
+            round,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
 
         // Changing parents produces a different ID
         let different_parents = vec![VertexId([2u8; 32])];
@@ -1211,23 +1315,49 @@ mod tests {
             &proposer_fp,
             &tx_root,
             None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
         );
         assert_ne!(base_id, id_diff_parents);
 
         // Changing epoch produces a different ID
-        let id_diff_epoch =
-            Vertex::compute_id(&parents, epoch + 1, round, &proposer_fp, &tx_root, None);
+        let id_diff_epoch = Vertex::compute_id(
+            &parents,
+            epoch + 1,
+            round,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         assert_ne!(base_id, id_diff_epoch);
 
         // Changing round produces a different ID
-        let id_diff_round =
-            Vertex::compute_id(&parents, epoch, round + 1, &proposer_fp, &tx_root, None);
+        let id_diff_round = Vertex::compute_id(
+            &parents,
+            epoch,
+            round + 1,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         assert_ne!(base_id, id_diff_round);
 
         // Changing proposer produces a different ID
         let different_proposer = [99u8; 32];
-        let id_diff_proposer =
-            Vertex::compute_id(&parents, epoch, round, &different_proposer, &tx_root, None);
+        let id_diff_proposer = Vertex::compute_id(
+            &parents,
+            epoch,
+            round,
+            &different_proposer,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         assert_ne!(base_id, id_diff_proposer);
     }
 
@@ -1282,7 +1412,16 @@ mod tests {
 
         // Create vertex with transactions
         let txs = vec![make_dummy_tx(1), make_dummy_tx(2), make_dummy_tx(3)];
-        let id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[0; 32], None);
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &[0; 32],
+            &[0; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v_with_txs = Vertex {
             id,
             parents: vec![gid],
@@ -1350,7 +1489,16 @@ mod tests {
 
         let genesis = Dag::genesis_vertex();
         let gid = genesis.id;
-        let id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[0; 32], None);
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &[0; 32],
+            &[0; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let v = Vertex {
             id,
             parents: vec![gid],
@@ -1425,7 +1573,16 @@ mod tests {
         let gid = genesis.id;
 
         // Create a vertex with a correct ID, then tamper with it
-        let correct_id = Vertex::compute_id(&[gid], 0, 1, &[0; 32], &[1; 32], None);
+        let correct_id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &[0; 32],
+            &[1; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let wrong_id = VertexId([0xAA; 32]); // Does not match compute_id()
         let v = Vertex {
             id: wrong_id,
@@ -1459,7 +1616,16 @@ mod tests {
 
         // Compute the vertex ID correctly (no txs, so tx_root is all zeros)
         let tx_root = [0u8; 32];
-        let id = Vertex::compute_id(&[gid], 0, 1, &proposer_fp, &tx_root, None);
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
 
         // Sign the correct data
         let mut sig = kp.sign(&id.0);
@@ -1521,6 +1687,8 @@ mod tests {
             &proposer_fp,
             &tx_root,
             Some(&vrf_output.value),
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
         );
         let sig = kp.sign(&id.0);
 
@@ -1563,6 +1731,8 @@ mod tests {
             &proposer_fp,
             &tx_root,
             Some(&vrf_output.value),
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
         );
         let sig = kp.sign(&id.0);
 
@@ -1612,6 +1782,8 @@ mod tests {
             &proposer_fp,
             &tx_root,
             Some(&vrf_output.value),
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
         );
         let sig = kp.sign(&id.0);
 
@@ -1701,7 +1873,16 @@ mod tests {
         let kp = SigningKeypair::generate();
         let proposer_fp = kp.public.fingerprint();
         let tx_root = [0u8; 32];
-        let id = Vertex::compute_id(&[gid], 0, 1, &proposer_fp, &tx_root, None);
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
         let sig = kp.sign(&id.0);
 
         let v = Vertex {
