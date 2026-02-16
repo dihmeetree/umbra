@@ -350,6 +350,14 @@ impl Transaction {
             ));
         }
 
+        // S4: Defensive check — spend proof count must match input count.
+        // Balance proof deserialization should enforce this, but verify explicitly.
+        if balance_pub.input_proof_links.len() != self.inputs.len() {
+            return Err(TxValidationError::InvalidBalanceProof(
+                "input_proof_links count does not match input count".into(),
+            ));
+        }
+
         // Verify each spend proof (zk-STARK)
         for (i, input) in self.inputs.iter().enumerate() {
             let spend_pub = verify_spend_proof(&input.spend_proof)

@@ -147,6 +147,14 @@ async fn write_encrypted(
     padded.extend_from_slice(&payload);
     padded.resize(padded_len, 0u8);
 
+    // S7: Reject if counter would overflow (prevents nonce reuse).
+    // At 1M msg/sec this takes ~585,000 years, but check defensively.
+    if *counter >= u64::MAX / 2 {
+        return Err(P2pError::SendFailed(
+            "message counter exhausted, reconnect required".into(),
+        ));
+    }
+
     let nonce_bytes = counter_to_nonce(*counter);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(send_key));
     let ciphertext = cipher
@@ -214,6 +222,12 @@ async fn read_encrypted(
             "unexpected message counter".into(),
         ));
     }
+    // S7: Match the write-side overflow check
+    if *expected_counter >= u64::MAX / 2 {
+        return Err(P2pError::ConnectionFailed(
+            "message counter exhausted, reconnect required".into(),
+        ));
+    }
     *expected_counter += 1;
 
     let nonce_bytes = counter_to_nonce(counter);
@@ -229,6 +243,12 @@ async fn read_encrypted(
         ));
     }
     let real_len = u32::from_le_bytes(plaintext[..4].try_into().unwrap()) as usize;
+    // S8: Reject zero-length payloads (must contain at least a message type byte)
+    if real_len == 0 {
+        return Err(P2pError::ConnectionFailed(
+            "decrypted payload is empty".into(),
+        ));
+    }
     if 4 + real_len > plaintext.len() {
         return Err(P2pError::ConnectionFailed(
             "decrypted payload length exceeds frame".into(),
@@ -325,7 +345,7 @@ impl PeerReputation {
     }
 
     fn penalize(&mut self, amount: i32) {
-        self.score -= amount;
+        self.score = self.score.saturating_sub(amount);
         self.violations += 1;
         if self.score < crate::constants::PEER_BAN_THRESHOLD {
             let ban_duration =

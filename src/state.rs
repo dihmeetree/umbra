@@ -307,16 +307,22 @@ impl ChainState {
                     // Rollback: restore state to pre-Pass-2 condition
                     self.epoch_fees = fees_before;
                     self.nullifier_hash = nullifier_hash_before;
+                    // S5: Complete the full rollback loop before returning, but
+                    // track sled failures. If any sled removal fails, the nullifier
+                    // remains as "spent" in persistent storage (fail-closed: safe
+                    // against double-spend, but locks the UTXO permanently).
+                    let mut rollback_err: Option<String> = None;
                     for n in &applied_nullifiers {
                         self.nullifiers.remove(n);
-                        // Also roll back sled writes to prevent permanently marking
-                        // UTXOs as spent when the vertex application fails.
                         if let Some(ref tree) = self.nullifier_storage {
-                            if let Err(e) = tree.remove(n.0) {
+                            if let Err(sled_err) = tree.remove(n.0) {
                                 tracing::error!(
-                                    error = %e,
+                                    error = %sled_err,
                                     "Failed to roll back nullifier from sled during vertex rollback"
                                 );
+                                if rollback_err.is_none() {
+                                    rollback_err = Some(sled_err.to_string());
+                                }
                             }
                         }
                     }
@@ -348,6 +354,14 @@ impl ChainState {
                             v.active = true;
                         }
                         self.validator_bonds.insert(*vid, *bond);
+                    }
+                    // S5: If sled rollback failed, return a storage error instead
+                    // of the original error to surface the persistence issue.
+                    if let Some(sled_msg) = rollback_err {
+                        return Err(StateError::StoragePersistenceFailed(format!(
+                            "nullifier rollback failed (sled): {}",
+                            sled_msg
+                        )));
                     }
                     return Err(e);
                 }

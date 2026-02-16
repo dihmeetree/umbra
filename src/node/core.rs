@@ -118,6 +118,8 @@ pub struct Node {
     seen_messages_prev: HashSet<Hash>,
     /// Counter for sync batch rounds (reset on new sync peer).
     sync_rounds: u64,
+    /// S9: Last claimed finalized count from sync peer (for consistency check).
+    sync_peer_last_claimed: u64,
     /// Cached serialized snapshot for serving to peers:
     /// (bytes, total_chunks, meta, created_at).
     snapshot_cache: Option<(Vec<u8>, u32, super::storage::ChainStateMeta, Instant)>,
@@ -464,6 +466,7 @@ impl Node {
             seen_messages_current: HashSet::new(),
             seen_messages_prev: HashSet::new(),
             sync_rounds: 0,
+            sync_peer_last_claimed: 0,
             snapshot_cache: None,
             chunk_request_timestamps: HashMap::new(),
             upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
@@ -1043,6 +1046,7 @@ impl Node {
                                 u64::MAX
                             };
                             self.sync_rounds = 0;
+                            self.sync_peer_last_claimed = 0;
                             self.sync_state = SyncState::Syncing {
                                 peer: from,
                                 next_seq: start_after,
@@ -1091,6 +1095,21 @@ impl Node {
                         let st = self.state.read().await;
                         st.storage.finalized_vertex_count().unwrap_or(0)
                     };
+                    // S9: Reject if peer's claimed count decreased (consistency check)
+                    if total_finalized < self.sync_peer_last_claimed {
+                        tracing::warn!(
+                            claimed = total_finalized,
+                            previous = self.sync_peer_last_claimed,
+                            "Sync peer finalized count decreased, aborting"
+                        );
+                        let peer_id = from;
+                        self.sync_failed_peers.insert(peer_id, Instant::now());
+                        self.sync_state = SyncState::NeedSync {
+                            our_finalized: our_finalized_count,
+                        };
+                        return;
+                    }
+                    self.sync_peer_last_claimed = total_finalized;
                     let max_reasonable = our_finalized_count + crate::constants::EPOCH_LENGTH * 10;
                     if total_finalized > max_reasonable {
                         tracing::warn!(

@@ -700,8 +700,27 @@ async fn get_commitment_proof(
     {
         let mut limiter = state.rate_limiter.lock().await;
         let now = std::time::Instant::now();
+
+        // S10: Proactive eviction of expired entries on every request to prevent
+        // memory bloat from many unique IPs. Only scan if over half capacity.
+        if limiter.len() > RATE_LIMITER_MAX_ENTRIES / 2 {
+            limiter.retain(|_, (_, start)| {
+                now.duration_since(*start).as_secs() < RATE_LIMIT_WINDOW_SECS
+            });
+            if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
+                tracing::warn!(
+                    entries = limiter.len(),
+                    "rate limiter over capacity after eviction"
+                );
+            }
+        }
+
         let entry = limiter.entry(addr.ip()).or_insert((0, now));
-        if now.duration_since(entry.1).as_secs() >= RATE_LIMIT_WINDOW_SECS {
+        // S10: Use duration_since (monotonic) to handle clock skew safely.
+        // If the entry's start time is somehow in the future (shouldn't happen
+        // with Instant but defensive), treat the window as expired.
+        let elapsed = now.saturating_duration_since(entry.1).as_secs();
+        if elapsed >= RATE_LIMIT_WINDOW_SECS {
             // Reset window
             *entry = (1, now);
         } else {
@@ -711,17 +730,6 @@ async fn get_commitment_proof(
                     StatusCode::TOO_MANY_REQUESTS,
                     "rate limit exceeded for commitment-proof queries".to_string(),
                 ));
-            }
-        }
-        // Prevent unbounded growth: evict stale entries when over capacity
-        if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
-            let cutoff = now - std::time::Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
-            limiter.retain(|_, (_, start)| *start > cutoff);
-            if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
-                tracing::warn!(
-                    entries = limiter.len(),
-                    "rate limiter over capacity after eviction, rejecting new entries"
-                );
             }
         }
     }

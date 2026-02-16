@@ -798,10 +798,11 @@ const WALLET_SALT_SIZE: usize = 32;
 const WALLET_NONCE_SIZE: usize = 24;
 
 /// Argon2id parameters for wallet key derivation.
-/// 64 MiB memory, 3 iterations, 1 lane - balances security vs. unlock time.
+/// 64 MiB memory, 3 iterations, 4 lanes - balances security vs. unlock time.
+/// S6: Parallelism increased from 1 to 4 for improved GPU/ASIC resistance.
 fn derive_wallet_key_argon2(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u8; 32] {
     use argon2::Argon2;
-    let params = argon2::Params::new(65536, 3, 1, Some(32)).expect("valid Argon2 params");
+    let params = argon2::Params::new(65536, 3, 4, Some(32)).expect("valid Argon2 params");
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = [0u8; 32];
     argon2

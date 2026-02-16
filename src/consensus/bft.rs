@@ -164,11 +164,9 @@ impl Certificate {
             return false;
         }
 
-        // L8: Reject certificates with an unreasonable number of signature entries.
-        // A valid certificate can have at most committee.len() signatures (one per
-        // member). Allow 2x as a generous upper bound to reject obvious spam without
-        // risking false negatives from rounding.
-        if self.signatures.len() > committee.len() * 2 {
+        // S2: Reject certificates with more signatures than committee members.
+        // A valid certificate has at most one signature per committee member.
+        if self.signatures.len() > committee.len() {
             return false;
         }
 
@@ -373,6 +371,19 @@ impl BftState {
         // Verify the voter is on the committee
         let voter = self.committee.iter().find(|v| v.id == vote.voter_id)?;
 
+        // S3: Verify signature BEFORE expensive VRF check (cheaper check first).
+        // Bound to chain_id + epoch + round + vertex + vote_type.
+        let msg = vote_sign_data(
+            &vote.vertex_id,
+            vote.epoch,
+            vote.round,
+            &vote.vote_type,
+            &self.chain_id,
+        );
+        if !voter.public_key.verify(&msg, &vote.signature) {
+            return None;
+        }
+
         // H1: Verify VRF proof on the vote to confirm the voter was genuinely selected.
         // Uses full verify() with commitment tracking to prevent VRF grinding.
         if let Some(seed) = &self.epoch_seed {
@@ -423,18 +434,6 @@ impl BftState {
                     }
                 }
             }
-        }
-
-        // Verify the signature (bound to chain_id + epoch + round + vertex + vote_type)
-        let msg = vote_sign_data(
-            &vote.vertex_id,
-            vote.epoch,
-            vote.round,
-            &vote.vote_type,
-            &self.chain_id,
-        );
-        if !voter.public_key.verify(&msg, &vote.signature) {
-            return None;
         }
 
         let vid = vote.vertex_id;
@@ -696,6 +695,15 @@ pub fn select_committee(
             let vrf_output = VrfOutput::evaluate(keypair, &input);
             candidates.push((validator.clone(), vrf_output));
         }
+        // S1: Warn when committee is below MIN_COMMITTEE_SIZE.
+        // With n < 4 validators, BFT tolerance is degraded (f=0 for n<=3).
+        if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
+            tracing::warn!(
+                committee_size = candidates.len(),
+                min_required = crate::constants::MIN_COMMITTEE_SIZE,
+                "Committee below MIN_COMMITTEE_SIZE: BFT has zero Byzantine tolerance"
+            );
+        }
     }
 
     // Sort by VRF output to get deterministic ordering
@@ -754,6 +762,14 @@ pub fn select_committee_from_proofs(
                 continue;
             }
             candidates.push((validator.clone(), vrf_output.clone()));
+        }
+        // S1: Warn when committee is below MIN_COMMITTEE_SIZE.
+        if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
+            tracing::warn!(
+                committee_size = candidates.len(),
+                min_required = crate::constants::MIN_COMMITTEE_SIZE,
+                "Committee below MIN_COMMITTEE_SIZE: BFT has zero Byzantine tolerance"
+            );
         }
     }
 
