@@ -75,6 +75,21 @@ jobs:
       - name: Run security audit
         run: cargo audit
 
+  # End-to-end simulator: boots 3 validators, runs transactions and attack scenarios
+  simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run simulator
+        run: cargo run --release --bin simulator
+
   # Fuzz testing runs in parallel on nightly (libfuzzer requires nightly + Linux)
   fuzz:
     runs-on: ubuntu-latest
