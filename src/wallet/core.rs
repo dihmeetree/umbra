@@ -814,10 +814,7 @@ struct WalletFileV1 {
 }
 
 const WALLET_FILE_VERSION: u32 = 2;
-/// Legacy encrypted magic (BLAKE3 KDF) - supported for reading only.
-const ENCRYPTED_MAGIC_V1: [u8; 4] = [0x55, 0x4D, 0x42, 0x45]; // "UMBE"
-/// Current encrypted magic (Argon2id KDF) - used for all new saves.
-const ENCRYPTED_MAGIC_V2: [u8; 4] = [0x55, 0x4D, 0x42, 0x32]; // "UMB2"
+const ENCRYPTED_MAGIC: [u8; 4] = [0x55, 0x4D, 0x42, 0x32]; // "UMB2" (Argon2id KDF)
 const WALLET_SALT_SIZE: usize = 32;
 const WALLET_NONCE_SIZE: usize = 24;
 
@@ -841,21 +838,6 @@ fn derive_wallet_mac_key_argon2(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -
         mac_salt[i] = b ^ 0xFF; // XOR-flip salt for domain separation
     }
     derive_wallet_key_argon2(password, &mac_salt)
-}
-
-/// Legacy BLAKE3 KDF - used only for reading old wallet files.
-fn derive_wallet_key_legacy(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u8; 32] {
-    let mut input = Vec::with_capacity(salt.len() + password.len());
-    input.extend_from_slice(salt);
-    input.extend_from_slice(password.as_bytes());
-    crate::hash_domain(b"umbra.wallet.file.key", &input)
-}
-
-fn derive_wallet_mac_key_legacy(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u8; 32] {
-    let mut input = Vec::with_capacity(salt.len() + password.len());
-    input.extend_from_slice(salt);
-    input.extend_from_slice(password.as_bytes());
-    crate::hash_domain(b"umbra.wallet.file.mac", &input)
 }
 
 fn wallet_xor_keystream(key: &[u8; 32], nonce: &[u8; WALLET_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
@@ -935,7 +917,7 @@ impl Wallet {
             let mut out = Vec::with_capacity(
                 4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 32 + ciphertext.len(),
             );
-            out.extend_from_slice(&ENCRYPTED_MAGIC_V2);
+            out.extend_from_slice(&ENCRYPTED_MAGIC);
             out.extend_from_slice(&salt);
             out.extend_from_slice(&nonce);
             out.extend_from_slice(mac.as_bytes());
@@ -972,9 +954,8 @@ impl Wallet {
     pub fn load_from_file(path: &Path, password: Option<&str>) -> Result<(Self, u64), WalletError> {
         let raw = std::fs::read(path)
             .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
-        let is_v2 = raw.len() >= 4 && raw[..4] == ENCRYPTED_MAGIC_V2;
-        let is_v1 = raw.len() >= 4 && raw[..4] == ENCRYPTED_MAGIC_V1;
-        let bytes = if is_v2 || is_v1 {
+        let is_encrypted = raw.len() >= 4 && raw[..4] == ENCRYPTED_MAGIC;
+        let bytes = if is_encrypted {
             let min_len = 4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 32;
             if raw.len() < min_len {
                 return Err(WalletError::Persistence(
@@ -993,17 +974,8 @@ impl Wallet {
                 .map_err(|_| WalletError::Persistence("truncated nonce".into()))?;
             let stored_mac = &raw[4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE..min_len];
             let ciphertext = &raw[min_len..];
-            let (mut mac_key, mut enc_key) = if is_v2 {
-                (
-                    derive_wallet_mac_key_argon2(pw, &salt),
-                    derive_wallet_key_argon2(pw, &salt),
-                )
-            } else {
-                (
-                    derive_wallet_mac_key_legacy(pw, &salt),
-                    derive_wallet_key_legacy(pw, &salt),
-                )
-            };
+            let mut mac_key = derive_wallet_mac_key_argon2(pw, &salt);
+            let mut enc_key = derive_wallet_key_argon2(pw, &salt);
             let mut mac_input = Vec::with_capacity(WALLET_NONCE_SIZE + ciphertext.len());
             mac_input.extend_from_slice(&nonce);
             mac_input.extend_from_slice(ciphertext);
@@ -1762,7 +1734,7 @@ mod tests {
         let path = dir.path().join("wallet.dat");
         wallet.save_to_file(&path, 99, Some("hunter2")).unwrap();
         let raw = std::fs::read(&path).unwrap();
-        assert_eq!(&raw[..4], &ENCRYPTED_MAGIC_V2);
+        assert_eq!(&raw[..4], &ENCRYPTED_MAGIC);
         let (loaded, seq) = Wallet::load_from_file(&path, Some("hunter2")).unwrap();
         assert_eq!(seq, 99);
         assert_eq!(loaded.address().address_id(), original_addr);
@@ -1950,7 +1922,7 @@ mod tests {
         let path = dir.path().join("wallet.dat");
         wallet.save_to_file(&path, 7, None).unwrap();
         let raw = std::fs::read(&path).unwrap();
-        assert_ne!(&raw[..4], &ENCRYPTED_MAGIC_V2);
+        assert_ne!(&raw[..4], &ENCRYPTED_MAGIC);
         let (loaded, seq) = Wallet::load_from_file(&path, None).unwrap();
         assert_eq!(seq, 7);
         assert_eq!(loaded.address().address_id(), original_addr);
