@@ -1,7 +1,8 @@
 //! STARK proof types and error definitions.
 
 use serde::{Deserialize, Serialize};
-use winterfell::math::ToElements;
+use winterfell::math::{FieldElement, ToElements};
+use zeroize::Zeroize;
 
 use super::convert::Felt;
 
@@ -54,7 +55,8 @@ impl BalancePublicInputs {
 /// Witness data for the balance proof (known only to prover).
 ///
 /// Debug is intentionally not derived to prevent accidental logging of secret values.
-/// Zeroize ensures witness data is cleared from memory when dropped.
+/// Secret data is zeroed on drop via a manual `Drop` implementation using volatile
+/// writes to prevent compiler elision.
 #[derive(Clone)]
 pub struct BalanceWitness {
     /// Input amounts
@@ -67,6 +69,16 @@ pub struct BalanceWitness {
     pub output_values: Vec<u64>,
     /// Output blinding factors
     pub output_blindings: Vec<[Felt; 4]>,
+}
+
+impl Drop for BalanceWitness {
+    fn drop(&mut self) {
+        self.input_values.zeroize();
+        self.output_values.zeroize();
+        zeroize_felt_vecs(&mut self.input_blindings);
+        zeroize_felt_vecs(&mut self.input_link_nonces);
+        zeroize_felt_vecs(&mut self.output_blindings);
+    }
 }
 
 /// A serialized STARK proof for balance verification.
@@ -101,7 +113,8 @@ pub struct SpendPublicInputs {
 /// Witness data for the spend proof (known only to prover).
 ///
 /// Debug is intentionally not derived to prevent accidental logging of secret values.
-/// Zeroize ensures witness data is cleared from memory when dropped.
+/// Secret data is zeroed on drop via a manual `Drop` implementation using volatile
+/// writes to prevent compiler elision.
 #[derive(Clone)]
 pub struct SpendWitness {
     /// The spend authorization key (secret)
@@ -112,6 +125,18 @@ pub struct SpendWitness {
     pub link_nonce: [Felt; 4],
     /// Merkle authentication path: (sibling_digest, is_current_right_child)
     pub merkle_path: Vec<([Felt; 4], bool)>,
+}
+
+impl Drop for SpendWitness {
+    fn drop(&mut self) {
+        zeroize_felt_array(&mut self.spend_auth);
+        zeroize_felt_array(&mut self.commitment);
+        zeroize_felt_array(&mut self.link_nonce);
+        for (digest, _) in &mut self.merkle_path {
+            zeroize_felt_array(digest);
+        }
+        self.merkle_path.clear();
+    }
 }
 
 /// A serialized STARK proof for spend verification.
@@ -125,6 +150,26 @@ pub struct SpendStarkProof {
     pub proof_bytes: Vec<u8>,
     /// Serialized public inputs (merkle_root, nullifier)
     pub public_inputs_bytes: Vec<u8>,
+}
+
+// ── Zeroize helpers for Felt arrays ──
+
+/// Zero a `[Felt; 4]` array using volatile writes to prevent compiler elision.
+fn zeroize_felt_array(arr: &mut [Felt; 4]) {
+    for felt in arr.iter_mut() {
+        // SAFETY: Felt is a plain data type; volatile write prevents elision.
+        unsafe {
+            std::ptr::write_volatile(felt, Felt::ZERO);
+        }
+    }
+}
+
+/// Zero all `[Felt; 4]` entries in a Vec, then clear the Vec.
+fn zeroize_felt_vecs(v: &mut Vec<[Felt; 4]>) {
+    for arr in v.iter_mut() {
+        zeroize_felt_array(arr);
+    }
+    v.clear();
 }
 
 // ── ToElements impls (required by winterfell Air trait) ──

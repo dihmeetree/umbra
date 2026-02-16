@@ -80,7 +80,8 @@ impl StealthAddress {
                 // bypass Kyber's implicit rejection).
                 let dummy = [0u8; 32];
                 for idx in 0..crate::constants::MAX_TX_IO as u32 {
-                    let _ = derive_one_time_key(&dummy, idx);
+                    let derived = derive_one_time_key(&dummy, idx);
+                    let _ = crate::constant_time_eq(&derived, &self.one_time_key);
                 }
                 return None;
             }

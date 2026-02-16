@@ -745,6 +745,7 @@ Proves in zero knowledge:
 | `pqcrypto-traits`                | Trait definitions for PQ crypto types                     |
 | `blake3`                         | Fast, quantum-secure hashing                              |
 | `winterfell`                     | zk-STARK prover/verifier (Rescue Prime, Goldilocks field) |
+| `argon2`                         | Memory-hard password hashing for wallet file encryption   |
 | `zeroize`                        | Secure memory clearing for secret key material            |
 | `serde` + `bincode`              | Serialization                                             |
 | `rand`                           | Cryptographic randomness                                  |
@@ -785,7 +786,7 @@ All transaction validity is verified via zk-STARKs:
 - **Full transaction validation on apply** — `apply_transaction()` calls `validate_structure()` before any state mutation, verifying all zk-STARK proofs (balance + spend) and structural integrity
 - **VRF anti-grinding** — VRF outputs include a `proof_commitment` (hash of the proof) enabling a commit-reveal scheme that prevents validators from grinding on epoch seeds
 - **Plaintext size limits** — `encrypt_with_shared_secret` rejects plaintexts exceeding `MAX_ENCRYPT_PLAINTEXT`, preventing memory exhaustion attacks
-- **Secure memory clearing** — all secret key material (`SigningSecretKey`, `KemSecretKey`, `SharedSecret`, `BlindingFactor`, `StealthSpendInfo`) is zeroized on drop via the `zeroize` crate
+- **Secure memory clearing** — all secret key material (`SigningSecretKey`, `KemSecretKey`, `SharedSecret`, `BlindingFactor`, `StealthSpendInfo`, `BalanceWitness`, `SpendWitness`) is zeroized on drop via the `zeroize` crate and volatile writes; derived encryption/MAC keys and keystream intermediates are explicitly zeroized after use
 - **Vote round validation** — BFT `receive_vote()` rejects votes for rounds other than the current round, preventing future-round injection attacks
 - **Chain-bound vote signatures** — vote signatures include `chain_id`, preventing cross-chain vote replay attacks
 - **Transaction expiry enforcement** — `validate_structure()` enforces `expiry_epoch`, rejecting stale transactions
@@ -878,7 +879,7 @@ All transaction validity is verified via zk-STARKs:
 - **DAG safe indexing** — `finalized_order()` uses fallible `.get()` lookups instead of panicking `[]` indexing, gracefully handling edge cases where finalized vertices may be missing from the in-memory map after pruning
 - **P2P frame padding** — encrypted P2P frames are padded to 1024-byte bucket boundaries, preventing traffic analysis from distinguishing message types by size
 - **Dandelion++ timing jitter** — stem-phase forwarding adds exponentially-distributed random delays before relaying to the next hop, preventing timing decomposition attacks for sender deanonymization
-- **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation work on KEM decapsulation failure, equalizing timing with the success path
+- **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation and constant-time comparison on KEM decapsulation failure, equalizing timing with the success path
 - **Deterministic weight-based fees** — transfer fees are computed deterministically from transaction shape (`fee = FEE_BASE + inputs * FEE_PER_INPUT + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB`), eliminating fee-based fingerprinting entirely since every transaction of the same shape pays the exact same fee with no user choice involved
 - **RPC rate limiting** — commitment-proof queries are rate-limited per IP (60 requests per 60-second window) to prevent Merkle tree enumeration attacks that could map wallet activity to commitment indices
 - **Peer address redaction** — peer discovery responses and RPC endpoints strip IP addresses, preventing validator deanonymization via address correlation
@@ -907,7 +908,7 @@ All transaction validity is verified via zk-STARKs:
 - **Deterministic DAG finalization** — `finalized_order()` BFS uses deterministic tie-breaking `(round, vertex_id)` when ordering siblings, ensuring all nodes produce identical finalization sequences
 - **Snapshot integrity verification** — snapshot import verifies nullifier count, nullifier hash, validator count, and commitment tree root in memory before persisting to storage, preventing state corruption from malicious snapshots
 - **Nullifier rollback on failure** — if vertex application fails after recording nullifiers to sled, the nullifiers are rolled back to maintain storage consistency
-- **Wallet file encryption** — wallet private keys can be encrypted at rest using a password-derived key (BLAKE3 domain-separated key derivation with random salt and nonce, XOR keystream cipher, encrypt-then-MAC with keyed BLAKE3, constant-time MAC verification); backward-compatible with unencrypted legacy files
+- **Wallet file encryption** — wallet private keys can be encrypted at rest using a password-derived key (Argon2id memory-hard key derivation with 64 MiB / 3 iterations, random 32-byte salt and 24-byte nonce, XOR keystream cipher, encrypt-then-MAC with keyed BLAKE3, constant-time MAC verification); backward-compatible with legacy BLAKE3-derived and unencrypted files
 - **CSRF protection** — wallet web UI forms include per-session CSRF tokens validated with constant-time comparison on all state-mutating POST requests, preventing cross-site request forgery
 - **Mempool proof verification** — mempool can optionally verify zk-STARK balance and spend proofs on insertion, preventing invalid transactions from consuming pool capacity
 - **Mempool finalized nullifier checking** — mempool insertion checks nullifiers against finalized chain state via an external callback, rejecting transactions that attempt to spend already-finalized outputs

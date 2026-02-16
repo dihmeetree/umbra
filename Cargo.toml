@@ -60,6 +60,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 
+# Key derivation (memory-hard password hashing for wallet files)
+argon2 = "0.5"
+
 # Utilities
 hex = "0.4"
 thiserror = "2"

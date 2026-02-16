@@ -49,6 +49,7 @@
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use super::keys::{KemCiphertext, KemKeypair, KemPublicKey, SharedSecret};
 use crate::Hash;
@@ -121,11 +122,13 @@ impl EncryptedPayload {
         }
         let (shared_secret, kem_ct) = recipient.encapsulate()?;
         let nonce = random_nonce();
-        let (enc_key, mac_key) = derive_keys(&shared_secret, &nonce);
+        let (mut enc_key, mut mac_key) = derive_keys(&shared_secret, &nonce);
 
         let padded = pad_plaintext(plaintext);
         let ciphertext = xor_keystream(&enc_key, &nonce, &padded);
         let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ct);
+        enc_key.zeroize();
+        mac_key.zeroize();
 
         Some(EncryptedPayload {
             kem_ciphertext: kem_ct,
@@ -138,7 +141,7 @@ impl EncryptedPayload {
     /// Decrypt using the recipient's KEM keypair.
     pub fn decrypt(&self, recipient_kp: &KemKeypair) -> Option<Vec<u8>> {
         let shared_secret = recipient_kp.decapsulate(&self.kem_ciphertext)?;
-        let (enc_key, mac_key) = derive_keys(&shared_secret, &self.nonce);
+        let (mut enc_key, mut mac_key) = derive_keys(&shared_secret, &self.nonce);
 
         // Verify MAC first (authenticate-then-decrypt) using constant-time comparison
         let expected_mac = compute_mac(
@@ -147,11 +150,14 @@ impl EncryptedPayload {
             &self.ciphertext,
             &self.kem_ciphertext,
         );
+        mac_key.zeroize();
         if !crate::constant_time_eq(&expected_mac, &self.mac) {
+            enc_key.zeroize();
             return None;
         }
 
         let padded = xor_keystream(&enc_key, &self.nonce, &self.ciphertext);
+        enc_key.zeroize();
         unpad_plaintext(&padded)
     }
 
@@ -169,10 +175,12 @@ impl EncryptedPayload {
             return None;
         }
         let nonce = random_nonce();
-        let (enc_key, mac_key) = derive_keys(shared_secret, &nonce);
+        let (mut enc_key, mut mac_key) = derive_keys(shared_secret, &nonce);
         let padded = pad_plaintext(plaintext);
         let ciphertext = xor_keystream(&enc_key, &nonce, &padded);
         let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ciphertext);
+        enc_key.zeroize();
+        mac_key.zeroize();
 
         Some(EncryptedPayload {
             kem_ciphertext,
@@ -184,17 +192,20 @@ impl EncryptedPayload {
 
     /// Decrypt with a pre-established shared secret.
     pub fn decrypt_with_shared_secret(&self, shared_secret: &SharedSecret) -> Option<Vec<u8>> {
-        let (enc_key, mac_key) = derive_keys(shared_secret, &self.nonce);
+        let (mut enc_key, mut mac_key) = derive_keys(shared_secret, &self.nonce);
         let expected_mac = compute_mac(
             &mac_key,
             &self.nonce,
             &self.ciphertext,
             &self.kem_ciphertext,
         );
+        mac_key.zeroize();
         if !crate::constant_time_eq(&expected_mac, &self.mac) {
+            enc_key.zeroize();
             return None;
         }
         let padded = xor_keystream(&enc_key, &self.nonce, &self.ciphertext);
+        enc_key.zeroize();
         unpad_plaintext(&padded)
     }
 }
@@ -211,32 +222,39 @@ fn random_nonce() -> [u8; NONCE_SIZE] {
 }
 
 /// Derive encryption and MAC keys from a shared secret and nonce.
+///
+/// Intermediate buffers containing the shared secret are zeroized before return.
 fn derive_keys(ss: &SharedSecret, nonce: &[u8; NONCE_SIZE]) -> ([u8; 32], [u8; 32]) {
     let mut enc_input = [0u8; 56]; // 32 + 24
     enc_input[..32].copy_from_slice(&ss.0);
     enc_input[32..].copy_from_slice(nonce);
     let enc_key = crate::hash_domain(b"umbra.encrypt.key", &enc_input);
+    enc_input.zeroize();
 
     let mut mac_input = [0u8; 56];
     mac_input[..32].copy_from_slice(&ss.0);
     mac_input[32..].copy_from_slice(nonce);
     let mac_key = crate::hash_domain(b"umbra.encrypt.mac", &mac_input);
+    mac_input.zeroize();
 
     (enc_key, mac_key)
 }
 
 /// XOR-based stream cipher using BLAKE3 as the keystream generator.
 /// Keystream block i = H("umbra.keystream" || key || nonce || counter_i).
+///
+/// Uses a fixed stack buffer for the block input to avoid leaking key material
+/// on the heap. The buffer is zeroized after the loop completes.
 fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(data.len());
     let mut counter = 0u64;
     let mut pos = 0;
+    let mut block_input = [0u8; 32 + NONCE_SIZE + 8];
+    block_input[..32].copy_from_slice(key);
+    block_input[32..32 + NONCE_SIZE].copy_from_slice(nonce);
 
     while pos < data.len() {
-        let mut block_input = Vec::with_capacity(32 + NONCE_SIZE + 8);
-        block_input.extend_from_slice(key);
-        block_input.extend_from_slice(nonce);
-        block_input.extend_from_slice(&counter.to_le_bytes());
+        block_input[32 + NONCE_SIZE..].copy_from_slice(&counter.to_le_bytes());
         let block = crate::hash_domain(b"umbra.keystream", &block_input);
 
         let remaining = data.len() - pos;
@@ -248,6 +266,7 @@ fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u
         counter += 1;
     }
 
+    block_input.zeroize();
     output
 }
 
