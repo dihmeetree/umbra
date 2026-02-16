@@ -417,7 +417,7 @@ mod tests {
             42,
             8,
             10,
-            winterfell::FieldExtension::Quadratic,
+            winterfell::FieldExtension::Cubic,
             8,
             255,
             winterfell::BatchingMethod::Linear,

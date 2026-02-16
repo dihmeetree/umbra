@@ -1,66 +1,39 @@
 //! Post-quantum authenticated encryption for transaction messages and note data.
 //!
-//! Uses Kyber1024 KEM to establish a shared secret, then BLAKE3 in keyed mode
-//! for authenticated encryption (encrypt-then-MAC).
-//!
-//! # Security rationale (H8)
-//!
-//! This module implements a custom AEAD construction because standard AEAD
-//! ciphers (AES-GCM, ChaCha20-Poly1305) have classical key-recovery
-//! complexity ≤128 bits. By using BLAKE3 (256-bit security margin) for both
-//! the keystream and the MAC, this construction matches the post-quantum
-//! security level of the KEM (Kyber1024, NIST Level 5).
+//! Uses Kyber1024 KEM to establish a shared secret, then XChaCha20-Poly1305
+//! (a standard AEAD) for authenticated encryption.
 //!
 //! Message flow:
 //! 1. Sender encapsulates against recipient's KEM public key -> (shared_secret, ciphertext)
-//! 2. Derive encryption key and MAC key from shared_secret + nonce (domain-separated BLAKE3)
-//! 3. XOR-encrypt the plaintext with a BLAKE3-derived keystream
-//! 4. Compute MAC over (nonce || len(ciphertext) || ciphertext || len(kem_ct) || kem_ct)
+//! 2. Derive encryption key from shared_secret + nonce (domain-separated BLAKE3)
+//! 3. Encrypt the padded plaintext with XChaCha20-Poly1305 (AAD = KEM ciphertext)
 //!
 //! A random 24-byte nonce is included in every payload, ensuring that even if
 //! the same shared secret is reused (via encrypt_with_shared_secret), the
-//! keystream and MAC are unique.
+//! keystream is unique.
 //!
-//! # Security analysis
-//!
-//! - **IND-CPA**: The keystream is derived via BLAKE3 in key-derivation mode
-//!   with a fresh random 24-byte nonce per encryption. Each (key, nonce, counter)
-//!   triple produces a unique keystream block. Nonce collision probability is
-//!   ~2^{-96} per encryption under the same shared secret (birthday bound on
-//!   192-bit nonces).
-//!
-//! - **INT-CTXT**: Encrypt-then-MAC with keyed BLAKE3. The MAC covers nonce,
-//!   length-prefixed ciphertext, and length-prefixed KEM ciphertext. Length
-//!   prefixing prevents boundary-ambiguity attacks.
-//!
-//! - **Key separation**: Encryption and MAC keys are derived from the shared
-//!   secret using distinct BLAKE3 domain strings (`"umbra.encrypt.key"` and
-//!   `"umbra.encrypt.mac"`), preventing related-key attacks.
-//!
-//! - **Why not standard AEAD**: AES-256-GCM and ChaCha20-Poly1305 provide at
-//!   most 128-bit classical key-recovery security. BLAKE3 targets a 256-bit
-//!   security margin, matching the post-quantum security level of Kyber1024
-//!   (NIST Level 5). Using a standard AEAD would create a security level
-//!   mismatch where the symmetric cipher is the weakest link.
-//!
-//! - **Limitations**: This construction has not undergone formal cryptographic
-//!   analysis or third-party audit. The security argument relies on BLAKE3's
-//!   PRF properties and the standard encrypt-then-MAC composition theorem.
+//! The KEM ciphertext is bound via AEAD associated data (AAD), so any
+//! modification of the KEM ciphertext is detected during decryption.
 
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use super::keys::{KemCiphertext, KemKeypair, KemPublicKey, SharedSecret};
-use crate::Hash;
 
-/// Nonce size in bytes.
+/// Nonce size in bytes (matches XChaCha20-Poly1305 nonce).
 const NONCE_SIZE: usize = 24;
 
-/// Padding bucket for encrypted payloads (bytes). Ciphertexts are padded to the
+/// Padding bucket for encrypted payloads (bytes). Plaintexts are padded to the
 /// next multiple of this value to prevent message length from leaking information
 /// about the plaintext structure.
 const ENCRYPT_PADDING_BUCKET: usize = 64;
+
+/// Poly1305 authentication tag size (appended to ciphertext by AEAD).
+#[cfg(test)]
+const TAG_SIZE: usize = 16;
 
 /// Pad plaintext with a 4-byte length prefix and random padding to the next
 /// multiple of `ENCRYPT_PADDING_BUCKET`.
@@ -101,14 +74,12 @@ fn unpad_plaintext(data: &[u8]) -> Option<Vec<u8>> {
 /// An encrypted message with its KEM ciphertext for the recipient.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedPayload {
-    /// KEM ciphertext — recipient decapsulates to get shared secret
+    /// KEM ciphertext -- recipient decapsulates to get shared secret
     pub kem_ciphertext: KemCiphertext,
-    /// Random nonce (unique per encryption, prevents keystream reuse)
+    /// Random nonce (unique per encryption)
     pub nonce: [u8; NONCE_SIZE],
-    /// Encrypted data (XOR keystream cipher)
+    /// Authenticated ciphertext (XChaCha20-Poly1305 output, includes 16-byte tag)
     pub ciphertext: Vec<u8>,
-    /// Authentication tag (BLAKE3 keyed hash)
-    pub mac: Hash,
 }
 
 impl EncryptedPayload {
@@ -122,42 +93,46 @@ impl EncryptedPayload {
         }
         let (shared_secret, kem_ct) = recipient.encapsulate()?;
         let nonce = random_nonce();
-        let (mut enc_key, mut mac_key) = derive_keys(&shared_secret, &nonce);
+        let mut key = derive_key(&shared_secret, &nonce);
 
         let padded = pad_plaintext(plaintext);
-        let ciphertext = xor_keystream(&enc_key, &nonce, &padded);
-        let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ct);
-        enc_key.zeroize();
-        mac_key.zeroize();
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let xnonce = XNonce::from_slice(&nonce);
+        let ciphertext = cipher
+            .encrypt(
+                xnonce,
+                Payload {
+                    msg: &padded,
+                    aad: &kem_ct.0,
+                },
+            )
+            .ok()?;
+        key.zeroize();
 
         Some(EncryptedPayload {
             kem_ciphertext: kem_ct,
             nonce,
             ciphertext,
-            mac,
         })
     }
 
     /// Decrypt using the recipient's KEM keypair.
     pub fn decrypt(&self, recipient_kp: &KemKeypair) -> Option<Vec<u8>> {
         let shared_secret = recipient_kp.decapsulate(&self.kem_ciphertext)?;
-        let (mut enc_key, mut mac_key) = derive_keys(&shared_secret, &self.nonce);
+        let mut key = derive_key(&shared_secret, &self.nonce);
 
-        // Verify MAC first (authenticate-then-decrypt) using constant-time comparison
-        let expected_mac = compute_mac(
-            &mac_key,
-            &self.nonce,
-            &self.ciphertext,
-            &self.kem_ciphertext,
-        );
-        mac_key.zeroize();
-        if !crate::constant_time_eq(&expected_mac, &self.mac) {
-            enc_key.zeroize();
-            return None;
-        }
-
-        let padded = xor_keystream(&enc_key, &self.nonce, &self.ciphertext);
-        enc_key.zeroize();
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let xnonce = XNonce::from_slice(&self.nonce);
+        let padded = cipher
+            .decrypt(
+                xnonce,
+                Payload {
+                    msg: &self.ciphertext,
+                    aad: &self.kem_ciphertext.0,
+                },
+            )
+            .ok()?;
+        key.zeroize();
         unpad_plaintext(&padded)
     }
 
@@ -175,120 +150,64 @@ impl EncryptedPayload {
             return None;
         }
         let nonce = random_nonce();
-        let (mut enc_key, mut mac_key) = derive_keys(shared_secret, &nonce);
+        let mut key = derive_key(shared_secret, &nonce);
         let padded = pad_plaintext(plaintext);
-        let ciphertext = xor_keystream(&enc_key, &nonce, &padded);
-        let mac = compute_mac(&mac_key, &nonce, &ciphertext, &kem_ciphertext);
-        enc_key.zeroize();
-        mac_key.zeroize();
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let xnonce = XNonce::from_slice(&nonce);
+        let ciphertext = cipher
+            .encrypt(
+                xnonce,
+                Payload {
+                    msg: &padded,
+                    aad: &kem_ciphertext.0,
+                },
+            )
+            .ok()?;
+        key.zeroize();
 
         Some(EncryptedPayload {
             kem_ciphertext,
             nonce,
             ciphertext,
-            mac,
         })
     }
 
     /// Decrypt with a pre-established shared secret.
     pub fn decrypt_with_shared_secret(&self, shared_secret: &SharedSecret) -> Option<Vec<u8>> {
-        let (mut enc_key, mut mac_key) = derive_keys(shared_secret, &self.nonce);
-        let expected_mac = compute_mac(
-            &mac_key,
-            &self.nonce,
-            &self.ciphertext,
-            &self.kem_ciphertext,
-        );
-        mac_key.zeroize();
-        if !crate::constant_time_eq(&expected_mac, &self.mac) {
-            enc_key.zeroize();
-            return None;
-        }
-        let padded = xor_keystream(&enc_key, &self.nonce, &self.ciphertext);
-        enc_key.zeroize();
+        let mut key = derive_key(shared_secret, &self.nonce);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let xnonce = XNonce::from_slice(&self.nonce);
+        let padded = cipher
+            .decrypt(
+                xnonce,
+                Payload {
+                    msg: &self.ciphertext,
+                    aad: &self.kem_ciphertext.0,
+                },
+            )
+            .ok()?;
+        key.zeroize();
         unpad_plaintext(&padded)
     }
 }
 
 /// Generate a cryptographically random nonce.
-///
-/// M12: Uses `rand::rng()` which is a CSPRNG (ChaCha20 seeded from OsRng).
-/// This provides the same security guarantees as OsRng with better
-/// performance for bulk operations.
 fn random_nonce() -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce);
     nonce
 }
 
-/// Derive encryption and MAC keys from a shared secret and nonce.
+/// Derive encryption key from a shared secret and nonce.
 ///
 /// Intermediate buffers containing the shared secret are zeroized before return.
-fn derive_keys(ss: &SharedSecret, nonce: &[u8; NONCE_SIZE]) -> ([u8; 32], [u8; 32]) {
-    let mut enc_input = [0u8; 56]; // 32 + 24
-    enc_input[..32].copy_from_slice(&ss.0);
-    enc_input[32..].copy_from_slice(nonce);
-    let enc_key = crate::hash_domain(b"umbra.encrypt.key", &enc_input);
-    enc_input.zeroize();
-
-    let mut mac_input = [0u8; 56];
-    mac_input[..32].copy_from_slice(&ss.0);
-    mac_input[32..].copy_from_slice(nonce);
-    let mac_key = crate::hash_domain(b"umbra.encrypt.mac", &mac_input);
-    mac_input.zeroize();
-
-    (enc_key, mac_key)
-}
-
-/// XOR-based stream cipher using BLAKE3 as the keystream generator.
-/// Keystream block i = H("umbra.keystream" || key || nonce || counter_i).
-///
-/// Uses a fixed stack buffer for the block input to avoid leaking key material
-/// on the heap. The buffer is zeroized after the loop completes.
-fn xor_keystream(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len());
-    let mut counter = 0u64;
-    let mut pos = 0;
-    let mut block_input = [0u8; 32 + NONCE_SIZE + 8];
-    block_input[..32].copy_from_slice(key);
-    block_input[32..32 + NONCE_SIZE].copy_from_slice(nonce);
-
-    while pos < data.len() {
-        block_input[32 + NONCE_SIZE..].copy_from_slice(&counter.to_le_bytes());
-        let block = crate::hash_domain(b"umbra.keystream", &block_input);
-
-        let remaining = data.len() - pos;
-        let take = remaining.min(32);
-        for i in 0..take {
-            output.push(data[pos + i] ^ block[i]);
-        }
-        pos += take;
-        counter += 1;
-    }
-
-    block_input.zeroize();
-    output
-}
-
-/// Compute MAC over (nonce || len(ciphertext) || ciphertext || len(kem_ct) || kem_ct)
-/// using BLAKE3 keyed mode.
-///
-/// Each variable-length field is prefixed with its length as a little-endian u64,
-/// preventing boundary-ambiguity attacks where an adversary shifts bytes between
-/// the ciphertext and KEM ciphertext while preserving the same MAC input.
-fn compute_mac(
-    mac_key: &[u8; 32],
-    nonce: &[u8; NONCE_SIZE],
-    ciphertext: &[u8],
-    kem_ct: &KemCiphertext,
-) -> Hash {
-    let mut hasher = blake3::Hasher::new_keyed(mac_key);
-    hasher.update(nonce);
-    hasher.update(&(ciphertext.len() as u64).to_le_bytes());
-    hasher.update(ciphertext);
-    hasher.update(&(kem_ct.0.len() as u64).to_le_bytes());
-    hasher.update(&kem_ct.0);
-    *hasher.finalize().as_bytes()
+fn derive_key(ss: &SharedSecret, nonce: &[u8; NONCE_SIZE]) -> [u8; 32] {
+    let mut input = [0u8; 56]; // 32 + 24
+    input[..32].copy_from_slice(&ss.0);
+    input[32..].copy_from_slice(nonce);
+    let key = crate::hash_domain(b"umbra.encrypt.key", &input);
+    input.zeroize();
+    key
 }
 
 #[cfg(test)]
@@ -315,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn tampered_ciphertext_fails_mac() {
+    fn tampered_ciphertext_fails() {
         let kp = KemKeypair::generate();
         let msg = b"integrity test";
         let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
@@ -326,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn tampered_nonce_fails_mac() {
+    fn tampered_nonce_fails() {
         let kp = KemKeypair::generate();
         let msg = b"nonce test";
         let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
@@ -378,7 +297,6 @@ mod tests {
 
     #[test]
     fn encrypt_exactly_32_bytes() {
-        // Exactly one keystream block
         let kp = KemKeypair::generate();
         let msg = vec![0xABu8; 32];
         let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
@@ -388,7 +306,6 @@ mod tests {
 
     #[test]
     fn encrypt_33_bytes_crosses_block_boundary() {
-        // Crosses keystream block boundary (32 → 33 bytes)
         let kp = KemKeypair::generate();
         let msg = vec![0xCDu8; 33];
         let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
@@ -405,11 +322,15 @@ mod tests {
     }
 
     #[test]
-    fn tampered_mac_directly_fails() {
+    fn tampered_tag_fails() {
         let kp = KemKeypair::generate();
-        let msg = b"mac tamper test";
+        let msg = b"tag tamper test";
         let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
-        encrypted.mac[0] ^= 0xff;
+        // Tag is the last 16 bytes of ciphertext
+        let len = encrypted.ciphertext.len();
+        if len >= TAG_SIZE {
+            encrypted.ciphertext[len - 1] ^= 0xff;
+        }
         assert!(encrypted.decrypt(&kp).is_none());
     }
 
@@ -480,15 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_tampered_mac_fails() {
-        let kp = KemKeypair::generate();
-        let msg = b"tamper mac test";
-        let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
-        encrypted.mac[0] ^= 0x01;
-        assert!(encrypted.decrypt(&kp).is_none());
-    }
-
-    #[test]
     fn encrypt_various_padding_sizes() {
         let kp = KemKeypair::generate();
         for size in &[0, 1, 32, 60, 63, 64, 65, 128] {
@@ -529,7 +441,6 @@ mod tests {
 
     #[test]
     fn encrypt_exactly_one_block() {
-        // 32 bytes = one keystream block
         let kp = KemKeypair::generate();
         let msg = vec![0xCD; 32];
         let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
@@ -539,7 +450,6 @@ mod tests {
 
     #[test]
     fn encrypt_crosses_block_boundary() {
-        // 33 bytes crosses the 32-byte keystream block boundary
         let kp = KemKeypair::generate();
         let msg = vec![0xEF; 33];
         let encrypted = EncryptedPayload::encrypt(&kp.public, &msg).unwrap();
@@ -559,17 +469,17 @@ mod tests {
     #[test]
     fn ciphertext_padded_to_bucket_boundary() {
         let kp = KemKeypair::generate();
-        // 1 byte plaintext + 4 byte length prefix = 5 bytes, padded to 64
+        // 1 byte plaintext + 4 byte length prefix = 5 bytes, padded to 64, + 16 tag
         let encrypted = EncryptedPayload::encrypt(&kp.public, &[0x01]).unwrap();
-        assert_eq!(encrypted.ciphertext.len() % 64, 0);
+        assert_eq!((encrypted.ciphertext.len() - TAG_SIZE) % 64, 0);
 
-        // 60 byte plaintext + 4 = 64, already aligned
+        // 60 byte plaintext + 4 = 64, already aligned, + 16 tag
         let encrypted = EncryptedPayload::encrypt(&kp.public, &[0x02; 60]).unwrap();
-        assert_eq!(encrypted.ciphertext.len() % 64, 0);
+        assert_eq!((encrypted.ciphertext.len() - TAG_SIZE) % 64, 0);
 
-        // 61 byte plaintext + 4 = 65, padded to 128
+        // 61 byte plaintext + 4 = 65, padded to 128, + 16 tag
         let encrypted = EncryptedPayload::encrypt(&kp.public, &[0x03; 61]).unwrap();
-        assert_eq!(encrypted.ciphertext.len() % 64, 0);
+        assert_eq!((encrypted.ciphertext.len() - TAG_SIZE) % 64, 0);
     }
 
     #[test]
@@ -623,7 +533,7 @@ mod tests {
         let kp = KemKeypair::generate();
         let msg = b"truncation test";
         let mut encrypted = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
-        // Truncate ciphertext to 1 byte (corrupt the length prefix)
+        // Truncate ciphertext to 1 byte (corrupt the auth tag)
         encrypted.ciphertext = vec![0u8];
         assert!(encrypted.decrypt(&kp).is_none());
     }
@@ -655,10 +565,9 @@ mod tests {
         let msg = b"repeat test";
         let e1 = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
         let e2 = EncryptedPayload::encrypt(&kp.public, msg).unwrap();
-        // Different nonces, ciphertexts, MACs, and KEM ciphertexts
+        // Different nonces and ciphertexts
         assert_ne!(e1.nonce, e2.nonce);
         assert_ne!(e1.ciphertext, e2.ciphertext);
-        assert_ne!(e1.mac, e2.mac);
         // Both should still decrypt correctly
         assert_eq!(e1.decrypt(&kp).unwrap(), msg);
         assert_eq!(e2.decrypt(&kp).unwrap(), msg);

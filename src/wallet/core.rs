@@ -625,17 +625,17 @@ impl Wallet {
         material.extend_from_slice(kpk);
         material.extend_from_slice(&(ksk.len() as u32).to_le_bytes());
         material.extend_from_slice(ksk);
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
         let mut nonce = [0u8; RECOVERY_NONCE_SIZE];
         rand::rng().fill_bytes(&mut nonce);
-        let encrypted = xor_keystream(&key, &nonce, &material);
-        let mut mac_input = Vec::with_capacity(RECOVERY_NONCE_SIZE + encrypted.len());
-        mac_input.extend_from_slice(&nonce);
-        mac_input.extend_from_slice(&encrypted);
-        let mac = blake3::keyed_hash(&key, &mac_input);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let encrypted = cipher
+            .encrypt(XNonce::from_slice(&nonce), material.as_ref())
+            .expect("recovery backup encryption failed");
         key.zeroize();
-        let mut backup = Vec::with_capacity(RECOVERY_NONCE_SIZE + 32 + encrypted.len());
+        let mut backup = Vec::with_capacity(RECOVERY_NONCE_SIZE + encrypted.len());
         backup.extend_from_slice(&nonce);
-        backup.extend_from_slice(mac.as_bytes());
         backup.extend_from_slice(&encrypted);
         (words, backup)
     }
@@ -647,7 +647,10 @@ impl Wallet {
         let mut entropy = words_to_entropy(words)?;
         let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
-        let min_len = RECOVERY_NONCE_SIZE + 32;
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+        // Minimum: nonce(24) + tag(16)
+        let min_len = RECOVERY_NONCE_SIZE + 16;
         if encrypted_backup.len() < min_len {
             key.zeroize();
             return Err(WalletError::Recovery("backup too short".into()));
@@ -656,19 +659,15 @@ impl Wallet {
             encrypted_backup[..RECOVERY_NONCE_SIZE]
                 .try_into()
                 .map_err(|_| WalletError::Recovery("truncated backup".into()))?;
-        let stored_mac = &encrypted_backup[RECOVERY_NONCE_SIZE..min_len];
-        let ciphertext = &encrypted_backup[min_len..];
-        let mut mac_input = Vec::with_capacity(RECOVERY_NONCE_SIZE + ciphertext.len());
-        mac_input.extend_from_slice(&nonce);
-        mac_input.extend_from_slice(ciphertext);
-        let expected_mac = blake3::keyed_hash(&key, &mac_input);
-        if !crate::constant_time_eq(stored_mac, expected_mac.as_bytes()) {
-            key.zeroize();
-            return Err(WalletError::Recovery(
-                "invalid mnemonic or corrupted backup".into(),
-            ));
-        }
-        let material = zeroize::Zeroizing::new(xor_keystream(&key, &nonce, ciphertext));
+        let ciphertext = &encrypted_backup[RECOVERY_NONCE_SIZE..];
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+        let material = zeroize::Zeroizing::new(
+            cipher
+                .decrypt(XNonce::from_slice(&nonce), ciphertext)
+                .map_err(|_| {
+                    WalletError::Recovery("invalid mnemonic or corrupted backup".into())
+                })?,
+        );
         key.zeroize();
         let mut pos = 0;
         let read_vec = |data: &[u8], pos: &mut usize| -> Result<Vec<u8>, WalletError> {
@@ -707,26 +706,6 @@ impl Wallet {
 }
 
 const RECOVERY_NONCE_SIZE: usize = 24;
-
-fn xor_keystream(key: &[u8; 32], nonce: &[u8; RECOVERY_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len());
-    let mut offset = 0;
-    let mut block_idx: u64 = 0;
-    while offset < data.len() {
-        let mut block_input = Vec::with_capacity(32 + RECOVERY_NONCE_SIZE + 8);
-        block_input.extend_from_slice(key);
-        block_input.extend_from_slice(nonce);
-        block_input.extend_from_slice(&block_idx.to_le_bytes());
-        let block = blake3::derive_key("umbra.recovery.stream", &block_input);
-        let end = std::cmp::min(offset + 32, data.len());
-        for i in offset..end {
-            result.push(data[i] ^ block[i - offset]);
-        }
-        offset = end;
-        block_idx += 1;
-    }
-    result
-}
 
 // -- Persistence --------------------------------------------------------------
 
@@ -814,7 +793,7 @@ struct WalletFileV1 {
 }
 
 const WALLET_FILE_VERSION: u32 = 2;
-const ENCRYPTED_MAGIC: [u8; 4] = [0x55, 0x4D, 0x42, 0x32]; // "UMB2" (Argon2id KDF)
+const ENCRYPTED_MAGIC: [u8; 4] = [0x55, 0x4D, 0x42, 0x33]; // "UMB3" (Argon2id + XChaCha20-Poly1305)
 const WALLET_SALT_SIZE: usize = 32;
 const WALLET_NONCE_SIZE: usize = 24;
 
@@ -829,36 +808,6 @@ fn derive_wallet_key_argon2(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u
         .hash_password_into(password.as_bytes(), salt, &mut key)
         .expect("Argon2 hash_password_into failed");
     key
-}
-
-fn derive_wallet_mac_key_argon2(password: &str, salt: &[u8; WALLET_SALT_SIZE]) -> [u8; 32] {
-    // Derive a separate MAC key by appending a domain tag to the salt.
-    let mut mac_salt = [0u8; WALLET_SALT_SIZE];
-    for (i, b) in salt.iter().enumerate() {
-        mac_salt[i] = b ^ 0xFF; // XOR-flip salt for domain separation
-    }
-    derive_wallet_key_argon2(password, &mac_salt)
-}
-
-fn wallet_xor_keystream(key: &[u8; 32], nonce: &[u8; WALLET_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len());
-    let mut offset = 0;
-    let mut block_idx: u64 = 0;
-    let mut block_input = [0u8; 32 + WALLET_NONCE_SIZE + 8];
-    block_input[..32].copy_from_slice(key);
-    block_input[32..32 + WALLET_NONCE_SIZE].copy_from_slice(nonce);
-    while offset < data.len() {
-        block_input[32 + WALLET_NONCE_SIZE..].copy_from_slice(&block_idx.to_le_bytes());
-        let block = crate::hash_domain(b"umbra.wallet.file.stream", &block_input);
-        let end = std::cmp::min(offset + 32, data.len());
-        for i in offset..end {
-            result.push(data[i] ^ block[i - offset]);
-        }
-        offset = end;
-        block_idx += 1;
-    }
-    block_input.zeroize();
-    result
 }
 
 impl Wallet {
@@ -902,25 +851,22 @@ impl Wallet {
         let plaintext = crate::serialize(&wallet_file)
             .map_err(|e| WalletError::Persistence(format!("serialize failed: {}", e)))?;
         let bytes = if let Some(pw) = password {
+            use chacha20poly1305::aead::{Aead, KeyInit};
+            use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
             let salt: [u8; WALLET_SALT_SIZE] = rand::random();
             let mut nonce = [0u8; WALLET_NONCE_SIZE];
             rand::rng().fill_bytes(&mut nonce);
             let mut enc_key = derive_wallet_key_argon2(pw, &salt);
-            let mut mac_key = derive_wallet_mac_key_argon2(pw, &salt);
-            let ciphertext = wallet_xor_keystream(&enc_key, &nonce, &plaintext);
+            let cipher = XChaCha20Poly1305::new(Key::from_slice(&enc_key));
+            let ciphertext = cipher
+                .encrypt(XNonce::from_slice(&nonce), plaintext.as_ref())
+                .map_err(|_| WalletError::Persistence("encryption failed".into()))?;
             enc_key.zeroize();
-            let mut mac_input = Vec::with_capacity(WALLET_NONCE_SIZE + ciphertext.len());
-            mac_input.extend_from_slice(&nonce);
-            mac_input.extend_from_slice(&ciphertext);
-            let mac = blake3::keyed_hash(&mac_key, &mac_input);
-            mac_key.zeroize();
-            let mut out = Vec::with_capacity(
-                4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 32 + ciphertext.len(),
-            );
+            let mut out =
+                Vec::with_capacity(4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + ciphertext.len());
             out.extend_from_slice(&ENCRYPTED_MAGIC);
             out.extend_from_slice(&salt);
             out.extend_from_slice(&nonce);
-            out.extend_from_slice(mac.as_bytes());
             out.extend_from_slice(&ciphertext);
             out
         } else {
@@ -956,7 +902,10 @@ impl Wallet {
             .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
         let is_encrypted = raw.len() >= 4 && raw[..4] == ENCRYPTED_MAGIC;
         let bytes = if is_encrypted {
-            let min_len = 4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 32;
+            use chacha20poly1305::aead::{Aead, KeyInit};
+            use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+            // Minimum: magic(4) + salt(32) + nonce(24) + tag(16)
+            let min_len = 4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + 16;
             if raw.len() < min_len {
                 return Err(WalletError::Persistence(
                     "encrypted wallet file truncated".into(),
@@ -972,22 +921,16 @@ impl Wallet {
                 [4 + WALLET_SALT_SIZE..4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE]
                 .try_into()
                 .map_err(|_| WalletError::Persistence("truncated nonce".into()))?;
-            let stored_mac = &raw[4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE..min_len];
-            let ciphertext = &raw[min_len..];
-            let mut mac_key = derive_wallet_mac_key_argon2(pw, &salt);
+            let ciphertext = &raw[4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE..];
             let mut enc_key = derive_wallet_key_argon2(pw, &salt);
-            let mut mac_input = Vec::with_capacity(WALLET_NONCE_SIZE + ciphertext.len());
-            mac_input.extend_from_slice(&nonce);
-            mac_input.extend_from_slice(ciphertext);
-            let expected_mac = blake3::keyed_hash(&mac_key, &mac_input);
-            mac_key.zeroize();
-            if !crate::constant_time_eq(stored_mac, expected_mac.as_bytes()) {
-                enc_key.zeroize();
-                return Err(WalletError::Persistence(
-                    "decryption failed: wrong password or corrupted file".into(),
-                ));
-            }
-            let plaintext = wallet_xor_keystream(&enc_key, &nonce, ciphertext);
+            let cipher = XChaCha20Poly1305::new(Key::from_slice(&enc_key));
+            let plaintext = cipher
+                .decrypt(XNonce::from_slice(&nonce), ciphertext)
+                .map_err(|_| {
+                    WalletError::Persistence(
+                        "decryption failed: wrong password or corrupted file".into(),
+                    )
+                })?;
             enc_key.zeroize();
             plaintext
         } else {
@@ -1766,6 +1709,34 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("password required"), "got: {}", e),
             Ok(_) => panic!("expected error"),
         }
+    }
+
+    #[test]
+    fn wallet_encrypted_tampered_ciphertext_fails() {
+        let wallet = Wallet::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        wallet.save_to_file(&path, 0, Some("pass")).unwrap();
+        let mut raw = std::fs::read(&path).unwrap();
+        // Corrupt a byte in the ciphertext region (after magic + salt + nonce = 4+32+24 = 60)
+        if raw.len() > 61 {
+            raw[61] ^= 0xFF;
+        }
+        std::fs::write(&path, &raw).unwrap();
+        let result = Wallet::load_from_file(&path, Some("pass"));
+        assert!(result.is_err(), "tampered wallet file should fail to load");
+    }
+
+    #[test]
+    fn recovery_backup_tampered_fails() {
+        let wallet = Wallet::new();
+        let (words, mut backup) = wallet.create_recovery_backup();
+        // Corrupt a byte in the ciphertext region (after 24-byte nonce)
+        if backup.len() > 25 {
+            backup[25] ^= 0xFF;
+        }
+        let result = Wallet::recover_from_backup(&words, &backup);
+        assert!(result.is_err(), "tampered backup should fail to recover");
     }
 
     /// Create a wallet with specific UTXO values for coin selection testing.

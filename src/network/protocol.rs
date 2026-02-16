@@ -699,7 +699,6 @@ mod tests {
                     kem_ciphertext: KemCiphertext(vec![0u8; 1568]),
                     nonce: [9u8; 24],
                     ciphertext: vec![10],
-                    mac: [11u8; 32],
                 },
             }],
             fee: 100,

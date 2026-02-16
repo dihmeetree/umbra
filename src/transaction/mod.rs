@@ -405,12 +405,12 @@ impl Transaction {
         let outputs: usize = self
             .outputs
             .iter()
-            .map(|o| 32 + 32 + o.encrypted_note.ciphertext.len() + 24 + 64)
+            .map(|o| 32 + 32 + o.encrypted_note.ciphertext.len() + 24 + 32)
             .sum();
         let messages: usize = self
             .messages
             .iter()
-            .map(|m| m.payload.ciphertext.len() + 24 + 64)
+            .map(|m| m.payload.ciphertext.len() + 24 + 32)
             .sum();
         base + balance + inputs + outputs + messages + 32
     }
@@ -449,7 +449,6 @@ pub fn compute_tx_content_hash(
         hasher.update(&output.encrypted_note.nonce);
         hasher.update(&(output.encrypted_note.ciphertext.len() as u32).to_le_bytes());
         hasher.update(&output.encrypted_note.ciphertext);
-        hasher.update(&output.encrypted_note.mac);
     }
     // Messages
     hasher.update(&(messages.len() as u32).to_le_bytes());
@@ -459,7 +458,6 @@ pub fn compute_tx_content_hash(
         hasher.update(&msg.payload.nonce);
         hasher.update(&(msg.payload.ciphertext.len() as u32).to_le_bytes());
         hasher.update(&msg.payload.ciphertext);
-        hasher.update(&msg.payload.mac);
     }
     *hasher.finalize().as_bytes()
 }
@@ -562,7 +560,7 @@ mod tests {
             42,
             8,
             10,
-            winterfell::FieldExtension::Quadratic,
+            winterfell::FieldExtension::Cubic,
             8,
             255,
             winterfell::BatchingMethod::Linear,
@@ -737,7 +735,6 @@ mod tests {
             payload: crate::crypto::encryption::EncryptedPayload {
                 ciphertext: vec![0u8; 10],
                 nonce: [0u8; 24],
-                mac: [0u8; 32],
                 kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
             },
         };
@@ -1139,7 +1136,6 @@ mod tests {
             payload: crate::crypto::encryption::EncryptedPayload {
                 ciphertext: vec![0u8; crate::constants::MAX_MESSAGE_SIZE],
                 nonce: [0u8; 24],
-                mac: [0u8; 32],
                 kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
             },
         });
@@ -1159,7 +1155,6 @@ mod tests {
             payload: crate::crypto::encryption::EncryptedPayload {
                 ciphertext: vec![0u8; 10],
                 nonce: [0u8; 24],
-                mac: [0u8; 32],
                 kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
             },
         };

@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~28.5k lines across 43 source files with 902 tests. Single crate, no workspace.
+Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~28.5k lines across 43 source files with 901 tests. Single crate, no workspace.
 
 ## Build & Test
 
 ```bash
 cargo build --release        # Full build (requires C compiler for PQClean backends)
 cargo check                  # Fast type-check
-cargo test                   # Full suite (~902 tests, ~3 min debug mode)
+cargo test                   # Full suite (~901 tests, ~3 min debug mode)
 cargo test <module>::tests   # Run specific module tests (e.g., consensus::bft::tests)
 cargo clippy --all-targets   # Lint — must be warning-free
 cargo fmt                    # Format — must pass `cargo fmt -- --check`
@@ -33,7 +33,7 @@ Tests are slow in debug mode due to zk-STARK proof generation. Use `cargo test <
 | `storage.rs`                      | `src/storage.rs`         | `Storage` trait + `SledStorage` (sled embedded DB with 8 named trees)                                                                                          |
 | `mempool.rs`                      | `src/mempool.rs`         | Fee-priority transaction pool with nullifier conflict detection                                                                                                |
 | `network.rs`                      | `src/network.rs`         | Wire protocol `Message` enum, bincode encode/decode with size limits                                                                                           |
-| `p2p.rs`                          | `src/p2p.rs`             | Encrypted TCP transport (Kyber KEM + Dilithium auth + BLAKE3 cipher)                                                                                           |
+| `p2p.rs`                          | `src/p2p.rs`             | Encrypted TCP transport (Kyber KEM + Dilithium auth + ChaCha20-Poly1305 AEAD)                                                                                  |
 | `node.rs`                         | `src/node.rs`            | Node orchestrator: event loop, sync state machine, consensus participation, Dandelion++                                                                        |
 | `rpc.rs`                          | `src/rpc.rs`             | JSON HTTP API (axum)                                                                                                                                           |
 | `wallet.rs`                       | `src/wallet.rs`          | Client-side key management, scanning, tx building, history                                                                                                     |

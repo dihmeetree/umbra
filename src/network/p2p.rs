@@ -4,7 +4,7 @@
 //! 1. Hello exchange (plaintext) — version check + KEM public key exchange
 //! 2. Kyber1024 KEM handshake — initiator encapsulates to responder's KEM PK
 //! 3. Dilithium5 auth — both sides sign the handshake transcript
-//! 4. Encrypted transport — BLAKE3 XOR keystream + keyed-BLAKE3 MAC per message
+//! 4. Encrypted transport — ChaCha20-Poly1305 AEAD per message
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -57,25 +57,25 @@ impl RateLimiter {
 
 // ── Transport Encryption ──
 
-/// Nonce size for the BLAKE3 XOR keystream cipher.
-const TRANSPORT_NONCE_SIZE: usize = 24;
+/// Nonce size for ChaCha20-Poly1305 (standard 96-bit nonce).
+const TRANSPORT_NONCE_SIZE: usize = 12;
+
+/// Poly1305 authentication tag size.
+const TRANSPORT_TAG_SIZE: usize = 16;
 
 /// Session keys for encrypted P2P transport.
 /// Initiator and responder derive mirrored send/recv key pairs so that
 /// each side's send key is the other side's recv key.
+/// AEAD handles authentication, so no separate MAC keys are needed.
 struct SessionKeys {
     send_key: [u8; 32],
     recv_key: [u8; 32],
-    send_mac_key: [u8; 32],
-    recv_mac_key: [u8; 32],
 }
 
 impl Drop for SessionKeys {
     fn drop(&mut self) {
         self.send_key.zeroize();
         self.recv_key.zeroize();
-        self.send_mac_key.zeroize();
-        self.recv_mac_key.zeroize();
     }
 }
 
@@ -83,62 +83,25 @@ impl SessionKeys {
     fn derive(shared_secret: &[u8; 32], is_initiator: bool) -> Self {
         let init_send = crate::hash_domain(b"umbra.p2p.init.send", shared_secret);
         let resp_send = crate::hash_domain(b"umbra.p2p.resp.send", shared_secret);
-        let init_mac = crate::hash_domain(b"umbra.p2p.init.mac", shared_secret);
-        let resp_mac = crate::hash_domain(b"umbra.p2p.resp.mac", shared_secret);
         if is_initiator {
             SessionKeys {
                 send_key: init_send,
                 recv_key: resp_send,
-                send_mac_key: init_mac,
-                recv_mac_key: resp_mac,
             }
         } else {
             SessionKeys {
                 send_key: resp_send,
                 recv_key: init_send,
-                send_mac_key: resp_mac,
-                recv_mac_key: init_mac,
             }
         }
     }
 }
 
-/// Convert a message counter to a 24-byte nonce for the XOR keystream.
+/// Build a 12-byte nonce from a counter (TLS 1.3 style: 4 zero bytes + 8-byte counter LE).
 fn counter_to_nonce(counter: u64) -> [u8; TRANSPORT_NONCE_SIZE] {
     let mut nonce = [0u8; TRANSPORT_NONCE_SIZE];
-    nonce[..8].copy_from_slice(&counter.to_le_bytes());
+    nonce[4..].copy_from_slice(&counter.to_le_bytes());
     nonce
-}
-
-/// BLAKE3-based XOR keystream cipher (same construction as crypto/encryption.rs).
-fn xor_keystream(key: &[u8; 32], nonce: &[u8; TRANSPORT_NONCE_SIZE], data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len());
-    let mut block_counter = 0u64;
-    let mut pos = 0;
-    while pos < data.len() {
-        let mut block_input = Vec::with_capacity(32 + TRANSPORT_NONCE_SIZE + 8);
-        block_input.extend_from_slice(key);
-        block_input.extend_from_slice(nonce);
-        block_input.extend_from_slice(&block_counter.to_le_bytes());
-        let block = crate::hash_domain(b"umbra.keystream", &block_input);
-        let remaining = data.len() - pos;
-        let take = remaining.min(32);
-        for i in 0..take {
-            output.push(data[pos + i] ^ block[i]);
-        }
-        pos += take;
-        block_counter += 1;
-    }
-    output
-}
-
-/// Compute keyed-BLAKE3 MAC for an encrypted transport frame.
-fn transport_mac(mac_key: &[u8; 32], counter: u64, ciphertext: &[u8]) -> Hash {
-    let mut hasher = blake3::Hasher::new_keyed(mac_key);
-    hasher.update(&counter.to_le_bytes());
-    hasher.update(&(ciphertext.len() as u64).to_le_bytes());
-    hasher.update(ciphertext);
-    *hasher.finalize().as_bytes()
 }
 
 /// Compute the handshake transcript hash for mutual authentication.
@@ -163,15 +126,17 @@ fn pad_to_bucket(len: usize) -> usize {
 /// the payload and zero-padding to the next bucket boundary. This hides the
 /// actual message size from network observers.
 ///
-/// Frame format: `[4-byte LE frame_len][8-byte LE counter][ciphertext][32-byte MAC]`
-/// Plaintext of ciphertext: `[4-byte LE real_len][payload][zero_padding]`
+/// Frame format: `[4-byte LE frame_len][8-byte LE counter][aead_ciphertext]`
+/// AEAD ciphertext contains: encrypted `[4-byte LE real_len][payload][zero_padding]` + 16-byte tag
 async fn write_encrypted(
     writer: &mut OwnedWriteHalf,
     msg: &Message,
     send_key: &[u8; 32],
-    send_mac_key: &[u8; 32],
     counter: &mut u64,
 ) -> Result<(), P2pError> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
     let payload = network::encode_message(msg).map_err(|e| P2pError::SendFailed(e.to_string()))?;
 
     // Embed real length inside the encrypted region, then pad to bucket boundary
@@ -182,16 +147,18 @@ async fn write_encrypted(
     padded.extend_from_slice(&payload);
     padded.resize(padded_len, 0u8);
 
-    let nonce = counter_to_nonce(*counter);
-    let ciphertext = xor_keystream(send_key, &nonce, &padded);
-    let mac = transport_mac(send_mac_key, *counter, &ciphertext);
+    let nonce_bytes = counter_to_nonce(*counter);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(send_key));
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), padded.as_ref())
+        .map_err(|_| P2pError::SendFailed("AEAD encryption failed".into()))?;
 
-    let frame_len = (8 + ciphertext.len() + 32) as u32;
+    // ciphertext includes 16-byte tag
+    let frame_len = (8 + ciphertext.len()) as u32;
     let mut frame = Vec::with_capacity(4 + frame_len as usize);
     frame.extend_from_slice(&frame_len.to_le_bytes());
     frame.extend_from_slice(&counter.to_le_bytes());
     frame.extend_from_slice(&ciphertext);
-    frame.extend_from_slice(&mac);
 
     *counter += 1;
     writer
@@ -205,24 +172,27 @@ async fn write_encrypted(
 async fn read_encrypted(
     reader: &mut OwnedReadHalf,
     recv_key: &[u8; 32],
-    recv_mac_key: &[u8; 32],
     expected_counter: &mut u64,
 ) -> Result<Message, P2pError> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
     let mut len_buf = [0u8; 4];
     reader
         .read_exact(&mut len_buf)
         .await
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
     let frame_len = u32::from_le_bytes(len_buf) as usize;
-    // Minimum: 8 (counter) + P2P_PADDING_BUCKET (min padded ciphertext) + 32 (MAC)
-    let min_frame = 8 + crate::constants::P2P_PADDING_BUCKET + 32;
+    // Minimum: 8 (counter) + P2P_PADDING_BUCKET (min padded ciphertext) + 16 (tag)
+    let min_frame = 8 + crate::constants::P2P_PADDING_BUCKET + TRANSPORT_TAG_SIZE;
     if frame_len < min_frame {
         return Err(P2pError::ConnectionFailed(
             "encrypted frame too short".into(),
         ));
     }
-    // Max: account for padding overhead (up to one extra bucket)
-    let max_frame = 8 + pad_to_bucket(4 + crate::constants::MAX_NETWORK_MESSAGE_BYTES) + 32;
+    // Max: account for padding overhead (up to one extra bucket) + tag
+    let max_frame =
+        8 + pad_to_bucket(4 + crate::constants::MAX_NETWORK_MESSAGE_BYTES) + TRANSPORT_TAG_SIZE;
     if frame_len > max_frame {
         return Err(P2pError::ConnectionFailed(
             "encrypted frame too large".into(),
@@ -235,10 +205,9 @@ async fn read_encrypted(
         .await
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
 
-    // Parse: [8-byte counter][ciphertext][32-byte MAC]
+    // Parse: [8-byte counter][aead_ciphertext (includes tag)]
     let counter = u64::from_le_bytes(frame[..8].try_into().unwrap());
-    let ciphertext = &frame[8..frame_len - 32];
-    let mac: [u8; 32] = frame[frame_len - 32..].try_into().unwrap();
+    let ciphertext = &frame[8..];
 
     if counter != *expected_counter {
         return Err(P2pError::ConnectionFailed(
@@ -247,13 +216,11 @@ async fn read_encrypted(
     }
     *expected_counter += 1;
 
-    let expected_mac = transport_mac(recv_mac_key, counter, ciphertext);
-    if !crate::constant_time_eq(&expected_mac, &mac) {
-        return Err(P2pError::ConnectionFailed("MAC verification failed".into()));
-    }
-
-    let nonce = counter_to_nonce(counter);
-    let plaintext = xor_keystream(recv_key, &nonce, ciphertext);
+    let nonce_bytes = counter_to_nonce(counter);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(recv_key));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext)
+        .map_err(|_| P2pError::ConnectionFailed("AEAD decryption failed".into()))?;
 
     // Extract real payload length from the padded plaintext
     if plaintext.len() < 4 {
@@ -1121,12 +1088,7 @@ async fn spawn_encrypted_connection_tasks(
     let internal_tx_read = internal_tx.clone();
     let internal_tx_disconnect = internal_tx;
 
-    let SessionKeys {
-        send_key,
-        recv_key,
-        send_mac_key,
-        recv_mac_key,
-    } = session_keys;
+    let SessionKeys { send_key, recv_key } = session_keys;
 
     // Encrypted read task with per-peer rate limiting
     tokio::spawn(async move {
@@ -1139,8 +1101,7 @@ async fn spawn_encrypted_connection_tasks(
         let mut expected_counter: u64 = 0;
 
         loop {
-            match read_encrypted(&mut reader, &recv_key, &recv_mac_key, &mut expected_counter).await
-            {
+            match read_encrypted(&mut reader, &recv_key, &mut expected_counter).await {
                 Ok(message) => {
                     if !rate_limiter.try_consume() {
                         violations += 1;
@@ -1202,7 +1163,7 @@ async fn spawn_encrypted_connection_tasks(
         let mut writer = writer;
         let mut counter: u64 = 0;
         while let Some(msg) = msg_rx.recv().await {
-            if write_encrypted(&mut writer, &msg, &send_key, &send_mac_key, &mut counter)
+            if write_encrypted(&mut writer, &msg, &send_key, &mut counter)
                 .await
                 .is_err()
             {
@@ -1357,10 +1318,8 @@ mod tests {
 
         // Initiator's send = responder's recv
         assert_eq!(init_keys.send_key, resp_keys.recv_key);
-        assert_eq!(init_keys.send_mac_key, resp_keys.recv_mac_key);
         // Responder's send = initiator's recv
         assert_eq!(resp_keys.send_key, init_keys.recv_key);
-        assert_eq!(resp_keys.send_mac_key, init_keys.recv_mac_key);
         // Send and recv are different
         assert_ne!(init_keys.send_key, init_keys.recv_key);
     }
@@ -1382,7 +1341,6 @@ mod tests {
                 &mut writer,
                 &Message::GetPeers,
                 &send_keys.send_key,
-                &send_keys.send_mac_key,
                 &mut counter,
             )
             .await
@@ -1393,14 +1351,9 @@ mod tests {
         let (stream, _) = listener.accept().await.unwrap();
         let (mut reader, _) = stream.into_split();
         let mut expected_counter = 0u64;
-        let msg = read_encrypted(
-            &mut reader,
-            &recv_keys.recv_key,
-            &recv_keys.recv_mac_key,
-            &mut expected_counter,
-        )
-        .await
-        .unwrap();
+        let msg = read_encrypted(&mut reader, &recv_keys.recv_key, &mut expected_counter)
+            .await
+            .unwrap();
 
         assert!(matches!(msg, Message::GetPeers));
         assert_eq!(expected_counter, 1);
@@ -1535,7 +1488,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_frame_mac_verification_failure() {
+    async fn encrypted_frame_tamper_rejected() {
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1543,13 +1499,13 @@ mod tests {
         let send_keys = SessionKeys::derive(&shared_secret, true);
         let recv_keys = SessionKeys::derive(&shared_secret, false);
 
-        // Writer sends a frame with ciphertext corrupted after MAC computation,
-        // so the MAC won't match the corrupted data on the receiver side.
+        // Writer sends a frame with ciphertext corrupted after AEAD encryption,
+        // so decryption will fail on the receiver side.
         let writer_task = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
             let (_, mut raw_writer) = stream.into_split();
 
-            // Build a valid padded encrypted frame first
+            // Build a valid padded + encrypted frame first
             let payload = network::encode_message(&Message::GetPeers).unwrap();
             let real_len = payload.len() as u32;
             let padded_len = pad_to_bucket(4 + payload.len());
@@ -1559,26 +1515,25 @@ mod tests {
             padded.resize(padded_len, 0u8);
 
             let counter: u64 = 0;
-            let nonce = counter_to_nonce(counter);
-            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &padded);
-            // Compute MAC on the original (uncorrupted) ciphertext
-            let mac = transport_mac(&send_keys.send_mac_key, counter, &ciphertext);
+            let nonce_bytes = counter_to_nonce(counter);
+            let cipher = ChaCha20Poly1305::new(Key::from_slice(&send_keys.send_key));
+            let mut ciphertext = cipher
+                .encrypt(Nonce::from_slice(&nonce_bytes), padded.as_ref())
+                .expect("encrypt");
 
-            // Corrupt one byte of the ciphertext AFTER computing the MAC
-            let mut corrupted_ct = ciphertext;
-            if !corrupted_ct.is_empty() {
-                corrupted_ct[0] ^= 0xFF;
+            // Corrupt one byte of the ciphertext
+            if !ciphertext.is_empty() {
+                ciphertext[0] ^= 0xFF;
             }
 
-            // Write frame with corrupted ciphertext but original MAC
-            let frame_len = (8 + corrupted_ct.len() + 32) as u32;
+            // Write frame with corrupted ciphertext
+            let frame_len = (8 + ciphertext.len()) as u32;
             raw_writer
                 .write_all(&frame_len.to_le_bytes())
                 .await
                 .unwrap();
             raw_writer.write_all(&counter.to_le_bytes()).await.unwrap();
-            raw_writer.write_all(&corrupted_ct).await.unwrap();
-            raw_writer.write_all(&mac).await.unwrap();
+            raw_writer.write_all(&ciphertext).await.unwrap();
 
             // Keep connection alive briefly so reader can read
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1588,19 +1543,13 @@ mod tests {
         let (mut reader, _) = stream.into_split();
         let mut expected_counter = 0u64;
 
-        let result = read_encrypted(
-            &mut reader,
-            &recv_keys.recv_key,
-            &recv_keys.recv_mac_key,
-            &mut expected_counter,
-        )
-        .await;
+        let result = read_encrypted(&mut reader, &recv_keys.recv_key, &mut expected_counter).await;
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("MAC verification failed"),
-            "expected MAC verification failure, got: {}",
+            err_msg.contains("AEAD decryption failed"),
+            "expected AEAD decryption failure, got: {}",
             err_msg
         );
 
@@ -1609,6 +1558,9 @@ mod tests {
 
     #[tokio::test]
     async fn counter_replay_rejected() {
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1616,8 +1568,7 @@ mod tests {
         let send_keys = SessionKeys::derive(&shared_secret, true);
         let recv_keys = SessionKeys::derive(&shared_secret, false);
 
-        // Writer sends two frames: counter=0 then counter=1
-        // But we send counter=1 first to trigger counter mismatch on the reader
+        // Writer sends a frame with counter=1, but reader expects counter=0
         let writer_task = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
             let (_, mut raw_writer) = stream.into_split();
@@ -1632,18 +1583,19 @@ mod tests {
             padded.resize(padded_len, 0u8);
 
             let counter: u64 = 1;
-            let nonce = counter_to_nonce(counter);
-            let ciphertext = xor_keystream(&send_keys.send_key, &nonce, &padded);
-            let mac = transport_mac(&send_keys.send_mac_key, counter, &ciphertext);
+            let nonce_bytes = counter_to_nonce(counter);
+            let cipher = ChaCha20Poly1305::new(Key::from_slice(&send_keys.send_key));
+            let ciphertext = cipher
+                .encrypt(Nonce::from_slice(&nonce_bytes), padded.as_ref())
+                .expect("encrypt");
 
-            let frame_len = (8 + ciphertext.len() + 32) as u32;
+            let frame_len = (8 + ciphertext.len()) as u32;
             raw_writer
                 .write_all(&frame_len.to_le_bytes())
                 .await
                 .unwrap();
             raw_writer.write_all(&counter.to_le_bytes()).await.unwrap();
             raw_writer.write_all(&ciphertext).await.unwrap();
-            raw_writer.write_all(&mac).await.unwrap();
 
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         });
@@ -1652,13 +1604,7 @@ mod tests {
         let (mut reader, _) = stream.into_split();
         let mut expected_counter = 0u64; // Reader expects counter=0
 
-        let result = read_encrypted(
-            &mut reader,
-            &recv_keys.recv_key,
-            &recv_keys.recv_mac_key,
-            &mut expected_counter,
-        )
-        .await;
+        let result = read_encrypted(&mut reader, &recv_keys.recv_key, &mut expected_counter).await;
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1668,6 +1614,69 @@ mod tests {
             err_msg
         );
 
+        writer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undersized_frame_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let recv_keys = SessionKeys::derive(&[88u8; 32], false);
+
+        let writer_task = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (_, mut raw_writer) = stream.into_split();
+            // Send a frame that's too short (less than 8 + min_bucket + tag)
+            let frame_len: u32 = 4;
+            raw_writer
+                .write_all(&frame_len.to_le_bytes())
+                .await
+                .unwrap();
+            raw_writer.write_all(&[0u8; 4]).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, _) = stream.into_split();
+        let mut expected_counter = 0u64;
+        let result = read_encrypted(&mut reader, &recv_keys.recv_key, &mut expected_counter).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("too short"),
+            "expected frame too short error"
+        );
+        writer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let recv_keys = SessionKeys::derive(&[88u8; 32], false);
+
+        let writer_task = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (_, mut raw_writer) = stream.into_split();
+            // Claim a frame larger than max_frame
+            let frame_len: u32 = 20_000_000;
+            raw_writer
+                .write_all(&frame_len.to_le_bytes())
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, _) = stream.into_split();
+        let mut expected_counter = 0u64;
+        let result = read_encrypted(&mut reader, &recv_keys.recv_key, &mut expected_counter).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("too large"),
+            "expected frame too large error"
+        );
         writer_task.await.unwrap();
     }
 
@@ -1719,16 +1728,17 @@ mod tests {
     fn counter_to_nonce_zero() {
         let nonce = counter_to_nonce(0);
         assert_eq!(nonce.len(), TRANSPORT_NONCE_SIZE);
-        assert_eq!(nonce, [0u8; 24]);
+        assert_eq!(nonce, [0u8; 12]);
     }
 
     #[test]
     fn counter_to_nonce_one() {
         let nonce = counter_to_nonce(1);
         assert_eq!(nonce.len(), TRANSPORT_NONCE_SIZE);
-        // Little-endian u64: 1 stored in the first 8 bytes
-        assert_eq!(nonce[0], 1);
-        for &b in &nonce[1..] {
+        // TLS 1.3 style: 4 zero bytes + 8-byte counter LE
+        assert_eq!(&nonce[..4], &[0u8; 4]);
+        assert_eq!(nonce[4], 1);
+        for &b in &nonce[5..] {
             assert_eq!(b, 0);
         }
     }
@@ -1737,76 +1747,12 @@ mod tests {
     fn counter_to_nonce_max() {
         let nonce = counter_to_nonce(u64::MAX);
         assert_eq!(nonce.len(), TRANSPORT_NONCE_SIZE);
-        // First 8 bytes should all be 0xFF (u64::MAX in little-endian)
-        for &b in &nonce[..8] {
+        // First 4 bytes are zero padding
+        assert_eq!(&nonce[..4], &[0u8; 4]);
+        // Last 8 bytes should all be 0xFF (u64::MAX in little-endian)
+        for &b in &nonce[4..] {
             assert_eq!(b, 0xFF);
         }
-        // Remaining bytes should be zero
-        for &b in &nonce[8..] {
-            assert_eq!(b, 0);
-        }
-    }
-
-    #[test]
-    fn xor_keystream_empty_data() {
-        let key = [1u8; 32];
-        let nonce = counter_to_nonce(0);
-        let result = xor_keystream(&key, &nonce, &[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn xor_keystream_preserves_length() {
-        let key = [2u8; 32];
-        let nonce = counter_to_nonce(0);
-        for len in [1, 32, 63, 64, 65, 128] {
-            let data = vec![0xAB; len];
-            let result = xor_keystream(&key, &nonce, &data);
-            assert_eq!(
-                result.len(),
-                data.len(),
-                "xor_keystream output length mismatch for input length {}",
-                len
-            );
-        }
-    }
-
-    #[test]
-    fn xor_keystream_roundtrip() {
-        let key = [3u8; 32];
-        let nonce = counter_to_nonce(42);
-        let original = b"Hello, encrypted P2P transport!";
-        let encrypted = xor_keystream(&key, &nonce, original);
-        let decrypted = xor_keystream(&key, &nonce, &encrypted);
-        assert_eq!(decrypted, original);
-    }
-
-    #[test]
-    fn transport_mac_deterministic() {
-        let mac_key = [4u8; 32];
-        let counter = 7u64;
-        let ciphertext = b"some ciphertext data";
-        let mac1 = transport_mac(&mac_key, counter, ciphertext);
-        let mac2 = transport_mac(&mac_key, counter, ciphertext);
-        assert_eq!(mac1, mac2);
-    }
-
-    #[test]
-    fn transport_mac_changes_with_input() {
-        let mac_key = [5u8; 32];
-        let counter = 0u64;
-        let ct1 = b"ciphertext A";
-        let ct2 = b"ciphertext B";
-        let mac1 = transport_mac(&mac_key, counter, ct1);
-        let mac2 = transport_mac(&mac_key, counter, ct2);
-        assert_ne!(
-            mac1, mac2,
-            "different ciphertext should produce different MAC"
-        );
-
-        // Also verify different counter with same ciphertext produces different MAC
-        let mac3 = transport_mac(&mac_key, 1, ct1);
-        assert_ne!(mac1, mac3, "different counter should produce different MAC");
     }
 
     #[test]
@@ -1923,8 +1869,5 @@ mod tests {
         assert_eq!(init_keys.send_key, resp_keys.recv_key);
         // Responder's send_key should equal initiator's recv_key
         assert_eq!(resp_keys.send_key, init_keys.recv_key);
-        // MAC keys follow the same pattern
-        assert_eq!(init_keys.send_mac_key, resp_keys.recv_mac_key);
-        assert_eq!(resp_keys.send_mac_key, init_keys.recv_mac_key);
     }
 }

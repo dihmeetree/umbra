@@ -18,6 +18,9 @@ pqcrypto-traits = "0.3"
 # Hashing (256-bit post-quantum security via Grover bound)
 blake3 = "1"
 
+# Authenticated encryption (standard AEAD)
+chacha20poly1305 = "0.10"
+
 # zk-STARK proving system (no trusted setup, post-quantum)
 winterfell = "0.13"
 

@@ -14,9 +14,12 @@ use super::types::{
 };
 
 /// Minimum conjectured security level (bits) required for proof acceptance.
-/// Production proofs must meet 128-bit conjectured security.
-/// Minimum conjectured security level in bits.
-/// 127 is the maximum achievable with Goldilocks quadratic extension (p^2 ≈ 2^128).
+/// Conjectured security = min(query, field, hash_collision):
+///   - Query: 42 queries × log2(8) + 16 grinding = 142 bits
+///   - Field: cubic extension p^3 ≈ 2^192 (headroom above hash bottleneck)
+///   - Hash collision: Rp64_256 → 256-bit output → 128-bit collision resistance
+///
+/// The hash function caps overall security at 128 bits.
 const MIN_SECURITY: u32 = 127;
 
 /// Verify a balance STARK proof.
@@ -80,13 +83,13 @@ mod tests {
     use winterfell::math::FieldElement;
 
     fn test_proof_options() -> winterfell::ProofOptions {
-        // Quadratic extension gives 128-bit field security (64 × 2).
-        // 42 queries × log2(8) + 10 grinding bits → comfortably ≥ 128-bit conjectured.
+        // Cubic extension gives 192-bit field security (64 × 3), but the
+        // Rp64_256 hash caps conjectured security at 128 bits (collision resistance).
         winterfell::ProofOptions::new(
             42, // num_queries
             8,  // blowup_factor
             10, // grinding_factor
-            winterfell::FieldExtension::Quadratic,
+            winterfell::FieldExtension::Cubic,
             8,
             255,
             winterfell::BatchingMethod::Linear,

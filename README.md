@@ -29,9 +29,10 @@ All cryptographic primitives are post-quantum secure:
 | Key encapsulation         | CRYSTALS-Kyber1024 (ML-KEM-1024) | NIST Level 5                         |
 | Commitments & Merkle tree | Rescue Prime (Rp64_256)          | STARK-friendly, post-quantum         |
 | General hashing           | BLAKE3                           | 256-bit (128-bit quantum via Grover) |
-| Zero-knowledge proofs     | zk-STARKs (winterfell)           | ~127-bit conjectured security        |
+| Zero-knowledge proofs     | zk-STARKs (winterfell)           | ~128-bit conjectured security        |
+| Authenticated encryption  | XChaCha20-Poly1305 / ChaCha20-Poly1305 | 256-bit key, standard AEAD   |
 
-No trusted setup is required. All proofs are transparent. The P2P transport layer uses the same post-quantum primitives (Kyber1024 for key exchange, Dilithium5 for mutual authentication, BLAKE3 for encryption and MACs), so all node-to-node communication is quantum-resistant.
+No trusted setup is required. All proofs are transparent. The P2P transport layer uses the same post-quantum primitives (Kyber1024 for key exchange, Dilithium5 for mutual authentication, ChaCha20-Poly1305 AEAD), so all node-to-node communication is quantum-resistant.
 
 ### Coin Emission
 
@@ -82,7 +83,7 @@ umbra/
       commitment.rs         Rescue Prime commitments with field element conversions
       nullifier.rs          Nullifier derivation and double-spend tracking
       proof.rs              Merkle tree (Rescue Prime), depth-20 padding, canonical roots
-      encryption.rs         Kyber KEM + BLAKE3 authenticated encryption
+      encryption.rs         Kyber KEM + XChaCha20-Poly1305 authenticated encryption
       vrf.rs                Verifiable Random Function for committee selection
       stark/
         mod.rs              STARK module root, proof options, type aliases
@@ -146,7 +147,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **902 tests**.
+**~28,500 lines of Rust** across 43 source files with **901 tests**.
 
 ## Building
 
@@ -482,8 +483,8 @@ Async TCP transport built on tokio with post-quantum encrypted channels:
   1. Hello exchange (plaintext) — version check + Kyber1024 public key exchange
   2. Kyber1024 KEM handshake — initiator encapsulates to responder's KEM public key
   3. Dilithium5 mutual authentication — both sides sign a transcript hash binding peer IDs + KEM ciphertext
-  4. BLAKE3-based XOR keystream cipher with counter-based nonces for all subsequent messages
-  5. Keyed-BLAKE3 MAC on every encrypted frame; counter-based replay protection
+  4. ChaCha20-Poly1305 AEAD for all subsequent messages (counter-based nonces, TLS 1.3 style)
+  5. Authenticated encryption with replay protection via monotonic counters
   6. Domain-separated session key derivation — initiator and responder derive mirrored send/recv keys from the shared secret
 - **Per-peer rate limiting** — token-bucket rate limiter (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 violations
 - **DDoS protections** — per-IP connection limits (max 4), /16 subnet concentration limits (max 8 inbound) for eclipse attack mitigation, snapshot chunk request rate limiting, bounded peer discovery sets, and snapshot buffer OOM prevention
@@ -524,7 +525,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 cargo test
 ```
 
-All 902 tests cover:
+All 901 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -533,7 +534,7 @@ All 902 tests cover:
 - **Rescue Prime** — commitments, field element conversions, state_digest_to_hash extraction, hash_to_felts large value reduction, felts_to_hash field-native preservation, exp7 zero and one edge cases
 - **Nullifiers** — determinism, double-spend detection, to_felts roundtrip, as_bytes, NullifierSet len/is_empty/contains/remove/iter
 - **Merkle tree** — construction, path verification, depth-20 canonical padding, restore from stored level data, last-appended path coverage, truncate_to_zero, truncate_partial (root matches fresh build), truncate_noop_when_larger, truncate_then_reappend, build_merkle_tree_empty, level_len, path_out_of_bounds
-- **Encryption** — message roundtrips, authentication, tamper detection, exact block boundary (32 bytes), cross-block boundary (33 bytes), oversized shared secret rejected, direct MAC tampering, decrypt with wrong shared secret, encrypt at max limit
+- **Encryption** — message roundtrips, authentication, tamper detection, exact block boundary (32 bytes), cross-block boundary (33 bytes), oversized shared secret rejected, AEAD tag tampering, decrypt with wrong shared secret, encrypt at max limit
 - **VRF** — evaluation, verification, committee selection statistics, Dilithium5 signing determinism, sort_key determinism, sort_key matches first 8 bytes, epoch_seed vrf_input determinism/differs by validator/differs by epoch, is_selected edge cases (total_validators=0, committee>=total), tampered value/commitment fails verify
 - **DAG** — insertion, diamond merges, finalized ordering, tip tracking, duplicate rejection, finalization status, topological sort of complex graphs, finalized count tracking, pruning of old finalized vertices; validation of too many parents, too many transactions, duplicate parents, no parents on non-genesis, too many unfinalized (DoS limit); finalized order excludes non-finalized vertices; finalize unknown vertex returns false; safe indexing after pruning (regression); ancestors_basic/diamond/bounded/genesis, advance_round_and_epoch, genesis_vertex_is_well_formed, tx_root_empty_transactions, get_returns_none_for_unknown
 - **BFT** — vote collection, leader rotation, duplicate rejection, cross-epoch replay prevention, equivocation detection/clearing, equivocation evidence verification (valid, wrong epoch, non-committee, same vertex, bad signature) and serialization roundtrip, quorum certification, multi-round certificate tracking, round advancement; wrong-round vote rejection, non-committee voter rejection, invalid signature rejection, reject votes don't count toward quorum, committee-of-one certification, fallback preserves all validators without truncation (regression), rejection_count accuracy, advance_epoch clears all state; create_vote standalone with signature verification, create_vote reject, is_vote_accepted tracking, leader_none_for_empty_committee, committee_member/vote without keypair, dynamic quorum values, validator activation epoch, inactive validators excluded from committee
@@ -549,7 +550,7 @@ All 902 tests cover:
 - **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty, single-tx edge case, populated pools); byte-limit eviction with total_bytes tracking, fee boundary rejection (equal fee rejected), drain cleans nullifier index, epoch-based expiry on insert, total_bytes accuracy across insert/remove/drain
 - **Storage** — vertex/transaction/nullifier/validator/coinbase persistence and roundtrips, not-found returns None, vertex overwrite, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval, commitment level bulk retrieval, snapshot import tree clearing
 - **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled; apply_vertex (basic state transition, too many transactions, intra-vertex duplicate nullifier, epoch fee accumulation regression); validate_transaction (wrong chain_id, double spend, already registered); record_nullifier Result return type (regression); coinbase output creation (with and without KEM key); eligible_validators activation epoch filtering
-- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; MAC verification failure on corrupted frames; counter replay rejection; self-connection detection; subnet prefix extraction (IPv4 /16, IPv6 fallback)
+- **P2P** — encrypted peer connection establishment, Kyber KEM handshake + Dilithium5 mutual auth, encrypted message exchange, session key symmetry, encrypted transport roundtrip, token-bucket rate limiting (burst, refill, over-burst rejection); peer reputation penalize-to-ban, ban expiry, reward recovery; AEAD tamper detection on corrupted frames; counter replay rejection; self-connection detection; subnet prefix extraction (IPv4 /16, IPv6 fallback)
 - **Node** — persistent signing + KEM keypair load/save roundtrip, creates data directory, rejects too-short/truncated key files, legacy key file upgrade adds KEM, file permissions restricted (unix), NodeConfig struct fields, NodeError display
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage, snapshot export/import roundtrip with state root verification; genesis coinbase creation and deterministic blinding
 - **Wallet web** — WalletWebState construction and cache behavior, wallet_exists (present/absent), RPC client without TLS, invalidate_cache clears loaded wallet, load_wallet returns None when no file, load_wallet caches on first load, save_wallet updates cache, error_page sets message; CSRF token validation (constant-time comparison, init rejects invalid CSRF, scan rejects invalid CSRF); HTTP handler tests via axum oneshot: dashboard redirects to init, init page 200/redirect, init action creates wallet+address files, security headers (X-Frame-Options, X-Content-Type-Options, Cache-Control, CSP), send/messages/history/address pages redirect without wallet, 404 for nonexistent routes
@@ -620,7 +621,7 @@ Transaction {
 - **Balance proof** is a zk-STARK proving that all input and output commitments open correctly and that sum(inputs) = sum(outputs) + fee. The proof is bound to the `tx_content_hash` to prevent proof transplant attacks. No values are revealed.
 - **Replay protection** — each transaction includes a `chain_id` (network identifier) and `expiry_epoch` (after which the tx is invalid), preventing cross-chain and stale-transaction replay.
 - **tx_binding** — the hash of all transaction content, included in proof challenges. Any modification to inputs, outputs, fee, chain_id, or expiry_epoch invalidates the balance proof.
-- **Messages** are Kyber-encrypted payloads (with 24-byte nonce + BLAKE3 MAC) that only the recipient can decrypt.
+- **Messages** are Kyber-encrypted payloads (XChaCha20-Poly1305 AEAD with 24-byte nonce) that only the recipient can decrypt.
 - **Transaction types** — in addition to regular transfers, transactions can carry validator registration or deregistration operations:
   - `ValidatorRegister` — includes the validator's Dilithium5 signing key and Kyber1024 KEM public key (required for receiving coinbase rewards). The fee must be at least `required_validator_bond(active_count) + MIN_TX_FEE`; the bond is escrowed in chain state, and only the remainder goes to epoch fees. The bond scales superlinearly with the number of active validators for Sybil resistance. No zk-STARK modifications are needed — the bond is carried through the existing fee field.
   - `ValidatorDeregister` — includes the validator ID, an auth signature proving ownership, and a `TxOutput` that receives the returned bond (added to the commitment tree). The bond return is secured by the STARK system: if the validator creates a wrong commitment, it will fail verification when they try to spend.
@@ -659,7 +660,7 @@ Proves in zero knowledge:
 | Post-quantum       | Yes (hash-based)                                          |
 | Field              | Goldilocks (p = 2^64 - 2^32 + 1)                          |
 | Hash in circuit    | Rescue Prime (Rp64_256)                                   |
-| Security           | ~127-bit conjectured (Goldilocks quadratic extension max) |
+| Security           | ~128-bit conjectured (capped by Rp64_256 collision resistance) |
 | Range proof        | 59-bit via bit decomposition (integrated in balance AIR)  |
 | Balance proof size | ~40 KB                                                    |
 | Spend proof size   | ~33 KB                                                    |
@@ -744,6 +745,7 @@ Proves in zero knowledge:
 | `pqcrypto-kyber`                 | CRYSTALS-Kyber1024 post-quantum key encapsulation         |
 | `pqcrypto-traits`                | Trait definitions for PQ crypto types                     |
 | `blake3`                         | Fast, quantum-secure hashing                              |
+| `chacha20poly1305`               | Standard AEAD (XChaCha20-Poly1305 / ChaCha20-Poly1305)   |
 | `winterfell`                     | zk-STARK prover/verifier (Rescue Prime, Goldilocks field) |
 | `argon2`                         | Memory-hard password hashing for wallet file encryption   |
 | `zeroize`                        | Secure memory clearing for secret key material            |
@@ -786,12 +788,12 @@ All transaction validity is verified via zk-STARKs:
 - **Full transaction validation on apply** — `apply_transaction()` calls `validate_structure()` before any state mutation, verifying all zk-STARK proofs (balance + spend) and structural integrity
 - **VRF anti-grinding** — VRF outputs include a `proof_commitment` (hash of the proof) enabling a commit-reveal scheme that prevents validators from grinding on epoch seeds
 - **Plaintext size limits** — `encrypt_with_shared_secret` rejects plaintexts exceeding `MAX_ENCRYPT_PLAINTEXT`, preventing memory exhaustion attacks
-- **Secure memory clearing** — all secret key material (`SigningSecretKey`, `KemSecretKey`, `SharedSecret`, `BlindingFactor`, `StealthSpendInfo`, `BalanceWitness`, `SpendWitness`) is zeroized on drop via the `zeroize` crate and volatile writes; derived encryption/MAC keys and keystream intermediates are explicitly zeroized after use
+- **Secure memory clearing** — all secret key material (`SigningSecretKey`, `KemSecretKey`, `SharedSecret`, `BlindingFactor`, `StealthSpendInfo`, `BalanceWitness`, `SpendWitness`) is zeroized on drop via the `zeroize` crate and volatile writes; derived AEAD keys are explicitly zeroized after use
 - **Vote round validation** — BFT `receive_vote()` rejects votes for rounds other than the current round, preventing future-round injection attacks
 - **Chain-bound vote signatures** — vote signatures include `chain_id`, preventing cross-chain vote replay attacks
 - **Transaction expiry enforcement** — `validate_structure()` enforces `expiry_epoch`, rejecting stale transactions
-- **127-bit STARK security** — proof verification requires at least 127-bit conjectured security (maximum for Goldilocks quadratic extension), up from the original 95-bit threshold
-- **BLAKE3 keyed MAC** — authenticated encryption uses `blake3::Hasher::new_keyed()` (proper keyed mode) rather than feeding key material as data
+- **128-bit STARK security** — proof verification requires at least 127-bit conjectured security; cubic field extension (p^3 ~ 2^192) ensures the field is not the bottleneck, while Rp64_256 hash collision resistance (128 bits) caps the overall conjectured security
+- **Standard AEAD** — all authenticated encryption uses XChaCha20-Poly1305 (transactions, wallet) or ChaCha20-Poly1305 (P2P transport) instead of custom constructions
 - **No plaintext metadata** — `TxMessage` contains only the encrypted payload; all routing tags and metadata are inside the ciphertext, preventing traffic analysis
 - **Message count limits** — transactions are limited to 16 messages (`MAX_MESSAGES_PER_TX`), enforced during validation
 - **KEM reuse for note encryption** — stealth address KEM shared secret is reused for encrypting note data, avoiding a redundant second KEM encapsulation per output
@@ -815,7 +817,7 @@ All transaction validity is verified via zk-STARKs:
 - **Rescue sponge domain separation** — all four Rescue Prime hash functions use distinct nonzero domain tags in the sponge capacity: `commitment` (`"commit"`), `nullifier` (`"null"`), `proof_link` (`"link"`), and `merge` (`"merge"`). This prevents cross-function collisions regardless of rate inputs, enforced in the STARK AIR via boundary assertions and transition constraints
 - **Chain ID enforcement** — `apply_transaction()` explicitly checks `chain_id` against the chain state, providing defense-in-depth beyond the implicit binding via balance proofs
 - **Minimum transaction fee** — `validate_structure()` enforces `MIN_TX_FEE`, preventing zero-fee spam; transfer fees are deterministic from transaction shape (see above); coinbase funding bypasses validation by adding outputs directly to state
-- **MAC boundary protection** — the encrypt-then-MAC construction length-prefixes each variable-length field (ciphertext, KEM ciphertext) before computing the MAC, preventing boundary-ambiguity attacks
+- **AEAD ciphertext binding** — XChaCha20-Poly1305 encrypts with the KEM ciphertext as Associated Authenticated Data (AAD), binding the ephemeral key exchange to the encrypted payload and preventing ciphertext transplant attacks
 - **Equivocation detection** — BFT tracks `(voter_id, round) → vertex_id` and records `EquivocationEvidence` when a validator votes for conflicting vertices in the same round
 - **Pending transaction tracking** — wallet outputs use a three-state lifecycle (Unspent → Pending → Spent) with explicit `confirm_transaction` / `cancel_transaction` and automatic expiry after `PENDING_EXPIRY_EPOCHS` to prevent double-spend of outputs in unconfirmed transactions and recover stuck funds
 - **VRF commitment verification** — `VrfOutput::verify()` requires a pre-registered proof commitment, enforcing the commit-reveal anti-grinding scheme; `verify_locally()` is available for self-checks only
@@ -828,7 +830,7 @@ All transaction validity is verified via zk-STARKs:
 - **Deterministic coinbase blinding** — coinbase output blinding factors are derived from `hash_domain("umbra.coinbase.blinding", vertex_id || epoch)`, making amounts publicly verifiable while using the same commitment format as private outputs
 - **Consensus-verifiable supply** — `total_minted` is included in the state root hash, so any disagreement on emission is detected by state root divergence
 - **Fee redirection fallback** — if a vertex proposer lacks a KEM key (cannot receive coinbase), fees are returned to the epoch fee pool rather than being lost
-- **Post-quantum encrypted transport** — all P2P connections use Kyber1024 KEM for key exchange and Dilithium5 for mutual authentication, followed by BLAKE3-based XOR keystream encryption with keyed-BLAKE3 MACs, providing quantum-resistant confidentiality and integrity for all inter-node communication
+- **Post-quantum encrypted transport** — all P2P connections use Kyber1024 KEM for key exchange and Dilithium5 for mutual authentication, followed by ChaCha20-Poly1305 AEAD with counter-based nonces, providing quantum-resistant confidentiality and integrity for all inter-node communication
 - **Transport replay protection** — encrypted frames include monotonic counters; out-of-order or replayed frames are rejected
 - **Transcript-bound authentication** — handshake auth signatures cover a transcript hash binding both peer IDs and the KEM ciphertext, preventing relay and MITM attacks
 - **Per-peer rate limiting** — token-bucket rate limiter per connection (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 strikes, preventing message-flooding DoS
@@ -842,7 +844,7 @@ All transaction validity is verified via zk-STARKs:
 - **Bounded DAG traversal** — ancestor queries are depth-bounded (default `2 * EPOCH_LENGTH`), preventing unbounded memory usage from deep graph exploration
 - **Secret key encapsulation** — `SigningSecretKey` and `KemSecretKey` inner bytes are `pub(crate)`, preventing external crates from directly reading secret key material
 - **RPC localhost binding** — the RPC server binds to `127.0.0.1` by default, requiring explicit opt-in (`--rpc-host 0.0.0.0`) for network exposure
-- **Wallet recovery phrases** — 24-word BIP39 mnemonic with BLAKE3 checksum; key material encrypted with a BLAKE3-derived keystream. Both the phrase and the encrypted backup file are required for recovery, preventing single-point-of-failure key loss
+- **Wallet recovery phrases** — 24-word BIP39 mnemonic with BLAKE3 checksum; key material encrypted with XChaCha20-Poly1305. Both the phrase and the encrypted backup file are required for recovery, preventing single-point-of-failure key loss
 - **Sled-backed nullifier storage** — nullifier lookups check in-memory set first, then fall back to sled, allowing the nullifier set to scale beyond available RAM
 - **Parallel proof verification** — vertex validation uses `rayon::par_iter()` for independent transaction proof verification, with sequential state mutation, maintaining correctness while improving throughput
 - **Dandelion++ sender privacy** — new transactions propagate through a stem phase (private forwarding to single peers) before fluff (broadcast), obscuring the originating node
@@ -865,7 +867,7 @@ All transaction validity is verified via zk-STARKs:
 - **Wallet web security headers** — the wallet web UI sets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and `Content-Security-Policy` on all responses
 - **Atomic wallet file writes** — wallet data is written to a temporary file then atomically renamed, preventing data loss from interrupted writes
 - **Non-blocking wallet I/O** — synchronous wallet file operations are wrapped in `spawn_blocking()` to avoid blocking the async runtime
-- **XOR keystream per-block derivation** — the BLAKE3 keystream incorporates a random nonce and block index into each `derive_key` call, ensuring unique keystream blocks for wallet recovery encryption even if the same mnemonic is reused
+- **AEAD recovery encryption** — wallet recovery backups use XChaCha20-Poly1305 with a BLAKE3-derived key and random nonce, providing authenticated encryption even if the same mnemonic is reused
 - **Error message sanitization** — wallet CLI error messages do not expose internal file paths to users; details are logged server-side via `tracing::error!`
 - **Mnemonic zeroization** — recovery phrase words are zeroized from memory immediately after display to minimize secret exposure window
 - **Multi-transaction mempool eviction** — when the mempool is full, lowest-fee transactions are evicted in a loop until space is available, rather than evicting only one
@@ -908,7 +910,7 @@ All transaction validity is verified via zk-STARKs:
 - **Deterministic DAG finalization** — `finalized_order()` BFS uses deterministic tie-breaking `(round, vertex_id)` when ordering siblings, ensuring all nodes produce identical finalization sequences
 - **Snapshot integrity verification** — snapshot import verifies nullifier count, nullifier hash, validator count, and commitment tree root in memory before persisting to storage, preventing state corruption from malicious snapshots
 - **Nullifier rollback on failure** — if vertex application fails after recording nullifiers to sled, the nullifiers are rolled back to maintain storage consistency
-- **Wallet file encryption** — wallet private keys can be encrypted at rest using a password-derived key (Argon2id memory-hard key derivation with 64 MiB / 3 iterations, random 32-byte salt and 24-byte nonce, XOR keystream cipher, encrypt-then-MAC with keyed BLAKE3, constant-time MAC verification)
+- **Wallet file encryption** — wallet private keys can be encrypted at rest using a password-derived key (Argon2id memory-hard key derivation with 64 MiB / 3 iterations, random 32-byte salt and 24-byte nonce, XChaCha20-Poly1305 AEAD)
 - **CSRF protection** — wallet web UI forms include per-session CSRF tokens validated with constant-time comparison on all state-mutating POST requests, preventing cross-site request forgery
 - **Mempool proof verification** — mempool can optionally verify zk-STARK balance and spend proofs on insertion, preventing invalid transactions from consuming pool capacity
 - **Mempool finalized nullifier checking** — mempool insertion checks nullifiers against finalized chain state via an external callback, rejecting transactions that attempt to spend already-finalized outputs
@@ -921,7 +923,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 902 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 901 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

@@ -1391,7 +1391,6 @@ mod tests {
                         kem_ciphertext: KemCiphertext(vec![nonce]),
                         nonce: [nonce; 24],
                         ciphertext: vec![nonce],
-                        mac: [nonce; 32],
                     },
                 }],
                 fee: 0,

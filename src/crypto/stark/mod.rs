@@ -4,7 +4,7 @@
 //! field (p = 2^64 - 2^32 + 1) to provide zero-knowledge proofs with:
 //! - No trusted setup
 //! - Post-quantum security (hash-based)
-//! - ~128-bit conjectured security
+//! - ~128-bit conjectured security (capped by Rp64_256 collision resistance)
 //!
 //! Two proof types:
 //! - **BalanceStarkProof**: proves commitment openings + balance equation + range
@@ -47,7 +47,7 @@ pub fn light_proof_options() -> ProofOptions {
         42, // num_queries
         8,  // blowup_factor (winterfell minimum)
         10, // grinding_factor (reduced from 16)
-        FieldExtension::Quadratic,
+        FieldExtension::Cubic,
         8,   // FRI folding factor
         255, // FRI max remainder degree
         BatchingMethod::Linear,
@@ -57,15 +57,16 @@ pub fn light_proof_options() -> ProofOptions {
 
 /// Default STARK proof options targeting ~128-bit conjectured security.
 ///
-/// Uses quadratic field extension (128-bit field security) so the bottleneck
-/// is query security: 42 queries × log2(8) + 16 grinding = 142 bits,
-/// capped by collision resistance (128) → 128-bit conjectured security.
+/// Uses cubic field extension (192-bit field security) so the field is not
+/// the bottleneck. Query security: 42 queries × log2(8) + 16 grinding = 142 bits.
+/// Actual conjectured security is capped at 128 bits by Rp64_256 hash collision
+/// resistance (256-bit output → 128-bit birthday bound).
 pub fn default_proof_options() -> ProofOptions {
     ProofOptions::new(
         42, // num_queries
         8,  // blowup_factor
         16, // grinding_factor
-        FieldExtension::Quadratic,
+        FieldExtension::Cubic,
         8,   // FRI folding factor
         255, // FRI max remainder degree
         BatchingMethod::Linear,

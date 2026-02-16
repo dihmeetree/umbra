@@ -338,7 +338,7 @@ pub fn run_demo() {
     println!("    - Signatures:  CRYSTALS-Dilithium5 (NIST PQC Level 5)");
     println!("    - Encryption:  CRYSTALS-Kyber1024  (NIST PQC Level 5)");
     println!("    - Hashing:     Rescue Prime / BLAKE3 (post-quantum secure)");
-    println!("    - Proofs:      zk-STARK (~127-bit conjectured security)");
+    println!("    - Proofs:      zk-STARK (~128-bit conjectured security)");
     println!("    - No trusted setup required (fully transparent)");
     println!();
     println!("  Consensus: DAG-BFT (Proof of Verifiable Participation)");
