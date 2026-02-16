@@ -96,7 +96,7 @@ pub fn build_merkle_tree(leaves: &[Hash]) -> (Hash, Vec<Vec<MerkleNode>>) {
 /// `zero_subtree[0]` = hash of empty leaf = [0; 32]
 /// `zero_subtree[n]` = merge(zero_subtree[n-1], zero_subtree[n-1])
 ///
-/// L2: Cached via `OnceLock` to avoid recomputing on every call.
+/// Cached via `OnceLock` to avoid recomputing on every call.
 fn zero_subtree_hashes() -> &'static Vec<Hash> {
     static CACHE: std::sync::OnceLock<Vec<Hash>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {

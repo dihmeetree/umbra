@@ -164,7 +164,7 @@ impl Certificate {
             return false;
         }
 
-        // S2: Reject certificates with more signatures than committee members.
+        // Reject certificates with more signatures than committee members.
         // A valid certificate has at most one signature per committee member.
         if self.signatures.len() > committee.len() {
             return false;
@@ -306,7 +306,7 @@ impl BftState {
 
     /// Get the leader for the current round (round-robin among committee).
     ///
-    /// **L9: Known trade-off -- predictable selection.** Round-robin leader
+    /// **Known trade-off -- predictable selection.** Round-robin leader
     /// rotation is deterministic and predictable: any observer who knows the
     /// committee order can predict which validator will propose in each round.
     /// This was chosen for simplicity and guaranteed liveness over unpredictable
@@ -371,7 +371,7 @@ impl BftState {
         // Verify the voter is on the committee
         let voter = self.committee.iter().find(|v| v.id == vote.voter_id)?;
 
-        // S3: Verify signature BEFORE expensive VRF check (cheaper check first).
+        // Verify signature BEFORE expensive VRF check (cheaper check first).
         // Bound to chain_id + epoch + round + vertex + vote_type.
         let msg = vote_sign_data(
             &vote.vertex_id,
@@ -384,7 +384,7 @@ impl BftState {
             return None;
         }
 
-        // H1: Verify VRF proof on the vote to confirm the voter was genuinely selected.
+        // Verify VRF proof on the vote to confirm the voter was genuinely selected.
         // Uses full verify() with commitment tracking to prevent VRF grinding.
         if let Some(seed) = &self.epoch_seed {
             if self.total_validators > self.committee.len() {
@@ -443,7 +443,7 @@ impl BftState {
         let round_key = (vote.voter_id, vote.round);
         if let Some(&prev_vertex) = self.round_votes.get(&round_key) {
             if prev_vertex != vote.vertex_id {
-                // H10: Only record one evidence per validator (one is enough to slash)
+                // Only record one evidence per validator (one is enough to slash)
                 let already_recorded = self
                     .equivocations
                     .iter()
@@ -539,7 +539,7 @@ impl BftState {
 
     /// Advance to the next round, clearing stale vote data from previous rounds.
     pub fn advance_round(&mut self) {
-        // M10: Clear votes and round_votes from the completed round to prevent
+        // Clear votes and round_votes from the completed round to prevent
         // unbounded memory growth.
         self.votes.clear();
         self.round_votes.clear();
@@ -695,7 +695,7 @@ pub fn select_committee(
             let vrf_output = VrfOutput::evaluate(keypair, &input);
             candidates.push((validator.clone(), vrf_output));
         }
-        // S1: Warn when committee is below MIN_COMMITTEE_SIZE.
+        // Warn when committee is below MIN_COMMITTEE_SIZE.
         // With n < 4 validators, BFT tolerance is degraded (f=0 for n<=3).
         if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
             tracing::warn!(
@@ -763,7 +763,7 @@ pub fn select_committee_from_proofs(
             }
             candidates.push((validator.clone(), vrf_output.clone()));
         }
-        // S1: Warn when committee is below MIN_COMMITTEE_SIZE.
+        // Warn when committee is below MIN_COMMITTEE_SIZE.
         if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
             tracing::warn!(
                 committee_size = candidates.len(),

@@ -110,7 +110,7 @@ pub mod constants {
     /// Maximum round lag from peers before triggering re-sync.
     pub const MAX_ROUND_LAG: u64 = 5;
 
-    /// Peer exchange interval in milliseconds (F5: peer discovery gossip).
+    /// Peer exchange interval in milliseconds (peer discovery gossip).
     pub const PEER_EXCHANGE_INTERVAL_MS: u64 = 60_000;
     /// Maximum new peers to connect per discovery round (F5).
     pub const PEER_DISCOVERY_MAX: usize = 5;
@@ -276,7 +276,7 @@ pub type Hash = [u8; 32];
 
 /// Compute a domain-separated BLAKE3 hash.
 ///
-/// L1: Takes `&[u8]` rather than `&str` for ergonomics with `b""` literals.
+/// Takes `&[u8]` rather than `&str` for ergonomics with `b""` literals.
 /// The domain MUST be valid UTF-8 (all Umbra domains use ASCII).
 /// Panics at runtime if domain is not valid UTF-8 — this is a programming error.
 pub fn hash_domain(domain: &[u8], data: &[u8]) -> Hash {

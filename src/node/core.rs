@@ -118,7 +118,7 @@ pub struct Node {
     seen_messages_prev: HashSet<Hash>,
     /// Counter for sync batch rounds (reset on new sync peer).
     sync_rounds: u64,
-    /// S9: Last claimed finalized count from sync peer (for consistency check).
+    /// Last claimed finalized count from sync peer (for consistency check).
     sync_peer_last_claimed: u64,
     /// Cached serialized snapshot for serving to peers:
     /// (bytes, total_chunks, meta, created_at).
@@ -250,7 +250,7 @@ pub fn load_or_generate_keypair(
         bytes.extend_from_slice(&kem_kp.public.0);
         bytes.extend_from_slice(&kem_kp.secret.0);
         std::fs::write(&key_path, &bytes)?;
-        // H4: Restrict key file permissions to owner-only
+        // Restrict key file permissions to owner-only
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -317,7 +317,7 @@ impl Node {
             let vrf = VrfOutput::evaluate(&config.keypair, &vrf_input);
 
             let total_validators = ledger.state.total_validators();
-            // H1: Set epoch context for VRF verification on incoming votes
+            // Set epoch context for VRF verification on incoming votes
             bft.set_epoch_context(epoch_seed, total_validators);
             // Set initial committee from genesis validators so epoch 0 votes are accepted
             bft.committee = ledger
@@ -674,7 +674,7 @@ impl Node {
                 }
             }
             Message::NewVertex(vertex) => {
-                // Fix 6: Gossip deduplication -- skip already-seen vertices
+                // Gossip deduplication -- skip already-seen vertices
                 if self.is_seen(&vertex.id.0) {
                     return; // Already processed this vertex
                 }
@@ -682,7 +682,7 @@ impl Node {
 
                 let mut state = self.state.write().await;
 
-                // C3: Validate VRF proof before accepting the vertex.
+                // Validate VRF proof before accepting the vertex.
                 // Genesis vertex (round=0) has no VRF proof.
                 if vertex.round > 0 {
                     let epoch_seed = state.ledger.state.epoch_seed().clone();
@@ -705,7 +705,7 @@ impl Node {
                     }
                 }
 
-                // C2: Validate all transactions structurally before inserting.
+                // Validate all transactions structurally before inserting.
                 let current_epoch = state.ledger.state.epoch();
                 for tx in &vertex.transactions {
                     if let Err(e) = tx.validate_structure(current_epoch) {
@@ -769,7 +769,7 @@ impl Node {
                 }
             }
             Message::BftVote(vote) => {
-                // Fix 6: Gossip deduplication for votes.
+                // Gossip deduplication for votes.
                 // Include epoch/round to prevent cross-epoch vote suppression.
                 let vote_dedup_key = crate::hash_concat(&[
                     &vote.voter_id,
@@ -784,7 +784,7 @@ impl Node {
 
                 let mut state = self.state.write().await;
                 let vote_round = vote.round;
-                // H5: Only re-broadcast if the vote was accepted
+                // Only re-broadcast if the vote was accepted
                 if let Some(cert) = state.bft.receive_vote(vote.clone()) {
                     // Quorum reached -- finalize
                     self.finalize_vertex_inner(&mut state, &cert.vertex_id)
@@ -824,7 +824,7 @@ impl Node {
                     );
                     return;
                 }
-                // C1: Verify certificate before finalizing
+                // Verify certificate before finalizing
                 let committee = state.bft.committee.clone();
                 let chain_id = state.bft.chain_id;
                 if !cert.verify(&committee, &chain_id) {
@@ -908,7 +908,7 @@ impl Node {
                 }
             }
             Message::PeersResponse(peers) => {
-                // F5: Limit how many new peers we connect per discovery round
+                // Limit how many new peers we connect per discovery round
                 let mut connected = 0;
                 for peer_info in peers.iter().take(crate::constants::MAX_PEERS) {
                     if connected >= crate::constants::PEER_DISCOVERY_MAX {
@@ -1090,12 +1090,12 @@ impl Node {
                     let target_epoch = *target_epoch;
                     let post_snapshot = *post_snapshot;
 
-                    // Fix 7: Verify total_finalized is within reasonable bounds
+                    // Verify total_finalized is within reasonable bounds
                     let our_finalized_count = {
                         let st = self.state.read().await;
                         st.storage.finalized_vertex_count().unwrap_or(0)
                     };
-                    // S9: Reject if peer's claimed count decreased (consistency check)
+                    // Reject if peer's claimed count decreased (consistency check)
                     if total_finalized < self.sync_peer_last_claimed {
                         tracing::warn!(
                             claimed = total_finalized,
@@ -1126,7 +1126,7 @@ impl Node {
                         return;
                     }
 
-                    // Fix 7: Check max sync rounds
+                    // Check max sync rounds
                     self.sync_rounds += 1;
                     if self.sync_rounds > MAX_SYNC_ROUNDS {
                         tracing::warn!(
@@ -1147,7 +1147,7 @@ impl Node {
                     let mut applied = 0usize;
 
                     for (seq, vertex) in vertices {
-                        // L4: Validate vertex epoch doesn't jump unreasonably
+                        // Validate vertex epoch doesn't jump unreasonably
                         if vertex.epoch > target_epoch + 1 {
                             tracing::warn!(
                                 epoch = vertex.epoch,
@@ -1364,7 +1364,7 @@ impl Node {
                     let _ = self.p2p.send_to(from, Message::GetVertex(tip)).await;
                 }
             }
-            // Fix 4: VRF validation for VertexResponse
+            // VRF validation for VertexResponse
             Message::VertexResponse(maybe_vertex) => {
                 if let Some(vertex) = maybe_vertex {
                     let mut state = self.state.write().await;
@@ -1898,7 +1898,7 @@ impl Node {
                         );
                     }
                 }
-                // M5: Clear processed evidence to avoid re-processing
+                // Clear processed evidence to avoid re-processing
                 state.bft.clear_equivocations();
 
                 // Broadcast evidence to all peers so they can slash independently
@@ -1927,7 +1927,7 @@ impl Node {
                 state.bft.advance_round();
                 state.ledger.dag.advance_round();
 
-                // M1: Check for epoch transition
+                // Check for epoch transition
                 let dag_epoch = state.ledger.dag.epoch();
                 if dag_epoch > state.bft.epoch {
                     let (fees, new_seed) = state.ledger.state.advance_epoch();
@@ -1943,7 +1943,7 @@ impl Node {
                     state.bft.set_epoch_context(new_seed, total_validators);
                     state.bft.clear_epoch_caches();
 
-                    // Fix 2: Update committee from current active validators
+                    // Update committee from current active validators
                     state.bft.committee = state
                         .ledger
                         .state
@@ -1974,7 +1974,7 @@ impl Node {
                         "Epoch validator summary"
                     );
 
-                    // F16: Check protocol upgrade signals (per-validator counts)
+                    // Check protocol upgrade signals (per-validator counts)
                     let total_validators_signaling: usize = state
                         .version_signals
                         .values()
@@ -2001,7 +2001,7 @@ impl Node {
                     }
                     state.version_signals.clear();
 
-                    // F13: DAG memory pruning -- remove old finalized vertices
+                    // DAG memory pruning -- remove old finalized vertices
                     if dag_epoch > crate::constants::PRUNING_RETAIN_EPOCHS {
                         let before = dag_epoch - crate::constants::PRUNING_RETAIN_EPOCHS;
                         let pruned = state.ledger.dag.prune_finalized(before);
@@ -2108,7 +2108,7 @@ impl Node {
         }
     }
 
-    /// Fix 3: Dandelion++ stem-forward: send tx to one *random* peer, track hops.
+    /// Dandelion++ stem-forward: send tx to one *random* peer, track hops.
     ///
     /// The delayed send is spawned as a background task to avoid blocking the
     /// event loop during the exponential-distribution sleep.
@@ -2215,7 +2215,7 @@ impl Node {
         }
     }
 
-    /// Fix 2: Sync our VRF output from BFT state after epoch transitions.
+    /// Sync our VRF output from BFT state after epoch transitions.
     ///
     /// Called after message handling since `finalize_vertex_inner` (which takes
     /// `&self`) cannot update `self.our_vrf_output` directly. This method

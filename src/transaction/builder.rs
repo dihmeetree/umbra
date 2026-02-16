@@ -154,7 +154,7 @@ impl TransactionBuilder {
     pub fn build(self) -> Result<Transaction, TxBuildError> {
         let proof_opts = self.proof_options.unwrap_or_else(default_proof_options);
 
-        // M13: Enforce MAX_TX_IO limits early to give clear errors
+        // Enforce MAX_TX_IO limits early to give clear errors
         if self.inputs.len() > crate::constants::MAX_TX_IO {
             return Err(TxBuildError::TooManyInputs);
         }

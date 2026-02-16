@@ -447,7 +447,7 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
     println!("Both the phrase AND the wallet.recovery file are needed to recover.");
     println!();
 
-    // L21: Prompt user to confirm they have written down the phrase before
+    // Prompt user to confirm they have written down the phrase before
     // clearing it from the terminal. This reduces the risk of the phrase
     // being lost if the user did not notice or save it.
     println!("Have you written down the recovery phrase? (type 'yes' to confirm)");
@@ -562,7 +562,7 @@ pub async fn scan_chain(
         }
 
         for entry in &result.vertices {
-            // L20: Check sequence contiguity -- each vertex should have
+            // Check sequence contiguity -- each vertex should have
             // sequence == previous + 1. A gap may indicate the node skipped
             // vertices or data was lost.
             let expected_seq = current_after + 1;

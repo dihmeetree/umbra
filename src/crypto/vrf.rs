@@ -90,7 +90,7 @@ impl VrfOutput {
     ) -> bool {
         let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
-        // L3: Validate proof length before constructing a Signature, since
+        // Validate proof length before constructing a Signature, since
         // Signature(pub(crate) Vec<u8>) bypasses deserialization-time size checks.
         if self.proof.len() != crate::crypto::keys::DILITHIUM5_SIG_BYTES {
             return false;
@@ -139,7 +139,7 @@ impl VrfOutput {
     pub fn verify_proof_only(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
         let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
-        // L3: Validate proof length before constructing a Signature.
+        // Validate proof length before constructing a Signature.
         if self.proof.len() != crate::crypto::keys::DILITHIUM5_SIG_BYTES {
             return false;
         }

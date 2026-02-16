@@ -147,7 +147,7 @@ async fn write_encrypted(
     padded.extend_from_slice(&payload);
     padded.resize(padded_len, 0u8);
 
-    // S7: Reject if counter would overflow (prevents nonce reuse).
+    // Reject if counter would overflow (prevents nonce reuse).
     // At 1M msg/sec this takes ~585,000 years, but check defensively.
     if *counter >= u64::MAX / 2 {
         return Err(P2pError::SendFailed(
@@ -222,7 +222,7 @@ async fn read_encrypted(
             "unexpected message counter".into(),
         ));
     }
-    // S7: Match the write-side overflow check
+    // Match the write-side overflow check
     if *expected_counter >= u64::MAX / 2 {
         return Err(P2pError::ConnectionFailed(
             "message counter exhausted, reconnect required".into(),
@@ -243,7 +243,7 @@ async fn read_encrypted(
         ));
     }
     let real_len = u32::from_le_bytes(plaintext[..4].try_into().unwrap()) as usize;
-    // S8: Reject zero-length payloads (must contain at least a message type byte)
+    // Reject zero-length payloads (must contain at least a message type byte)
     if real_len == 0 {
         return Err(P2pError::ConnectionFailed(
             "decrypted payload is empty".into(),
@@ -534,7 +534,7 @@ async fn p2p_loop(
         tokio::select! {
             result = listener.accept() => {
                 if let Ok((stream, addr)) = result {
-                    // F8: Connection diversity — enforce inbound slot limit
+                    // Connection diversity — enforce inbound slot limit
                     if inbound_count >= max_inbound || peers.len() >= config.max_peers {
                         continue;
                     }
@@ -568,7 +568,7 @@ async fn p2p_loop(
             Some(cmd) = command_rx.recv() => {
                 match cmd {
                     P2pCommand::Connect(addr) => {
-                        // F8: Connection diversity — enforce outbound slot limit
+                        // Connection diversity — enforce outbound slot limit
                         if outbound_count >= max_outbound || peers.len() >= config.max_peers {
                             continue;
                         }
@@ -646,7 +646,7 @@ async fn p2p_loop(
                             tracing::debug!("Rejected self-connection");
                             continue;
                         }
-                        // F7: Check if peer is banned
+                        // Check if peer is banned
                         if let Some(rep) = reputations.get(&peer_id) {
                             if rep.is_banned() {
                                 tracing::debug!(peer = %hex::encode(&peer_id[..8]), "Rejected banned peer");
@@ -654,7 +654,7 @@ async fn p2p_loop(
                             }
                         }
                         if peers.len() < config.max_peers && !peers.contains_key(&peer_id) {
-                            // F8: Update connection direction counters
+                            // Update connection direction counters
                             if is_outbound {
                                 outbound_count += 1;
                             } else {
@@ -812,7 +812,7 @@ async fn p2p_loop(
                         let _ = event_tx.send(P2pEvent::MessageReceived { from, message }).await;
                     }
                     InternalEvent::Disconnected(peer_id) => {
-                        // F8: Update connection direction counters
+                        // Update connection direction counters
                         if let Some(peer) = peers.remove(&peer_id) {
                             if peer.is_outbound {
                                 outbound_count = outbound_count.saturating_sub(1);

@@ -44,7 +44,7 @@ pub struct SigningSecretKey(pub(crate) Vec<u8>);
 /// A Dilithium5 detached signature (4627 bytes, ML-DSA-87).
 ///
 /// Inner bytes are `pub(crate)` to enforce size validation through
-/// deserialization. L6: Size is validated during deserialization.
+/// deserialization. Size is validated during deserialization.
 #[derive(Clone, Debug)]
 pub struct Signature(pub(crate) Vec<u8>);
 
@@ -202,7 +202,7 @@ pub struct KemSecretKey(pub(crate) Vec<u8>);
 /// A Kyber1024 ciphertext (encapsulated shared secret).
 ///
 /// Inner bytes are `pub(crate)` to enforce size validation through
-/// deserialization. L5: Size is validated during deserialization.
+/// deserialization. Size is validated during deserialization.
 #[derive(Clone, Debug)]
 pub struct KemCiphertext(pub(crate) Vec<u8>);
 

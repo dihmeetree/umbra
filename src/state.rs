@@ -241,8 +241,8 @@ impl ChainState {
             }
         }
 
-        // H9: Pass 1 — validate all transactions without applying.
-        // F14: Use rayon parallel iteration for independent tx validation.
+        // Pass 1 — validate all transactions without applying.
+        // Use rayon parallel iteration for independent tx validation.
         if vertex.transactions.len() > 1 {
             use rayon::prelude::*;
             let results: Vec<Result<(), StateError>> = vertex
@@ -307,7 +307,7 @@ impl ChainState {
                     // Rollback: restore state to pre-Pass-2 condition
                     self.epoch_fees = fees_before;
                     self.nullifier_hash = nullifier_hash_before;
-                    // S5: Complete the full rollback loop before returning, but
+                    // Complete the full rollback loop before returning, but
                     // track sled failures. If any sled removal fails, the nullifier
                     // remains as "spent" in persistent storage (fail-closed: safe
                     // against double-spend, but locks the UTXO permanently).
@@ -355,7 +355,7 @@ impl ChainState {
                         }
                         self.validator_bonds.insert(*vid, *bond);
                     }
-                    // S5: If sled rollback failed, return a storage error instead
+                    // If sled rollback failed, return a storage error instead
                     // of the original error to surface the persistence issue.
                     if let Some(sled_msg) = rollback_err {
                         return Err(StateError::StoragePersistenceFailed(format!(
@@ -384,7 +384,7 @@ impl ChainState {
         let coinbase = if total_coinbase > 0 {
             let output = self.create_coinbase_output(&vertex.id, &vertex.proposer, total_coinbase);
             if output.is_none() {
-                // L15: Log when coinbase creation fails despite non-zero reward.
+                // Log when coinbase creation fails despite non-zero reward.
                 // This typically means the proposer has no KEM public key registered,
                 // so the reward is effectively burned.
                 tracing::warn!(
@@ -480,7 +480,7 @@ impl ChainState {
                 if !validator.public_key.verify(&sign_data, auth_signature) {
                     return Err(StateError::InvalidDeregisterAuth);
                 }
-                // C4: Verify that the bond return commitment opens to the escrowed bond amount
+                // Verify that the bond return commitment opens to the escrowed bond amount
                 let bond = self
                     .validator_bonds
                     .get(validator_id)
@@ -534,7 +534,7 @@ impl ChainState {
             } => {
                 let vid = signing_key.fingerprint();
 
-                // M15: Re-check bond requirement at application time to prevent
+                // Re-check bond requirement at application time to prevent
                 // TOCTOU if total_validators() changed since validation.
                 let bond = crate::constants::required_validator_bond(self.total_validators());
                 let min_fee = bond.saturating_add(crate::constants::MIN_TX_FEE);
@@ -715,7 +715,7 @@ impl ChainState {
 
     /// Count of active validators.
     pub fn total_validators(&self) -> usize {
-        // L7: Count directly instead of allocating a Vec
+        // Count directly instead of allocating a Vec
         self.validators.values().filter(|v| v.active).count()
     }
 

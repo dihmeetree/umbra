@@ -59,6 +59,7 @@ Tests are slow in debug mode due to zk-STARK proof generation. Use `cargo test <
 - **TODO.md**: Check off items with `[x]` when implementing production roadmap features.
 - **README security section**: Add a bullet when introducing security-relevant features.
 - **No emojis** in code or documentation unless explicitly requested.
+- **Comment style**: Comments should be plain descriptions only. Never prefix comments with severity tags, tracking codes, or issue IDs (e.g., no `S1:`, `H3:`, `L8:`, `Fix 7:`, `Critical:`, `M14:`).
 
 ## Gotchas
 

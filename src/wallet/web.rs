@@ -266,7 +266,7 @@ pub async fn serve(
     rpc_addr: SocketAddr,
     wallet_tls: Option<crate::config::WalletTlsConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // M17: Warn when binding to a non-loopback address, since the wallet web
+    // Warn when binding to a non-loopback address, since the wallet web
     // UI has no authentication and exposes spending capabilities.
     if !addr.ip().is_loopback() {
         tracing::warn!(

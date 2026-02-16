@@ -265,7 +265,7 @@ impl Transaction {
                 bond_return_output,
                 ..
             } => {
-                // L14: Validate auth_signature size. The Signature type's
+                // Validate auth_signature size. The Signature type's
                 // deserialization enforces this for network-received data, but
                 // locally constructed transactions bypass deserialization.
                 let sig_bytes = auth_signature.as_bytes();
@@ -350,7 +350,7 @@ impl Transaction {
             ));
         }
 
-        // S4: Defensive check — spend proof count must match input count.
+        // Defensive check — spend proof count must match input count.
         // Balance proof deserialization should enforce this, but verify explicitly.
         if balance_pub.input_proof_links.len() != self.inputs.len() {
             return Err(TxValidationError::InvalidBalanceProof(
@@ -363,14 +363,14 @@ impl Transaction {
             let spend_pub = verify_spend_proof(&input.spend_proof)
                 .map_err(|e| TxValidationError::InvalidSpendProof(e.to_string()))?;
 
-            // L5: Cross-check spend proof's proof_link against the transaction input
+            // Cross-check spend proof's proof_link against the transaction input
             if spend_pub.proof_link != hash_to_felts(&input.proof_link) {
                 return Err(TxValidationError::InvalidSpendProof(
                     "proof_link mismatch".into(),
                 ));
             }
 
-            // L5: Cross-check spend proof's proof_link against the balance proof's
+            // Cross-check spend proof's proof_link against the balance proof's
             // corresponding input_proof_link (defense-in-depth — ensures the spend
             // proof is bound to the same balance proof, not just to the tx field).
             if spend_pub.proof_link != balance_pub.input_proof_links[i] {
@@ -488,7 +488,7 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
         }
         TxType::ValidatorDeregister {
             validator_id,
-            auth_signature: _, // C1: excluded — auth_signature signs over tx_content_hash
+            auth_signature: _, // excluded — auth_signature signs over tx_content_hash
             bond_return_output,
             bond_blinding,
         } => {

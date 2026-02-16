@@ -701,7 +701,7 @@ async fn get_commitment_proof(
         let mut limiter = state.rate_limiter.lock().await;
         let now = std::time::Instant::now();
 
-        // S10: Proactive eviction of expired entries on every request to prevent
+        // Proactive eviction of expired entries on every request to prevent
         // memory bloat from many unique IPs. Only scan if over half capacity.
         if limiter.len() > RATE_LIMITER_MAX_ENTRIES / 2 {
             limiter.retain(|_, (_, start)| {
@@ -716,7 +716,7 @@ async fn get_commitment_proof(
         }
 
         let entry = limiter.entry(addr.ip()).or_insert((0, now));
-        // S10: Use duration_since (monotonic) to handle clock skew safely.
+        // Use duration_since (monotonic) to handle clock skew safely.
         // If the entry's start time is somehow in the future (shouldn't happen
         // with Instant but defensive), treat the window as expired.
         let elapsed = now.saturating_duration_since(entry.1).as_secs();
