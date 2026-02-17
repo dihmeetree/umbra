@@ -467,7 +467,7 @@ impl Wallet {
         message: Option<Vec<u8>>,
         node_state: &mut crate::node::NodeState,
     ) -> Result<Transaction, WalletError> {
-        node_state.with_chain_state(|cs| self.resolve_commitment_indices(cs));
+        self.sync(node_state)?;
         let tx = node_state.with_chain_state(|cs| {
             self.build_transaction_with_state(recipient, amount, message, Some(cs))
         })?;

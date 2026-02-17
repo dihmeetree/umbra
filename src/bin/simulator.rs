@@ -350,24 +350,7 @@ async fn fund_users(
     };
     let mut genesis_wallet = Wallet::from_keypair(genesis_keys);
 
-    // Sync to discover genesis coinbase
-    {
-        let state_guard = genesis_state.read().await;
-        genesis_wallet
-            .sync(&state_guard)
-            .map_err(|e| format!("genesis sync: {}", e))?;
-    }
-
-    let genesis_balance = genesis_wallet.balance();
-    if genesis_balance == 0 {
-        return Err("genesis wallet has zero balance after scanning".to_string());
-    }
-    println!(
-        "  Genesis wallet scanned: {} units available",
-        genesis_balance
-    );
-
-    // Fund Alice
+    // Fund Alice (send auto-syncs to discover genesis coinbase first)
     let alice_tx = {
         let mut state_guard = genesis_state.write().await;
         genesis_wallet
@@ -384,15 +367,7 @@ async fn fund_users(
     println!("  Waiting for Alice tx to finalize...");
     wait_for_finalization(genesis_state, 2).await;
 
-    // Sync genesis wallet to resolve change output before sending to Bob
-    {
-        let state_guard = genesis_state.read().await;
-        genesis_wallet
-            .sync(&state_guard)
-            .map_err(|e| format!("genesis sync: {}", e))?;
-    }
-
-    // Fund Bob
+    // Fund Bob (send auto-syncs to resolve change output)
     let bob_tx = {
         let mut state_guard = genesis_state.write().await;
         genesis_wallet
@@ -409,7 +384,7 @@ async fn fund_users(
     println!("  Waiting for Bob tx to finalize...");
     wait_for_finalization(genesis_state, 2).await;
 
-    // Sync both wallets to discover their funded outputs
+    // Sync receiver wallets to discover their funded outputs for balance check
     {
         let state_guard = genesis_state.read().await;
         alice_wallet
@@ -533,13 +508,14 @@ async fn run_normal_traffic(
 
         match send_result {
             Ok(_tx) => {
-                // Wait for finalization so commitment indices are available
+                // Wait for finalization, then sync receiver for balance check
                 wait_for_finalization(node_state, 1).await;
-
-                // Sync both wallets to discover finalized outputs
                 let state_guard = node_state.read().await;
-                let _ = alice.sync(&state_guard);
-                let _ = bob.sync(&state_guard);
+                if *sender_name == "Alice" {
+                    let _ = bob.sync(&state_guard);
+                } else {
+                    let _ = alice.sync(&state_guard);
+                }
                 drop(state_guard);
 
                 results.push(TestResult::pass(
