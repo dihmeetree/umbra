@@ -72,7 +72,7 @@ thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 subtle = "2.6.1"
 tokio-util = { version = "0.7.18", features = ["rt"] }
-toml = "1.0.1"
+toml = "1.0.2"
 rayon = "1.11.0"
 igd-next = { version = "0.16", features = ["aio_tokio"] }
 tempfile = "3"
