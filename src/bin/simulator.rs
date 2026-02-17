@@ -22,7 +22,6 @@ use umbra::crypto::stark::default_proof_options;
 use umbra::crypto::stark::types::{BalanceStarkProof, SpendStarkProof};
 use umbra::crypto::stealth::StealthAddress;
 use umbra::node::rpc::{serve as rpc_serve, RpcState};
-use umbra::node::storage::Storage;
 use umbra::node::{Node, NodeConfig, NodeState};
 use umbra::transaction::builder::{InputSpec, TransactionBuilder};
 use umbra::transaction::{Transaction, TxInput, TxMessage, TxOutput, TxType};
@@ -344,24 +343,20 @@ async fn fund_users(
     alice_wallet: &mut Wallet,
     bob_wallet: &mut Wallet,
 ) -> Result<(u64, u64, Vec<Nullifier>), String> {
-    let state_guard = genesis_state.read().await;
-
-    // Get the genesis coinbase output by scanning state
-    let genesis_coinbase = state_guard
-        .storage
-        .get_coinbase_output(0)
-        .map_err(|e| format!("get coinbase: {}", e))?
-        .ok_or("no genesis coinbase found")?;
-
     // Create a wallet from the genesis KEM keypair to claim the coinbase
     let genesis_keys = umbra::crypto::keys::FullKeypair {
-        signing: SigningKeypair::generate(), // signing key doesn't matter for scanning
+        signing: SigningKeypair::generate(),
         kem: genesis_kem.clone(),
     };
     let mut genesis_wallet = Wallet::from_keypair(genesis_keys);
 
-    // Scan the genesis coinbase output using the proper wallet API
-    genesis_wallet.scan_coinbase_output(&genesis_coinbase, Some(&state_guard.ledger.state));
+    // Sync to discover genesis coinbase
+    {
+        let state_guard = genesis_state.read().await;
+        genesis_wallet
+            .sync(&state_guard)
+            .map_err(|e| format!("genesis sync: {}", e))?;
+    }
 
     let genesis_balance = genesis_wallet.balance();
     if genesis_balance == 0 {
@@ -372,81 +367,58 @@ async fn fund_users(
         genesis_balance
     );
 
-    // Build funding tx for Alice (fee is auto-computed)
-    let alice_tx = genesis_wallet
-        .build_transaction_with_state(
-            alice_wallet.kem_public_key(),
-            FUNDING_AMOUNT,
-            Some(b"Genesis funding for Alice".to_vec()),
-            Some(&state_guard.ledger.state),
-        )
-        .map_err(|e| format!("build alice tx: {}", e))?;
-
-    let alice_tx_binding = alice_tx.tx_binding;
-
-    // Submit to mempool directly (we have the state lock)
-    drop(state_guard);
-
-    // Submit Alice funding tx
-    {
+    // Fund Alice
+    let alice_tx = {
         let mut state_guard = genesis_state.write().await;
-        state_guard
-            .mempool
-            .insert(alice_tx.clone())
-            .map_err(|e| format!("mempool alice: {}", e))?;
-    }
+        genesis_wallet
+            .send(
+                alice_wallet.kem_public_key(),
+                FUNDING_AMOUNT,
+                Some(b"Genesis funding for Alice".to_vec()),
+                &mut state_guard,
+            )
+            .map_err(|e| format!("fund alice: {}", e))?
+    };
     println!("  Submitted Alice funding tx to mempool");
 
-    // Alice scans the tx to find her output; genesis scans for change
-    alice_wallet.scan_transaction(&alice_tx);
-    genesis_wallet.scan_transaction(&alice_tx);
-    genesis_wallet.confirm_transaction(&alice_tx_binding);
-
-    // Wait for the tx to be included in a vertex and finalized
-    // so the change output's commitment is in the chain state
     println!("  Waiting for Alice tx to finalize...");
     wait_for_finalization(genesis_state, 2).await;
 
-    // Build funding tx for Bob (from genesis change)
-    let state_guard = genesis_state.read().await;
-    genesis_wallet.resolve_commitment_indices(&state_guard.ledger.state);
-    drop(state_guard);
-
-    let state_guard = genesis_state.read().await;
-    let bob_tx = genesis_wallet
-        .build_transaction_with_state(
-            bob_wallet.kem_public_key(),
-            FUNDING_AMOUNT,
-            Some(b"Genesis funding for Bob".to_vec()),
-            Some(&state_guard.ledger.state),
-        )
-        .map_err(|e| format!("build bob tx: {}", e))?;
-
-    let bob_tx_binding = bob_tx.tx_binding;
-    drop(state_guard);
-
+    // Sync genesis wallet to resolve change output before sending to Bob
     {
-        let mut state_guard = genesis_state.write().await;
-        state_guard
-            .mempool
-            .insert(bob_tx.clone())
-            .map_err(|e| format!("mempool bob: {}", e))?;
+        let state_guard = genesis_state.read().await;
+        genesis_wallet
+            .sync(&state_guard)
+            .map_err(|e| format!("genesis sync: {}", e))?;
     }
+
+    // Fund Bob
+    let bob_tx = {
+        let mut state_guard = genesis_state.write().await;
+        genesis_wallet
+            .send(
+                bob_wallet.kem_public_key(),
+                FUNDING_AMOUNT,
+                Some(b"Genesis funding for Bob".to_vec()),
+                &mut state_guard,
+            )
+            .map_err(|e| format!("fund bob: {}", e))?
+    };
     println!("  Submitted Bob funding tx to mempool");
 
-    bob_wallet.scan_transaction(&bob_tx);
-    genesis_wallet.scan_transaction(&bob_tx);
-    genesis_wallet.confirm_transaction(&bob_tx_binding);
-
-    // Wait for Bob tx to finalize
     println!("  Waiting for Bob tx to finalize...");
     wait_for_finalization(genesis_state, 2).await;
 
-    // Resolve commitment indices for both wallets
-    let state_guard = genesis_state.read().await;
-    alice_wallet.resolve_commitment_indices(&state_guard.ledger.state);
-    bob_wallet.resolve_commitment_indices(&state_guard.ledger.state);
-    drop(state_guard);
+    // Sync both wallets to discover their funded outputs
+    {
+        let state_guard = genesis_state.read().await;
+        alice_wallet
+            .sync(&state_guard)
+            .map_err(|e| format!("alice sync: {}", e))?;
+        bob_wallet
+            .sync(&state_guard)
+            .map_err(|e| format!("bob sync: {}", e))?;
+    }
 
     // Collect spent nullifiers from funding txs for double-spend attack testing
     let mut spent_nullifiers = Vec::new();
@@ -468,7 +440,7 @@ async fn fund_users(
 async fn wait_for_finalization(state: &Arc<RwLock<NodeState>>, count: u64) {
     let initial = {
         let s = state.read().await;
-        s.storage.finalized_vertex_count().unwrap_or(0)
+        s.finalized_vertex_count().unwrap_or(0)
     };
     let target = initial + count;
 
@@ -476,7 +448,7 @@ async fn wait_for_finalization(state: &Arc<RwLock<NodeState>>, count: u64) {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let current = {
             let s = state.read().await;
-            s.storage.finalized_vertex_count().unwrap_or(0)
+            s.finalized_vertex_count().unwrap_or(0)
         };
         if current >= target {
             return;
@@ -548,64 +520,37 @@ async fn run_normal_traffic(
             (&mut *bob, &mut *alice)
         };
 
-        // Resolve commitment indices
-        {
-            let state_guard = node_state.read().await;
-            sender.resolve_commitment_indices(&state_guard.ledger.state);
-        }
+        // Build, submit, and track the transaction
+        let send_result = {
+            let mut state_guard = node_state.write().await;
+            sender.send(
+                receiver.kem_public_key(),
+                *amount,
+                message.map(|m| m.to_vec()),
+                &mut state_guard,
+            )
+        };
 
-        // Build transaction
-        let state_guard = node_state.read().await;
-        let tx_result = sender.build_transaction_with_state(
-            receiver.kem_public_key(),
-            *amount,
-            message.map(|m| m.to_vec()),
-            Some(&state_guard.ledger.state),
-        );
-        drop(state_guard);
+        match send_result {
+            Ok(_tx) => {
+                // Wait for finalization so commitment indices are available
+                wait_for_finalization(node_state, 1).await;
 
-        match tx_result {
-            Ok(tx) => {
-                let tx_binding = tx.tx_binding;
+                // Sync both wallets to discover finalized outputs
+                let state_guard = node_state.read().await;
+                let _ = alice.sync(&state_guard);
+                let _ = bob.sync(&state_guard);
+                drop(state_guard);
 
-                // Submit to mempool
-                let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx.clone()) {
-                    Ok(_) => {
-                        drop(state_guard);
-
-                        // Both wallets scan the transaction (receiver for output, sender for change)
-                        receiver.scan_transaction(&tx);
-                        sender.scan_transaction(&tx);
-                        sender.confirm_transaction(&tx_binding);
-
-                        // Wait for finalization so commitment indices are available
-                        wait_for_finalization(node_state, 1).await;
-
-                        // Resolve indices for both
-                        let state_guard = node_state.read().await;
-                        alice.resolve_commitment_indices(&state_guard.ledger.state);
-                        bob.resolve_commitment_indices(&state_guard.ledger.state);
-                        drop(state_guard);
-
-                        results.push(TestResult::pass(
-                            &round_name,
-                            &format!("Alice={}, Bob={}", alice.balance(), bob.balance()),
-                        ));
-                    }
-                    Err(e) => {
-                        drop(state_guard);
-                        results.push(TestResult::fail(
-                            &round_name,
-                            &format!("mempool rejected: {}", e),
-                        ));
-                    }
-                }
+                results.push(TestResult::pass(
+                    &round_name,
+                    &format!("Alice={}, Bob={}", alice.balance(), bob.balance()),
+                ));
             }
             Err(e) => {
                 results.push(TestResult::fail(
                     &round_name,
-                    &format!("build failed: {}", e),
+                    &format!("send failed: {}", e),
                 ));
             }
         }
@@ -653,9 +598,9 @@ async fn run_chaos_scenarios(
     let (initial_commitments, initial_nullifiers, initial_state_root) = {
         let state_guard = node_state.read().await;
         (
-            state_guard.ledger.state.commitment_count(),
-            state_guard.ledger.state.nullifier_count(),
-            state_guard.ledger.state.state_root(),
+            state_guard.commitment_count(),
+            state_guard.nullifier_count(),
+            state_guard.state_root(),
         )
     };
 
@@ -686,7 +631,7 @@ async fn run_chaos_scenarios(
                     tx.balance_proof.proof_bytes[0] ^= 0xFF;
                 }
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => {
                         results.push(TestResult::fail(
                             name,
@@ -733,7 +678,7 @@ async fn run_chaos_scenarios(
             Ok(tx) => {
                 // Validate against chain state (which checks chain_id)
                 let state_guard = node_state.read().await;
-                match state_guard.ledger.state.validate_transaction(&tx) {
+                match state_guard.validate_transaction_against_state(&tx) {
                     Ok(_) => {
                         results.push(TestResult::fail(name, "state accepted wrong chain ID"));
                     }
@@ -776,7 +721,7 @@ async fn run_chaos_scenarios(
                 // Tamper with fee after building to exceed MAX_TX_FEE
                 tx.fee = umbra::constants::MAX_TX_FEE + 1;
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => {
                         results.push(TestResult::fail(name, "accepted overflow fee"));
                     }
@@ -819,7 +764,7 @@ async fn run_chaos_scenarios(
                 // Tamper with fee after building to set it to zero
                 tx.fee = 0;
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => {
                         results.push(TestResult::fail(name, "accepted zero fee"));
                     }
@@ -856,7 +801,7 @@ async fn run_chaos_scenarios(
         };
 
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => {
                 results.push(TestResult::fail(name, "accepted empty transaction"));
             }
@@ -910,7 +855,7 @@ async fn run_chaos_scenarios(
         };
 
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => {
                 results.push(TestResult::fail(name, "accepted duplicate nullifier"));
             }
@@ -951,7 +896,7 @@ async fn run_chaos_scenarios(
         match tx_result {
             Ok(tx) => {
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => {
                         results.push(TestResult::fail(name, "accepted oversized message"));
                     }
@@ -992,7 +937,7 @@ async fn run_chaos_scenarios(
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => results.push(TestResult::fail(name, "accepted too many inputs")),
             Err(e) => results.push(TestResult::pass(
                 name,
@@ -1022,7 +967,7 @@ async fn run_chaos_scenarios(
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => results.push(TestResult::fail(name, "accepted too many outputs")),
             Err(e) => results.push(TestResult::pass(
                 name,
@@ -1052,7 +997,7 @@ async fn run_chaos_scenarios(
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => results.push(TestResult::fail(name, "accepted too many messages")),
             Err(e) => results.push(TestResult::pass(
                 name,
@@ -1080,7 +1025,7 @@ async fn run_chaos_scenarios(
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => results.push(TestResult::fail(name, "accepted duplicate commitments")),
             Err(e) => results.push(TestResult::pass(
                 name,
@@ -1112,7 +1057,7 @@ async fn run_chaos_scenarios(
                 // Flip a byte in the binding — any field mutation breaks the hash
                 tx.tx_binding[0] ^= 0xFF;
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => results.push(TestResult::fail(name, "accepted tampered binding")),
                     Err(e) => results.push(TestResult::pass(
                         name,
@@ -1146,10 +1091,10 @@ async fn run_chaos_scenarios(
         match tx_result {
             Ok(tx) => {
                 let mut state_guard = node_state.write().await;
-                let original_epoch = state_guard.ledger.state.epoch();
+                let original_epoch = state_guard.epoch();
                 // Set mempool epoch to 10 so the tx is expired
-                state_guard.mempool.set_epoch(10);
-                match state_guard.mempool.insert(tx) {
+                state_guard.set_mempool_epoch(10);
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => results.push(TestResult::fail(name, "accepted expired tx")),
                     Err(e) => results.push(TestResult::pass(
                         name,
@@ -1157,7 +1102,7 @@ async fn run_chaos_scenarios(
                     )),
                 }
                 // Reset epoch
-                state_guard.mempool.set_epoch(original_epoch);
+                state_guard.set_mempool_epoch(original_epoch);
             }
             Err(_) => results.push(TestResult::pass(name, "builder rejected invalid tx")),
         }
@@ -1203,7 +1148,7 @@ async fn run_chaos_scenarios(
                 // Transplant A's balance proof onto B
                 tx_b.balance_proof = tx_a.balance_proof;
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx_b) {
+                match state_guard.submit_transaction(tx_b) {
                     Ok(_) => results.push(TestResult::fail(name, "accepted transplanted proof")),
                     Err(e) => results.push(TestResult::pass(
                         name,
@@ -1240,7 +1185,7 @@ async fn run_chaos_scenarios(
                     tx.inputs[0].proof_link[0] ^= 0xFF;
                 }
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => results.push(TestResult::fail(name, "accepted tampered proof_link")),
                     Err(e) => results.push(TestResult::pass(
                         name,
@@ -1277,7 +1222,7 @@ async fn run_chaos_scenarios(
                     tx.inputs[0].nullifier.0[0] ^= 0xFF;
                 }
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => results.push(TestResult::fail(name, "accepted tampered nullifier")),
                     Err(e) => results.push(TestResult::pass(
                         name,
@@ -1316,7 +1261,7 @@ async fn run_chaos_scenarios(
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => results.push(TestResult::fail(name, "accepted insufficient bond")),
             Err(e) => results.push(TestResult::pass(
                 name,
@@ -1363,7 +1308,7 @@ async fn run_chaos_scenarios(
                     expiry_epoch: 0,
                 };
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => results.push(TestResult::fail(name, "accepted invalid key sizes")),
                     Err(e) => results.push(TestResult::pass(
                         name,
@@ -1409,7 +1354,7 @@ async fn run_chaos_scenarios(
             expiry_epoch: 0,
         };
         let mut state_guard = node_state.write().await;
-        match state_guard.mempool.insert(tx) {
+        match state_guard.submit_transaction(tx) {
             Ok(_) => results.push(TestResult::fail(name, "accepted zero bond return")),
             Err(e) => results.push(TestResult::pass(
                 name,
@@ -1453,10 +1398,10 @@ async fn run_chaos_scenarios(
             (Ok(tx_a), Ok(tx_b)) => {
                 let tx_a_id = tx_a.tx_id();
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx_a) {
+                match state_guard.submit_transaction(tx_a) {
                     Ok(_) => {
                         // First tx accepted, now try the conflicting one
-                        match state_guard.mempool.insert(tx_b) {
+                        match state_guard.submit_transaction(tx_b) {
                             Ok(_) => results
                                 .push(TestResult::fail(name, "accepted conflicting nullifier")),
                             Err(e) => results.push(TestResult::pass(
@@ -1465,7 +1410,7 @@ async fn run_chaos_scenarios(
                             )),
                         }
                         // Clean up
-                        state_guard.mempool.remove(&tx_a_id);
+                        state_guard.remove_transaction(&tx_a_id);
                     }
                     Err(e) => results.push(TestResult::fail(
                         name,
@@ -1499,10 +1444,10 @@ async fn run_chaos_scenarios(
             Ok(tx) => {
                 let tx_id = tx.tx_id();
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx.clone()) {
+                match state_guard.submit_transaction(tx.clone()) {
                     Ok(_) => {
                         // First insert succeeded, now try duplicate
-                        match state_guard.mempool.insert(tx) {
+                        match state_guard.submit_transaction(tx) {
                             Ok(_) => results.push(TestResult::fail(name, "accepted duplicate tx")),
                             Err(e) => results.push(TestResult::pass(
                                 name,
@@ -1510,7 +1455,7 @@ async fn run_chaos_scenarios(
                             )),
                         }
                         // Clean up
-                        state_guard.mempool.remove(&tx_id);
+                        state_guard.remove_transaction(&tx_id);
                     }
                     Err(e) => results.push(TestResult::fail(
                         name,
@@ -1545,7 +1490,7 @@ async fn run_chaos_scenarios(
                 // Mutate chain_id to simulate replaying on a different chain
                 tx.chain_id = [0xCC; 32];
                 let state_guard = node_state.read().await;
-                match state_guard.ledger.state.validate_transaction(&tx) {
+                match state_guard.validate_transaction_against_state(&tx) {
                     Ok(_) => {
                         results.push(TestResult::fail(name, "state accepted cross-chain replay"))
                     }
@@ -1584,15 +1529,15 @@ async fn run_chaos_scenarios(
             Ok(tx) => {
                 let mut state_guard = node_state.write().await;
                 // Insert at epoch 0 (should succeed)
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => {
-                        let pre_count = state_guard.mempool.len();
+                        let pre_count = state_guard.mempool_len();
                         // Advance epoch past expiry and evict
-                        state_guard.mempool.set_epoch(10);
-                        let evicted = state_guard.mempool.evict_expired();
-                        let post_count = state_guard.mempool.len();
+                        state_guard.set_mempool_epoch(10);
+                        let evicted = state_guard.evict_expired_transactions();
+                        let post_count = state_guard.mempool_len();
                         // Reset epoch
-                        state_guard.mempool.set_epoch(0);
+                        state_guard.set_mempool_epoch(0);
 
                         if evicted >= 1 && post_count < pre_count {
                             results.push(TestResult::pass(
@@ -1642,16 +1587,16 @@ async fn run_chaos_scenarios(
             Ok(tx) => {
                 let tx_id = tx.tx_id();
                 let mut state_guard = node_state.write().await;
-                match state_guard.mempool.insert(tx) {
+                match state_guard.submit_transaction(tx) {
                     Ok(_) => {
-                        let pre_count = state_guard.mempool.len();
+                        let pre_count = state_guard.mempool_len();
                         // Set epoch far in the future and try to evict
-                        state_guard.mempool.set_epoch(999_999);
-                        let evicted = state_guard.mempool.evict_expired();
-                        let post_count = state_guard.mempool.len();
+                        state_guard.set_mempool_epoch(999_999);
+                        let evicted = state_guard.evict_expired_transactions();
+                        let post_count = state_guard.mempool_len();
                         // Reset and clean up
-                        state_guard.mempool.set_epoch(0);
-                        state_guard.mempool.remove(&tx_id);
+                        state_guard.set_mempool_epoch(0);
+                        state_guard.remove_transaction(&tx_id);
 
                         // The no-expiry tx should NOT have been evicted
                         if post_count >= pre_count && evicted == 0 {
@@ -1706,7 +1651,7 @@ async fn run_chaos_scenarios(
                 expiry_epoch: 0,
             };
             let state_guard = node_state.read().await;
-            match state_guard.ledger.state.validate_transaction(&tx) {
+            match state_guard.validate_transaction_against_state(&tx) {
                 Ok(_) => results.push(TestResult::fail(
                     name,
                     "state accepted double-spend with spent nullifier",
@@ -1727,9 +1672,9 @@ async fn run_chaos_scenarios(
     // Verify state was not corrupted by any attack
     {
         let state_guard = node_state.read().await;
-        let current_commitments = state_guard.ledger.state.commitment_count();
-        let current_nullifiers = state_guard.ledger.state.nullifier_count();
-        let current_state_root = state_guard.ledger.state.state_root();
+        let current_commitments = state_guard.commitment_count();
+        let current_nullifiers = state_guard.nullifier_count();
+        let current_state_root = state_guard.state_root();
 
         if current_state_root == initial_state_root
             && current_commitments == initial_commitments
@@ -1790,9 +1735,9 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
 
         for state in node_states {
             let s = state.read().await;
-            epochs.push(s.ledger.state.epoch());
-            state_roots.push(hex::encode(s.ledger.state.state_root()));
-            commitment_counts.push(s.ledger.state.commitment_count());
+            epochs.push(s.epoch());
+            state_roots.push(hex::encode(s.state_root()));
+            commitment_counts.push(s.commitment_count());
         }
 
         // With independent genesis validators, each node has its own chain
@@ -1820,7 +1765,7 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
     // Check 3: Validator set integrity
     {
         let s = node_states[0].read().await;
-        let validator_count = s.ledger.state.total_validators();
+        let validator_count = s.total_validators();
         if validator_count > 0 {
             results.push(TestResult::pass(
                 "Validator Set",
@@ -1837,7 +1782,7 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
     // Check 4: Mempool health (should be mostly drained)
     {
         let s = node_states[0].read().await;
-        let mempool_size = s.mempool.len();
+        let mempool_size = s.mempool_len();
         if mempool_size <= 10 {
             results.push(TestResult::pass(
                 "Mempool Health",
@@ -1854,7 +1799,7 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
     // Check 5: Validators still active
     {
         let s = node_states[0].read().await;
-        let active = s.ledger.state.total_validators();
+        let active = s.total_validators();
         if active >= 1 {
             results.push(TestResult::pass(
                 "Validator Health",

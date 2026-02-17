@@ -79,6 +79,9 @@ pub struct Wallet {
     outputs: Vec<OwnedOutput>,
     messages: Vec<ReceivedMessage>,
     history: Vec<TxHistoryEntry>,
+    /// Sequence number of the last finalized vertex scanned by `sync()`.
+    /// Initialized to `u64::MAX` (sentinel for "start from the beginning").
+    last_scanned_sequence: u64,
 }
 
 impl Wallet {
@@ -88,6 +91,7 @@ impl Wallet {
             outputs: Vec::new(),
             messages: Vec::new(),
             history: Vec::new(),
+            last_scanned_sequence: u64::MAX,
         }
     }
 
@@ -97,6 +101,7 @@ impl Wallet {
             outputs: Vec::new(),
             messages: Vec::new(),
             history: Vec::new(),
+            last_scanned_sequence: u64::MAX,
         }
     }
 
@@ -124,6 +129,13 @@ impl Wallet {
             if let Some(mut owned) = self.try_claim_output(output, idx as u32) {
                 if let Some(st) = state {
                     owned.commitment_index = st.find_commitment(&owned.commitment);
+                }
+                if self
+                    .outputs
+                    .iter()
+                    .any(|o| o.commitment == owned.commitment)
+                {
+                    continue;
                 }
                 received_amount = received_amount.saturating_add(owned.value);
                 self.outputs.push(owned);
@@ -403,6 +415,70 @@ impl Wallet {
         }
     }
 
+    /// Sync wallet against finalized chain state.
+    ///
+    /// Scans all finalized vertices since the last sync, discovers outputs
+    /// addressed to this wallet, auto-confirms pending transactions, and
+    /// resolves commitment indices.
+    pub fn sync(&mut self, node_state: &crate::node::NodeState) -> Result<(), WalletError> {
+        // On first sync, scan the genesis coinbase (seq 0) which is not stored
+        // as a regular vertex in the vertices tree but has a coinbase output.
+        if self.last_scanned_sequence == u64::MAX {
+            if let Ok(Some(cb)) = node_state.get_coinbase_output(0) {
+                self.scan_coinbase_output(&cb, None);
+            }
+        }
+
+        let batch_size = 100u32;
+        loop {
+            let vertices = node_state
+                .get_finalized_vertices_after(self.last_scanned_sequence, batch_size)
+                .map_err(|e| WalletError::Rpc(format!("storage: {}", e)))?;
+            if vertices.is_empty() {
+                break;
+            }
+            for (seq, vertex) in &vertices {
+                for tx in &vertex.transactions {
+                    self.scan_transaction(tx);
+                    self.confirm_transaction(&tx.tx_binding);
+                }
+                if let Ok(Some(cb)) = node_state.get_coinbase_output(*seq) {
+                    self.scan_coinbase_output(&cb, None);
+                }
+                self.last_scanned_sequence = *seq;
+            }
+            if vertices.len() < batch_size as usize {
+                break;
+            }
+        }
+        node_state.with_chain_state(|cs| self.resolve_commitment_indices(cs));
+        Ok(())
+    }
+
+    /// Build, submit, and track a transaction in one call.
+    ///
+    /// Resolves commitment indices, builds the transaction with chain state,
+    /// submits to the mempool, scans the transaction for change outputs,
+    /// and confirms the spend.
+    pub fn send(
+        &mut self,
+        recipient: &crate::crypto::keys::KemPublicKey,
+        amount: u64,
+        message: Option<Vec<u8>>,
+        node_state: &mut crate::node::NodeState,
+    ) -> Result<Transaction, WalletError> {
+        node_state.with_chain_state(|cs| self.resolve_commitment_indices(cs));
+        let tx = node_state.with_chain_state(|cs| {
+            self.build_transaction_with_state(recipient, amount, message, Some(cs))
+        })?;
+        node_state
+            .submit_transaction(tx.clone())
+            .map_err(|e| WalletError::Rpc(e.to_string()))?;
+        self.scan_transaction(&tx);
+        self.confirm_transaction(&tx.tx_binding);
+        Ok(tx)
+    }
+
     pub fn cancel_transaction(&mut self, tx_binding: &Hash) {
         for output in &mut self.outputs {
             if let SpendStatus::Pending {
@@ -435,6 +511,13 @@ impl Wallet {
         state: Option<&crate::state::ChainState>,
     ) {
         if let Some(mut owned) = self.try_claim_output(output, 0) {
+            if self
+                .outputs
+                .iter()
+                .any(|o| o.commitment == owned.commitment)
+            {
+                return;
+            }
             let epoch = state.map(|s| s.epoch()).unwrap_or(0);
             if let Some(st) = state {
                 owned.commitment_index = st.find_commitment(&owned.commitment);
@@ -701,6 +784,7 @@ impl Wallet {
             outputs: Vec::new(),
             messages: Vec::new(),
             history: Vec::new(),
+            last_scanned_sequence: u64::MAX,
         })
     }
 }
@@ -815,9 +899,14 @@ impl Wallet {
     pub fn save_to_file(
         &self,
         path: &Path,
-        last_scanned_seq: u64,
+        last_scanned_seq_override: u64,
         password: Option<&str>,
     ) -> Result<(), WalletError> {
+        let last_scanned_seq = if last_scanned_seq_override != u64::MAX {
+            last_scanned_seq_override
+        } else {
+            self.last_scanned_sequence
+        };
         let outputs: Vec<SerializedOutput> = self
             .outputs
             .iter()
@@ -1012,6 +1101,7 @@ impl Wallet {
             outputs,
             messages,
             history: wallet_file.history,
+            last_scanned_sequence: wallet_file.last_scanned_sequence,
         };
         Ok((wallet, wallet_file.last_scanned_sequence))
     }

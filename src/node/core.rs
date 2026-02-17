@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use super::mempool::Mempool;
-use super::storage::{SledStorage, Storage};
+use super::mempool::{Mempool, MempoolError};
+use super::storage::{SledStorage, Storage, StorageError};
 use crate::consensus::bft::{self, BftState, Validator};
 use crate::consensus::dag::{Vertex, VertexId};
 use crate::crypto::keys::{KemKeypair, SigningKeypair};
@@ -25,8 +25,8 @@ use crate::crypto::stark::spend_air::MERKLE_DEPTH;
 use crate::crypto::vrf::VrfOutput;
 use crate::network::p2p::{P2pConfig, P2pEvent, P2pHandle};
 use crate::network::Message;
-use crate::state::Ledger;
-use crate::transaction::TxId;
+use crate::state::{Ledger, StateError};
+use crate::transaction::{Transaction, TxId, TxOutput};
 use crate::Hash;
 
 /// Maximum number of entries in the seen_messages dedup set before clearing.
@@ -50,6 +50,91 @@ pub struct NodeState {
     /// Protocol version signals per epoch (F16).
     /// Maps version -> set of proposer fingerprints that signaled it.
     pub version_signals: HashMap<u32, HashSet<Hash>>,
+}
+
+impl NodeState {
+    /// Submit a transaction to the mempool.
+    pub fn submit_transaction(&mut self, tx: Transaction) -> Result<TxId, MempoolError> {
+        self.mempool.insert(tx)
+    }
+
+    /// Remove a transaction from the mempool by ID.
+    pub fn remove_transaction(&mut self, tx_id: &TxId) -> Option<Transaction> {
+        self.mempool.remove(tx_id)
+    }
+
+    /// Set the mempool's current epoch (for expiry validation).
+    pub fn set_mempool_epoch(&mut self, epoch: u64) {
+        self.mempool.set_epoch(epoch);
+    }
+
+    /// Evict expired transactions from the mempool. Returns count evicted.
+    pub fn evict_expired_transactions(&mut self) -> usize {
+        self.mempool.evict_expired()
+    }
+
+    /// Validate a transaction against the chain state (chain_id, nullifiers, proofs).
+    pub fn validate_transaction_against_state(&self, tx: &Transaction) -> Result<(), StateError> {
+        self.ledger.state.validate_transaction(tx)
+    }
+
+    /// Current number of commitments in the chain state.
+    pub fn commitment_count(&self) -> usize {
+        self.ledger.state.commitment_count()
+    }
+
+    /// Current number of revealed nullifiers.
+    pub fn nullifier_count(&self) -> usize {
+        self.ledger.state.nullifier_count()
+    }
+
+    /// Current state root hash.
+    pub fn state_root(&self) -> Hash {
+        self.ledger.state.state_root()
+    }
+
+    /// Current epoch number.
+    pub fn epoch(&self) -> u64 {
+        self.ledger.state.epoch()
+    }
+
+    /// Total number of active validators.
+    pub fn total_validators(&self) -> usize {
+        self.ledger.state.total_validators()
+    }
+
+    /// Current mempool size (pending transaction count).
+    pub fn mempool_len(&self) -> usize {
+        self.mempool.len()
+    }
+
+    /// Number of finalized vertices in storage.
+    pub fn finalized_vertex_count(&self) -> Result<u64, StorageError> {
+        self.storage.finalized_vertex_count()
+    }
+
+    /// Get the coinbase output for a given finalized vertex sequence.
+    pub fn get_coinbase_output(&self, sequence: u64) -> Result<Option<TxOutput>, StorageError> {
+        self.storage.get_coinbase_output(sequence)
+    }
+
+    /// Get finalized vertices after a given sequence number.
+    pub fn get_finalized_vertices_after(
+        &self,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, crate::consensus::dag::Vertex)>, StorageError> {
+        self.storage
+            .get_finalized_vertices_after(after_sequence, limit)
+    }
+
+    /// Execute a closure with a reference to the chain state.
+    pub fn with_chain_state<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&crate::state::ChainState) -> R,
+    {
+        f(&self.ledger.state)
+    }
 }
 
 /// Sync progress tracking for catching up with the network.
