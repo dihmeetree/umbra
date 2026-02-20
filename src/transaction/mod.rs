@@ -421,12 +421,24 @@ impl Transaction {
         let outputs: usize = self
             .outputs
             .iter()
-            .map(|o| 32 + 32 + o.encrypted_note.ciphertext.len() + 24 + 32 + 64)
+            .map(|o| {
+                32 // commitment
+                + 32 // stealth_address.one_time_key
+                + o.stealth_address.kem_ciphertext.as_bytes().len() // stealth KEM ct
+                + o.encrypted_note.kem_ciphertext.as_bytes().len() // note KEM ct
+                + 24 // encrypted_note.nonce
+                + o.encrypted_note.ciphertext.len() // encrypted_note.ciphertext
+                + 64 // blake3_binding
+            })
             .sum();
         let messages: usize = self
             .messages
             .iter()
-            .map(|m| m.payload.ciphertext.len() + 24 + 32)
+            .map(|m| {
+                m.payload.kem_ciphertext.as_bytes().len() // KEM ct
+                + 24 // nonce
+                + m.payload.ciphertext.len() // ciphertext
+            })
             .sum();
         base + balance + inputs + outputs + messages + 32
     }
@@ -1485,6 +1497,32 @@ mod tests {
             .build()
             .unwrap();
         assert!(tx.estimated_size() > 0);
+    }
+
+    #[test]
+    fn estimated_size_within_range_of_serialized() {
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = builder::TransactionBuilder::new()
+            .add_input(builder::InputSpec {
+                value: 300,
+                blinding: crate::crypto::commitment::BlindingFactor::from_bytes([55; 32]),
+                spend_auth: crate::hash_domain(b"test", &[55]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+        let serialized = crate::serialize(&tx).unwrap();
+        let estimated = tx.estimated_size();
+        let actual = serialized.len();
+        // Estimate should be within 2x of actual (it omits bincode framing overhead)
+        assert!(
+            estimated > actual / 3 && estimated < actual * 3,
+            "estimated_size {} is too far from actual serialized size {}",
+            estimated,
+            actual
+        );
     }
 
     #[test]

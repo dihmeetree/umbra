@@ -756,4 +756,29 @@ mod tests {
         let decoded = decode_message(&encoded).unwrap();
         assert!(matches!(decoded, Message::GetEpochState));
     }
+
+    #[test]
+    fn rekey_request_roundtrip() {
+        use crate::crypto::keys::KemCiphertext;
+        let msg = Message::RekeyRequest {
+            kem_ciphertext: KemCiphertext(vec![0xABu8; 1568]),
+        };
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        match decoded {
+            Message::RekeyRequest { kem_ciphertext } => {
+                assert_eq!(kem_ciphertext.as_bytes().len(), 1568);
+                assert_eq!(kem_ciphertext.as_bytes()[0], 0xAB);
+            }
+            _ => panic!("expected RekeyRequest"),
+        }
+    }
+
+    #[test]
+    fn rekey_ack_roundtrip() {
+        let msg = Message::RekeyAck;
+        let encoded = encode_message(&msg).unwrap();
+        let decoded = decode_message(&encoded).unwrap();
+        assert!(matches!(decoded, Message::RekeyAck));
+    }
 }

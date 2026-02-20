@@ -105,8 +105,15 @@ impl SessionKeys {
         new_shared_secret: &[u8; 32],
         is_initiator: bool,
     ) -> Self {
+        // Canonical order: always (initiator_key, responder_key) so both sides
+        // produce the same mixed secret regardless of send/recv perspective.
+        let (init_key, resp_key) = if is_initiator {
+            (old_send, old_recv)
+        } else {
+            (old_recv, old_send)
+        };
         let mixed =
-            crate::hash_concat(&[b"umbra.p2p.rekey", old_send, old_recv, new_shared_secret]);
+            crate::hash_concat(&[b"umbra.p2p.rekey", init_key, resp_key, new_shared_secret]);
         Self::derive(&mixed, is_initiator)
     }
 }
@@ -2078,5 +2085,59 @@ mod tests {
         assert_eq!(init_keys.send_key, resp_keys.recv_key);
         // Responder's send_key should equal initiator's recv_key
         assert_eq!(resp_keys.send_key, init_keys.recv_key);
+    }
+
+    #[test]
+    fn rekey_derive_symmetry() {
+        let shared_secret = [7u8; 32];
+        let init_keys = SessionKeys::derive(&shared_secret, true);
+        let resp_keys = SessionKeys::derive(&shared_secret, false);
+
+        // Simulate a rekey: initiator encapsulates, both derive new keys
+        let new_shared = [42u8; 32];
+        let init_rekey =
+            SessionKeys::derive_rekey(&init_keys.send_key, &init_keys.recv_key, &new_shared, true);
+        let resp_rekey =
+            SessionKeys::derive_rekey(&resp_keys.send_key, &resp_keys.recv_key, &new_shared, false);
+
+        // After rekey, symmetry must still hold
+        assert_eq!(init_rekey.send_key, resp_rekey.recv_key);
+        assert_eq!(resp_rekey.send_key, init_rekey.recv_key);
+    }
+
+    #[test]
+    fn rekey_changes_all_keys() {
+        let shared_secret = [7u8; 32];
+        let old_keys = SessionKeys::derive(&shared_secret, true);
+        let new_shared = [99u8; 32];
+        let new_keys =
+            SessionKeys::derive_rekey(&old_keys.send_key, &old_keys.recv_key, &new_shared, true);
+        // New keys must differ from old keys
+        assert_ne!(new_keys.send_key, old_keys.send_key);
+        assert_ne!(new_keys.recv_key, old_keys.recv_key);
+    }
+
+    #[test]
+    fn rekey_different_secrets_different_keys() {
+        let shared_secret = [7u8; 32];
+        let old_keys = SessionKeys::derive(&shared_secret, true);
+        let rekey1 =
+            SessionKeys::derive_rekey(&old_keys.send_key, &old_keys.recv_key, &[1u8; 32], true);
+        let rekey2 =
+            SessionKeys::derive_rekey(&old_keys.send_key, &old_keys.recv_key, &[2u8; 32], true);
+        assert_ne!(rekey1.send_key, rekey2.send_key);
+        assert_ne!(rekey1.recv_key, rekey2.recv_key);
+    }
+
+    #[test]
+    fn sequential_rekeys_produce_unique_keys() {
+        let shared = [7u8; 32];
+        let keys0 = SessionKeys::derive(&shared, true);
+        let keys1 = SessionKeys::derive_rekey(&keys0.send_key, &keys0.recv_key, &[10u8; 32], true);
+        let keys2 = SessionKeys::derive_rekey(&keys1.send_key, &keys1.recv_key, &[20u8; 32], true);
+        // All generations must have distinct keys
+        assert_ne!(keys0.send_key, keys1.send_key);
+        assert_ne!(keys1.send_key, keys2.send_key);
+        assert_ne!(keys0.send_key, keys2.send_key);
     }
 }

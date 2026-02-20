@@ -53,18 +53,28 @@ jobs:
 
       # Verify that all workspace members typecheck successfully
       # Using check instead of build for faster CI (skips codegen)
+      # Check both configurations since conditional compilation (#[cfg(feature)])
+      # produces different code paths
       - name: Check
         run: cargo check --workspace --verbose
 
+      - name: Check (fast-tests)
+        run: cargo check --workspace --verbose --features fast-tests
+
       # Run Clippy linter to catch common mistakes and enforce best practices
       # Treats all warnings as errors to maintain high code quality
+      # Both configurations are checked to catch warnings in #[cfg] branches
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
 
-      # Execute the full test suite to verify functionality
-      # Includes unit tests, integration tests, and doc tests
+      - name: Run clippy (fast-tests)
+        run: cargo clippy --workspace --features fast-tests -- -D warnings
+
+      # Execute the full test suite with fast-tests feature for CI speed
+      # fast-tests skips SPHINCS+ signing/verification (~5-20x faster)
+      # while keeping all Dilithium5 signing and verification
       - name: Run tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --verbose --features fast-tests
 
       # Install cargo-audit if not already available
       # cargo-audit scans for security vulnerabilities in dependencies

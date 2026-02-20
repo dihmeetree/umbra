@@ -2056,4 +2056,37 @@ mod tests {
         let wallet = Wallet::new();
         assert!(wallet.select_coins(1, 0).is_err());
     }
+
+    #[test]
+    fn scan_coinbase_rejects_wrong_blake3_binding() {
+        let mut wallet = Wallet::new();
+        let state = crate::state::ChainState::new();
+        let amount = 50_000u64;
+        let blinding = BlindingFactor::random();
+        let commitment = Commitment::commit(amount, &blinding);
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(wallet.kem_public_key(), 0).unwrap();
+        let stealth_address = stealth_result.address;
+        let mut note_data = Vec::with_capacity(40);
+        note_data.extend_from_slice(&amount.to_le_bytes());
+        note_data.extend_from_slice(&blinding.0);
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt_with_shared_secret(
+                &stealth_result.shared_secret,
+                stealth_address.kem_ciphertext.clone(),
+                &note_data,
+            )
+            .unwrap();
+        // Use an incorrect blake3_binding (all zeros instead of the real one)
+        let coinbase_output = crate::transaction::TxOutput {
+            commitment,
+            stealth_address,
+            encrypted_note,
+            blake3_binding: [0u8; 64],
+        };
+        wallet.scan_coinbase_output(&coinbase_output, Some(&state));
+        // Should reject the output due to blake3_binding mismatch
+        assert_eq!(wallet.balance(), 0);
+        assert_eq!(wallet.output_count(), 0);
+    }
 }

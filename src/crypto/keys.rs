@@ -646,6 +646,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "fast-tests"))]
+    fn signature_deserialize_rejects_valid_dilithium_wrong_sphincs() {
+        let bad: (Vec<u8>, Vec<u8>) = (vec![0u8; DILITHIUM5_SIG_BYTES], vec![0u8; 100]);
+        let encoded = crate::serialize(&bad).unwrap();
+        let result: Result<Signature, _> = crate::deserialize(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn signing_public_key_deserialize_rejects_wrong_sphincs_size() {
+        let bad: (Vec<u8>, Vec<u8>) = (vec![0u8; DILITHIUM5_PK_BYTES], vec![0u8; 10]);
+        let encoded = crate::serialize(&bad).unwrap();
+        let result: Result<SigningPublicKey, _> = crate::deserialize(&encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn signing_public_key_deserialize_rejects_wrong_size() {
         let bad: (Vec<u8>, Vec<u8>) = (vec![0u8; 100], vec![0u8; 100]);
         let encoded = crate::serialize(&bad).unwrap();
@@ -946,5 +963,42 @@ mod tests {
             kp1.public_address().address_id(),
             kp2.public_address().address_id()
         );
+    }
+
+    #[test]
+    fn signature_serialize_deserialize_roundtrip() {
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"roundtrip test");
+        let encoded = crate::serialize(&sig).unwrap();
+        let decoded: Signature = crate::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.dilithium, sig.dilithium);
+        assert_eq!(decoded.sphincs, sig.sphincs);
+        assert!(kp.public.verify(b"roundtrip test", &decoded));
+    }
+
+    #[test]
+    fn signing_public_key_serialize_deserialize_roundtrip() {
+        let kp = SigningKeypair::generate();
+        let encoded = crate::serialize(&kp.public).unwrap();
+        let decoded: SigningPublicKey = crate::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.dilithium, kp.public.dilithium);
+        assert_eq!(decoded.sphincs, kp.public.sphincs);
+    }
+
+    #[test]
+    fn public_address_serialize_deserialize_roundtrip() {
+        let kp = FullKeypair::generate();
+        let addr = kp.public_address();
+        let encoded = crate::serialize(&addr).unwrap();
+        let decoded: PublicAddress = crate::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.address_id(), addr.address_id());
+    }
+
+    #[test]
+    fn verify_with_wrong_public_key_fails() {
+        let kp1 = SigningKeypair::generate();
+        let kp2 = SigningKeypair::generate();
+        let sig = kp1.sign(b"test");
+        assert!(!kp2.public.verify(b"test", &sig));
     }
 }
