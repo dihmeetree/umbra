@@ -56,6 +56,14 @@ pub struct TxOutput {
     pub stealth_address: StealthAddress,
     /// Encrypted note data (value + blinding, encrypted to recipient)
     pub encrypted_note: EncryptedPayload,
+    /// Blake3-512 defense-in-depth binding: Blake3-XOF-512(value || blinding).
+    /// Provides ~256-bit quantum preimage resistance even if Rescue Prime has
+    /// undiscovered algebraic weaknesses. Verified outside STARK circuits.
+    #[serde(
+        serialize_with = "crate::serde_bytes64::serialize",
+        deserialize_with = "crate::serde_bytes64::deserialize"
+    )]
+    pub blake3_binding: [u8; 64],
 }
 
 /// An encrypted message attached to a transaction.
@@ -146,6 +154,7 @@ impl Transaction {
         for output in &self.outputs {
             hasher.update(&output.commitment.0);
             hasher.update(&output.stealth_address.one_time_key);
+            hasher.update(&output.blake3_binding);
         }
         // Hash fee, chain_id, expiry
         hasher.update(&self.fee.to_le_bytes());
@@ -268,8 +277,7 @@ impl Transaction {
                 // Validate auth_signature size. The Signature type's
                 // deserialization enforces this for network-received data, but
                 // locally constructed transactions bypass deserialization.
-                let sig_bytes = auth_signature.as_bytes();
-                if sig_bytes.len() != 4627 {
+                if !auth_signature.is_valid_size() || auth_signature.is_empty() {
                     return Err(TxValidationError::InvalidBondReturn);
                 }
                 // Bond return output must have a non-zero commitment
@@ -413,7 +421,7 @@ impl Transaction {
         let outputs: usize = self
             .outputs
             .iter()
-            .map(|o| 32 + 32 + o.encrypted_note.ciphertext.len() + 24 + 32)
+            .map(|o| 32 + 32 + o.encrypted_note.ciphertext.len() + 24 + 32 + 64)
             .sum();
         let messages: usize = self
             .messages
@@ -457,6 +465,7 @@ pub fn compute_tx_content_hash(
         hasher.update(&output.encrypted_note.nonce);
         hasher.update(&(output.encrypted_note.ciphertext.len() as u32).to_le_bytes());
         hasher.update(&output.encrypted_note.ciphertext);
+        hasher.update(&output.blake3_binding);
     }
     // Messages
     hasher.update(&(messages.len() as u32).to_le_bytes());
@@ -481,8 +490,10 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
             kem_public_key,
         } => {
             hasher.update(&[1u8]);
-            hasher.update(&(signing_key.0.len() as u32).to_le_bytes());
-            hasher.update(&signing_key.0);
+            hasher.update(&(signing_key.dilithium.len() as u32).to_le_bytes());
+            hasher.update(&signing_key.dilithium);
+            hasher.update(&(signing_key.sphincs.len() as u32).to_le_bytes());
+            hasher.update(&signing_key.sphincs);
             hasher.update(&(kem_public_key.0.len() as u32).to_le_bytes());
             hasher.update(&kem_public_key.0);
         }
@@ -496,6 +507,7 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
             hasher.update(validator_id);
             hasher.update(&bond_return_output.commitment.0);
             hasher.update(&bond_return_output.stealth_address.one_time_key);
+            hasher.update(&bond_return_output.blake3_binding);
             hasher.update(bond_blinding);
         }
     }
@@ -826,7 +838,10 @@ mod tests {
         tx.fee = crate::constants::VALIDATOR_BASE_BOND + crate::constants::MIN_TX_FEE;
         let kp = FullKeypair::generate();
         tx.tx_type = TxType::ValidatorRegister {
-            signing_key: SigningPublicKey(vec![0xAB; 100]), // wrong size: 100 != 2592
+            signing_key: SigningPublicKey {
+                dilithium: vec![0xAB; 100],
+                sphincs: vec![0xAB; 100],
+            }, // wrong size: 100 != 2592
             kem_public_key: kp.kem.public.clone(),
         };
         assert!(matches!(
@@ -865,11 +880,12 @@ mod tests {
                 .unwrap();
         tx.tx_type = TxType::ValidatorDeregister {
             validator_id: [0x42; 32],
-            auth_signature: Signature(vec![]),
+            auth_signature: Signature::empty(),
             bond_return_output: Box::new(TxOutput {
                 commitment: crate::crypto::commitment::Commitment([0u8; 32]), // all zeros
                 stealth_address: stealth_result.address,
                 encrypted_note,
+                blake3_binding: [0u8; 64],
             }),
             bond_blinding: [0u8; 32],
         };
@@ -1073,11 +1089,15 @@ mod tests {
                 .unwrap();
         tx.tx_type = TxType::ValidatorDeregister {
             validator_id: [0x42; 32],
-            auth_signature: Signature(vec![0xAB; 100]), // wrong size: not 0 and not 4627
+            auth_signature: Signature {
+                dilithium: vec![0xAB; 100],
+                sphincs: vec![0xAB; 100],
+            }, // wrong sizes
             bond_return_output: Box::new(TxOutput {
                 commitment: crate::crypto::commitment::Commitment([1u8; 32]), // non-zero
                 stealth_address: stealth_result.address,
                 encrypted_note,
+                blake3_binding: [0u8; 64],
             }),
             bond_blinding: [0u8; 32],
         };

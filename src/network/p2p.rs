@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use zeroize::Zeroize;
 
-use crate::crypto::keys::{KemKeypair, SigningKeypair, SigningPublicKey};
+use crate::crypto::keys::{KemKeypair, KemPublicKey, SigningKeypair, SigningPublicKey};
 use crate::network::nat::NatState;
 use crate::network::{self, Message, PeerId, PeerInfo, PROTOCOL_VERSION};
 use crate::Hash;
@@ -94,6 +94,20 @@ impl SessionKeys {
                 recv_key: init_send,
             }
         }
+    }
+
+    /// Derive new session keys for a rekey, mixing old and new key material.
+    /// This ensures post-compromise security: even if the new KEM shared secret
+    /// alone is compromised, the attacker also needs the old keys.
+    fn derive_rekey(
+        old_send: &[u8; 32],
+        old_recv: &[u8; 32],
+        new_shared_secret: &[u8; 32],
+        is_initiator: bool,
+    ) -> Self {
+        let mixed =
+            crate::hash_concat(&[b"umbra.p2p.rekey", old_send, old_recv, new_shared_secret]);
+        Self::derive(&mixed, is_initiator)
     }
 }
 
@@ -919,11 +933,12 @@ async fn handle_inbound_inner(
     write_message(&mut writer, &hello).await?;
 
     let their_hello = read_message(&mut reader).await?;
-    let (peer_id, public_key) = match their_hello {
+    let (peer_id, public_key, peer_kem_pk) = match their_hello {
         Message::Hello {
             version,
             peer_id,
             public_key,
+            kem_public_key,
             ..
         } => {
             // Accept v2 (pre-NAT) and v3+ peers
@@ -934,7 +949,7 @@ async fn handle_inbound_inner(
             if peer_id != public_key.fingerprint() {
                 return Err(P2pError::InvalidHandshake);
             }
-            (peer_id, public_key)
+            (peer_id, public_key, kem_public_key)
         }
         _ => return Err(P2pError::InvalidHandshake),
     };
@@ -983,6 +998,8 @@ async fn handle_inbound_inner(
         session_keys,
         internal_tx,
         false, // inbound
+        peer_kem_pk,
+        config.our_kem_keypair.clone(),
     )
     .await
 }
@@ -1076,11 +1093,16 @@ async fn handle_outbound(
         session_keys,
         internal_tx,
         true, // outbound
+        peer_kem_pk,
+        config.our_kem_keypair.clone(),
     )
     .await
 }
 
 /// Spawn encrypted read and write tasks for an authenticated connection.
+///
+/// Includes periodic Kyber KEM rekeying for forward secrecy. Only the outbound
+/// (initiator) side initiates rekeys; the inbound side responds.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_encrypted_connection_tasks(
     peer_id: PeerId,
@@ -1091,6 +1113,8 @@ async fn spawn_encrypted_connection_tasks(
     session_keys: SessionKeys,
     internal_tx: mpsc::Sender<InternalEvent>,
     is_outbound: bool,
+    peer_kem_pk: KemPublicKey,
+    our_kem_keypair: KemKeypair,
 ) -> Result<(), P2pError> {
     let (msg_tx, mut msg_rx) = mpsc::channel::<Message>(128);
 
@@ -1110,6 +1134,12 @@ async fn spawn_encrypted_connection_tasks(
 
     let SessionKeys { send_key, recv_key } = session_keys;
 
+    // Rekey coordination channels:
+    // read task -> write task: "incoming RekeyRequest received, here's the new shared secret"
+    let (rekey_from_read_tx, mut rekey_from_read_rx) = mpsc::channel::<[u8; 32]>(1);
+    // write task -> read task: "I initiated a rekey, here's the new shared secret"
+    let (rekey_from_write_tx, mut rekey_from_write_rx) = mpsc::channel::<[u8; 32]>(1);
+
     // Encrypted read task with per-peer rate limiting
     tokio::spawn(async move {
         let mut rate_limiter = RateLimiter::new(
@@ -1119,80 +1149,239 @@ async fn spawn_encrypted_connection_tasks(
         let mut violations: u32 = 0;
         let mut reader = reader;
         let mut expected_counter: u64 = 0;
+        let mut recv_key = recv_key;
+        let mut send_key_copy = [0u8; 32]; // Track for rekey derivation
+        send_key_copy.copy_from_slice(&send_key);
 
         loop {
-            match read_encrypted(&mut reader, &recv_key, &mut expected_counter).await {
-                Ok(message) => {
-                    if !rate_limiter.try_consume() {
-                        violations += 1;
-                        tracing::warn!(
-                            peer = %hex::encode(&peer_id[..8]),
-                            violations = violations,
-                            max = crate::constants::PEER_RATE_LIMIT_STRIKES,
-                            "Rate limit exceeded"
-                        );
-                        // Report misbehavior for rate limit violation
-                        let _ = internal_tx_read
-                            .send(InternalEvent::Misbehavior {
-                                peer_id,
-                                penalty: 10,
-                            })
-                            .await;
-                        if violations >= crate::constants::PEER_RATE_LIMIT_STRIKES {
-                            tracing::warn!(
-                                peer = %hex::encode(&peer_id[..8]),
-                                "Disconnecting peer for repeated rate violations"
+            tokio::select! {
+                // Check for rekey initiated by our write task
+                new_secret = rekey_from_write_rx.recv() => {
+                    match new_secret {
+                        Some(shared_secret) => {
+                            // Initiator side: write task already switched send_key.
+                            // We switch recv_key to match peer's new send_key.
+                            let new_keys = SessionKeys::derive_rekey(
+                                &send_key_copy, &recv_key, &shared_secret, is_outbound,
                             );
+                            recv_key = new_keys.recv_key;
+                            send_key_copy = new_keys.send_key;
+                            tracing::debug!(
+                                peer = %hex::encode(&peer_id[..8]),
+                                "Read task: recv key updated after initiated rekey"
+                            );
+                        }
+                        None => break, // write task dropped
+                    }
+                }
+                // Normal message read
+                result = read_encrypted(&mut reader, &recv_key, &mut expected_counter) => {
+                    match result {
+                        Ok(message) => {
+                            // Handle transport-level rekey messages internally
+                            match &message {
+                                Message::RekeyRequest { kem_ciphertext } => {
+                                    // Responder side: peer initiated a rekey
+                                    match our_kem_keypair.decapsulate(kem_ciphertext) {
+                                        Some(shared_secret) => {
+                                            let new_keys = SessionKeys::derive_rekey(
+                                                &send_key_copy, &recv_key,
+                                                &shared_secret.0, is_outbound,
+                                            );
+                                            // Switch recv_key immediately (peer already
+                                            // switched their send_key)
+                                            recv_key = new_keys.recv_key;
+                                            send_key_copy = new_keys.send_key;
+                                            // Tell write task to send RekeyAck and
+                                            // switch send_key
+                                            let _ = rekey_from_read_tx
+                                                .send(shared_secret.0).await;
+                                            tracing::debug!(
+                                                peer = %hex::encode(&peer_id[..8]),
+                                                "Received RekeyRequest, recv key updated"
+                                            );
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                peer = %hex::encode(&peer_id[..8]),
+                                                "Failed to decapsulate rekey ciphertext"
+                                            );
+                                        }
+                                    }
+                                    continue; // Don't forward to node
+                                }
+                                Message::RekeyAck => {
+                                    // Initiator side: peer acknowledged our rekey.
+                                    // recv_key was already updated via the channel.
+                                    tracing::debug!(
+                                        peer = %hex::encode(&peer_id[..8]),
+                                        "Received RekeyAck"
+                                    );
+                                    continue; // Don't forward to node
+                                }
+                                _ => {}
+                            }
+                            if !rate_limiter.try_consume() {
+                                violations += 1;
+                                tracing::warn!(
+                                    peer = %hex::encode(&peer_id[..8]),
+                                    violations = violations,
+                                    max = crate::constants::PEER_RATE_LIMIT_STRIKES,
+                                    "Rate limit exceeded"
+                                );
+                                let _ = internal_tx_read
+                                    .send(InternalEvent::Misbehavior {
+                                        peer_id,
+                                        penalty: 10,
+                                    })
+                                    .await;
+                                if violations >= crate::constants::PEER_RATE_LIMIT_STRIKES {
+                                    tracing::warn!(
+                                        peer = %hex::encode(&peer_id[..8]),
+                                        "Disconnecting peer for repeated rate violations"
+                                    );
+                                    let _ = internal_tx_read
+                                        .send(InternalEvent::Disconnected(peer_id))
+                                        .await;
+                                    break;
+                                }
+                                continue;
+                            }
+                            if internal_tx_read
+                                .send(InternalEvent::Message {
+                                    from: peer_id,
+                                    message: Box::new(message),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = internal_tx_read
+                                .send(InternalEvent::Misbehavior {
+                                    peer_id,
+                                    penalty: 5,
+                                })
+                                .await;
                             let _ = internal_tx_read
                                 .send(InternalEvent::Disconnected(peer_id))
                                 .await;
                             break;
                         }
-                        continue;
                     }
-                    if internal_tx_read
-                        .send(InternalEvent::Message {
-                            from: peer_id,
-                            message: Box::new(message),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    // Report misbehavior for message read/decrypt error
-                    let _ = internal_tx_read
-                        .send(InternalEvent::Misbehavior {
-                            peer_id,
-                            penalty: 5,
-                        })
-                        .await;
-                    let _ = internal_tx_read
-                        .send(InternalEvent::Disconnected(peer_id))
-                        .await;
-                    break;
                 }
             }
         }
     });
 
-    // Encrypted write task
+    // Encrypted write task with rekey initiation
     tokio::spawn(async move {
         let mut writer = writer;
         let mut counter: u64 = 0;
-        while let Some(msg) = msg_rx.recv().await {
-            if write_encrypted(&mut writer, &msg, &send_key, &mut counter)
-                .await
-                .is_err()
-            {
-                let _ = internal_tx_disconnect
-                    .send(InternalEvent::Disconnected(peer_id))
-                    .await;
-                break;
+        let mut send_key = send_key;
+        let mut recv_key_copy = [0u8; 32]; // Track for rekey derivation
+        recv_key_copy.copy_from_slice(&recv_key);
+        let mut msgs_since_rekey: u64 = 0;
+        let mut last_rekey = Instant::now();
+
+        loop {
+            tokio::select! {
+                // Check for rekey request from read task (responder side)
+                new_secret = rekey_from_read_rx.recv() => {
+                    match new_secret {
+                        Some(shared_secret) => {
+                            // Send RekeyAck with OLD key first
+                            if write_encrypted(
+                                &mut writer, &Message::RekeyAck,
+                                &send_key, &mut counter,
+                            ).await.is_err() {
+                                let _ = internal_tx_disconnect
+                                    .send(InternalEvent::Disconnected(peer_id)).await;
+                                break;
+                            }
+                            // Now switch send_key
+                            let new_keys = SessionKeys::derive_rekey(
+                                &send_key, &recv_key_copy,
+                                &shared_secret, is_outbound,
+                            );
+                            send_key = new_keys.send_key;
+                            recv_key_copy = new_keys.recv_key;
+                            msgs_since_rekey = 0;
+                            last_rekey = Instant::now();
+                            tracing::debug!(
+                                peer = %hex::encode(&peer_id[..8]),
+                                "Send task: sent RekeyAck, send key updated"
+                            );
+                        }
+                        None => break, // read task dropped
+                    }
+                }
+                // Normal message send
+                msg = msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            // Check if we should initiate a rekey (outbound/initiator only)
+                            if is_outbound && (
+                                msgs_since_rekey >= crate::constants::P2P_REKEY_INTERVAL
+                                || last_rekey.elapsed().as_secs()
+                                    >= crate::constants::P2P_REKEY_TIME_SECS
+                            ) {
+                                // Initiate rekey: encapsulate to peer's KEM PK
+                                if let Some((shared_secret, kem_ct)) =
+                                    peer_kem_pk.encapsulate()
+                                {
+                                    // Send RekeyRequest with OLD key
+                                    let rekey_msg = Message::RekeyRequest {
+                                        kem_ciphertext: kem_ct,
+                                    };
+                                    if write_encrypted(
+                                        &mut writer, &rekey_msg,
+                                        &send_key, &mut counter,
+                                    ).await.is_err() {
+                                        let _ = internal_tx_disconnect
+                                            .send(InternalEvent::Disconnected(peer_id))
+                                            .await;
+                                        break;
+                                    }
+                                    // Switch send_key immediately
+                                    let new_keys = SessionKeys::derive_rekey(
+                                        &send_key, &recv_key_copy,
+                                        &shared_secret.0, is_outbound,
+                                    );
+                                    send_key = new_keys.send_key;
+                                    recv_key_copy = new_keys.recv_key;
+                                    // Tell read task to update recv_key
+                                    let _ = rekey_from_write_tx
+                                        .send(shared_secret.0).await;
+                                    msgs_since_rekey = 0;
+                                    last_rekey = Instant::now();
+                                    tracing::debug!(
+                                        peer = %hex::encode(&peer_id[..8]),
+                                        "Initiated rekey, send key updated"
+                                    );
+                                }
+                            }
+
+                            if write_encrypted(
+                                &mut writer, &msg, &send_key, &mut counter,
+                            ).await.is_err() {
+                                let _ = internal_tx_disconnect
+                                    .send(InternalEvent::Disconnected(peer_id))
+                                    .await;
+                                break;
+                            }
+                            msgs_since_rekey += 1;
+                        }
+                        None => break,
+                    }
+                }
             }
         }
+        // Zeroize keys on exit
+        send_key.zeroize();
+        recv_key_copy.zeroize();
     });
 
     Ok(())

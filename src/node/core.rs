@@ -251,96 +251,97 @@ pub fn load_or_generate_keypair(
 ) -> Result<(SigningKeypair, KemKeypair), std::io::Error> {
     let key_path = data_dir.join("validator.key");
 
+    // Key file format (v2 - hybrid):
+    //   [4: dil_pk_len][dil_pk][dil_sk (4896)]
+    //   [4: sph_pk_len][sph_pk (64)][sph_sk (128)]
+    //   [4: kem_pk_len][kem_pk][kem_sk]
+    let load_hybrid = |data: &[u8]| -> Option<(SigningKeypair, KemKeypair)> {
+        let mut pos = 0;
+        // Dilithium5 section
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let dil_pk_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if dil_pk_len != 2592 || pos + dil_pk_len + 4896 > data.len() {
+            return None;
+        }
+        let dil_pk = data[pos..pos + dil_pk_len].to_vec();
+        pos += dil_pk_len;
+        let dil_sk = data[pos..pos + 4896].to_vec();
+        pos += 4896;
+        // SPHINCS+ section
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let sph_pk_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if sph_pk_len != 64 || pos + 64 + 128 > data.len() {
+            return None;
+        }
+        let sph_pk = data[pos..pos + 64].to_vec();
+        pos += 64;
+        let sph_sk = data[pos..pos + 128].to_vec();
+        pos += 128;
+        // KEM section
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let kem_pk_len = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if pos + kem_pk_len > data.len() {
+            return None;
+        }
+        let kem_pk = data[pos..pos + kem_pk_len].to_vec();
+        pos += kem_pk_len;
+        let kem_sk = data[pos..].to_vec();
+
+        let signing = SigningKeypair::from_bytes(dil_pk, dil_sk, sph_pk, sph_sk)?;
+        let kem = KemKeypair::from_bytes(kem_pk, kem_sk)?;
+        Some((signing, kem))
+    };
+
+    let save_key_file = |keypair: &SigningKeypair,
+                         kem_kp: &KemKeypair,
+                         path: &Path|
+     -> Result<(), std::io::Error> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(keypair.public.dilithium.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&keypair.public.dilithium);
+        bytes.extend_from_slice(&keypair.secret.dilithium);
+        bytes.extend_from_slice(&(keypair.public.sphincs.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&keypair.public.sphincs);
+        bytes.extend_from_slice(&keypair.secret.sphincs);
+        bytes.extend_from_slice(&(kem_kp.public.0.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&kem_kp.public.0);
+        bytes.extend_from_slice(&kem_kp.secret.0);
+        std::fs::write(path, &bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    };
+
     if key_path.exists() {
         let bytes = std::fs::read(&key_path)?;
-        // Format: [pk_len: u32 LE][pk_bytes][sk_bytes]
-        //         [kem_pk_len: u32 LE][kem_pk_bytes][kem_sk_bytes]  (optional, added later)
-        if bytes.len() < 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "key file too short",
-            ));
+        if let Some((keypair, kem_kp)) = load_hybrid(&bytes) {
+            tracing::info!("Loaded validator key (hybrid format)");
+            return Ok((keypair, kem_kp));
         }
-        let pk_len = u32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "key file header corrupted")
-        })?) as usize;
-        if bytes.len() < 4 + pk_len {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "key file truncated",
-            ));
-        }
-
-        // Dilithium5 has fixed secret key size of 4896 bytes
-        let signing_sk_end = 4 + pk_len + 4896;
-        let (pk_bytes, sk_bytes, kem_kp) = if bytes.len() > signing_sk_end + 4 {
-            // KEM section exists
-            let pk_bytes = bytes[4..4 + pk_len].to_vec();
-            let sk_bytes = bytes[4 + pk_len..signing_sk_end].to_vec();
-            let kem_pk_len = u32::from_le_bytes(
-                bytes[signing_sk_end..signing_sk_end + 4]
-                    .try_into()
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "key file KEM header corrupted",
-                        )
-                    })?,
-            ) as usize;
-            let kem_pk_start = signing_sk_end + 4;
-            if bytes.len() < kem_pk_start + kem_pk_len {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "key file truncated (KEM section)",
-                ));
-            }
-            let kem_pk_bytes = bytes[kem_pk_start..kem_pk_start + kem_pk_len].to_vec();
-            let kem_sk_bytes = bytes[kem_pk_start + kem_pk_len..].to_vec();
-            let kem = KemKeypair::from_bytes(kem_pk_bytes, kem_sk_bytes).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid KEM key data")
-            })?;
-            (pk_bytes, sk_bytes, kem)
-        } else {
-            // Legacy file without KEM — use all remaining bytes as signing sk
-            let pk_bytes = bytes[4..4 + pk_len].to_vec();
-            let sk_bytes = bytes[4 + pk_len..].to_vec();
-            let kem = KemKeypair::generate();
-            // Re-save with KEM section appended
-            let mut new_bytes = bytes.clone();
-            let kem_pk_len = (kem.public.0.len() as u32).to_le_bytes();
-            new_bytes.extend_from_slice(&kem_pk_len);
-            new_bytes.extend_from_slice(&kem.public.0);
-            new_bytes.extend_from_slice(&kem.secret.0);
-            std::fs::write(&key_path, &new_bytes)?;
-            tracing::info!("Upgraded key file with KEM keypair");
-            (pk_bytes, sk_bytes, kem)
-        };
-
-        let keypair = SigningKeypair::from_bytes(pk_bytes, sk_bytes).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid key data")
-        })?;
-        tracing::info!("Loaded validator key");
+        // Legacy format — regenerate with hybrid keys
+        tracing::warn!("Legacy key file detected; generating new hybrid keypair");
+        let keypair = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
+        save_key_file(&keypair, &kem_kp, &key_path)?;
+        tracing::info!("Saved new hybrid validator key");
         Ok((keypair, kem_kp))
     } else {
         std::fs::create_dir_all(data_dir)?;
         let keypair = SigningKeypair::generate();
         let kem_kp = KemKeypair::generate();
-        let pk_len = (keypair.public.0.len() as u32).to_le_bytes();
-        let kem_pk_len = (kem_kp.public.0.len() as u32).to_le_bytes();
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&pk_len);
-        bytes.extend_from_slice(&keypair.public.0);
-        bytes.extend_from_slice(&keypair.secret.0);
-        bytes.extend_from_slice(&kem_pk_len);
-        bytes.extend_from_slice(&kem_kp.public.0);
-        bytes.extend_from_slice(&kem_kp.secret.0);
-        std::fs::write(&key_path, &bytes)?;
-        // Restrict key file permissions to owner-only
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
-        }
+        save_key_file(&keypair, &kem_kp, &key_path)?;
         tracing::info!("Generated validator key");
         Ok((keypair, kem_kp))
     }
@@ -1677,6 +1678,9 @@ impl Node {
             Message::NatInfo { .. }
             | Message::NatPunchRequest { .. }
             | Message::NatPunchNotify { .. } => {}
+
+            // Rekey messages are handled internally by the P2P encrypted transport layer
+            Message::RekeyRequest { .. } | Message::RekeyAck => {}
         }
     }
 
@@ -2379,7 +2383,7 @@ impl Node {
                 .unwrap_or_default()
                 .as_millis() as u64,
             state_root,
-            signature: crate::crypto::keys::Signature(vec![]),
+            signature: crate::crypto::keys::Signature::empty(),
             vrf_proof: Some(vrf.clone()),
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -2468,57 +2472,42 @@ mod tests {
     }
 
     #[test]
-    fn keypair_rejects_too_short_file() {
+    fn keypair_regenerates_from_corrupted_file() {
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("validator.key");
+        // Write a too-short file (clearly corrupted)
         std::fs::write(&key_path, [0u8; 3]).unwrap();
-        let result = load_or_generate_keypair(dir.path());
-        match result {
-            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
-            Ok(_) => panic!("expected error for too-short key file"),
-        }
+        // Should regenerate fresh hybrid keypair
+        let (kp, kem) = load_or_generate_keypair(dir.path()).unwrap();
+        assert!(kp.public.is_valid_size());
+        assert!(kem.public.is_valid_size());
     }
 
     #[test]
-    fn keypair_rejects_truncated_pk() {
+    fn keypair_regenerates_from_legacy_format() {
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("validator.key");
-        // Write a valid pk_len (e.g. 2592 for Dilithium5) but only 10 bytes of pk data
+        // Write a valid-looking legacy file (just dilithium pk header + truncated data)
         let pk_len: u32 = 2592;
         let mut bytes = pk_len.to_le_bytes().to_vec();
         bytes.extend_from_slice(&[0u8; 10]);
         std::fs::write(&key_path, &bytes).unwrap();
-        let result = load_or_generate_keypair(dir.path());
-        match result {
-            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
-            Ok(_) => panic!("expected error for truncated key file"),
-        }
+        // Should regenerate since this isn't valid hybrid format
+        let (kp, kem) = load_or_generate_keypair(dir.path()).unwrap();
+        assert!(kp.public.is_valid_size());
+        assert!(kem.public.is_valid_size());
     }
 
     #[test]
-    fn keypair_legacy_upgrade_adds_kem() {
+    fn keypair_hybrid_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        // Generate a key pair normally first to get valid signing bytes
-        let (kp, _) = load_or_generate_keypair(dir.path()).unwrap();
-        let original_fingerprint = kp.public.fingerprint();
-        let key_path = dir.path().join("validator.key");
-
-        // Read the full file, then truncate to just signing key (remove KEM section)
-        let full_bytes = std::fs::read(&key_path).unwrap();
-        let pk_len = u32::from_le_bytes(full_bytes[..4].try_into().unwrap()) as usize;
-        let signing_end = 4 + pk_len + 4896; // pk header + pk + sk
-        let legacy_bytes = &full_bytes[..signing_end];
-        std::fs::write(&key_path, legacy_bytes).unwrap();
-
-        // Now load again — should upgrade with a new KEM section
+        // Generate and save a hybrid keypair
+        let (kp1, _kem1) = load_or_generate_keypair(dir.path()).unwrap();
+        let fingerprint1 = kp1.public.fingerprint();
+        // Load again — should recover the same keys
         let (kp2, kem2) = load_or_generate_keypair(dir.path()).unwrap();
-        assert_eq!(kp2.public.fingerprint(), original_fingerprint);
-
-        // Verify the file was upgraded (now larger)
-        let upgraded_bytes = std::fs::read(&key_path).unwrap();
-        assert!(upgraded_bytes.len() > signing_end);
-
-        // And the KEM keypair works (encapsulate + decapsulate)
+        assert_eq!(kp2.public.fingerprint(), fingerprint1);
+        // KEM keypair works
         let (shared1, ct) = kem2.public.encapsulate().unwrap();
         let shared2 = kem2.decapsulate(&ct).unwrap();
         assert_eq!(shared1.0, shared2.0);

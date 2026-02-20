@@ -297,10 +297,13 @@ impl TransactionBuilder {
             )
             .ok_or(TxBuildError::EncryptionFailed)?;
 
+            let blake3_binding =
+                crate::crypto::commitment::blake3_512_binding(spec.value, &blinding);
             tx_outputs.push(TxOutput {
                 commitment,
                 stealth_address,
                 encrypted_note,
+                blake3_binding,
             });
             output_values.push(spec.value);
             output_blindings_felts.push(blinding.to_felts());

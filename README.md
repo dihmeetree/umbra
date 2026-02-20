@@ -23,16 +23,17 @@ Umbra is a post-quantum private cryptocurrency with zk-STARKs and DAG-BFT consen
 
 All cryptographic primitives are post-quantum secure:
 
-| Primitive                 | Algorithm                        | Security                             |
-| ------------------------- | -------------------------------- | ------------------------------------ |
-| Signatures                | CRYSTALS-Dilithium5 (ML-DSA-87)  | NIST Level 5 (~256-bit classical)    |
-| Key encapsulation         | CRYSTALS-Kyber1024 (ML-KEM-1024) | NIST Level 5                         |
-| Commitments & Merkle tree | Rescue Prime (Rp64_256)          | STARK-friendly, post-quantum         |
-| General hashing           | BLAKE3                           | 256-bit (128-bit quantum via Grover) |
-| Zero-knowledge proofs     | zk-STARKs (winterfell)           | ~128-bit conjectured security        |
-| Authenticated encryption  | XChaCha20-Poly1305 / ChaCha20-Poly1305 | 256-bit key, standard AEAD   |
+| Primitive                 | Algorithm                                          | Security                             |
+| ------------------------- | -------------------------------------------------- | ------------------------------------ |
+| Signatures                | Dilithium5 + SPHINCS+-SHAKE-256s (hybrid AND)      | ~256-bit quantum (dual-scheme)       |
+| Key encapsulation         | CRYSTALS-Kyber1024 (ML-KEM-1024) + periodic rekey  | NIST Level 5, forward secrecy        |
+| Commitments               | Rescue Prime (Rp64_256) + BLAKE3-512 (hybrid)      | ~256-bit quantum preimage            |
+| Merkle tree               | Rescue Prime (Rp64_256)                            | STARK-friendly, post-quantum         |
+| General hashing           | BLAKE3                                             | 256-bit (128-bit quantum via Grover) |
+| Zero-knowledge proofs     | zk-STARKs (winterfell)                             | ~128-bit conjectured security        |
+| Authenticated encryption  | XChaCha20-Poly1305 / ChaCha20-Poly1305             | 256-bit key, standard AEAD           |
 
-No trusted setup is required. All proofs are transparent. The P2P transport layer uses the same post-quantum primitives (Kyber1024 for key exchange, Dilithium5 for mutual authentication, ChaCha20-Poly1305 AEAD), so all node-to-node communication is quantum-resistant.
+No trusted setup is required. All proofs are transparent. Signatures use AND composition: both Dilithium5 and SPHINCS+ must verify, providing redundancy against single-scheme breaks. Commitments are dual-bound: Rescue Prime for STARK circuits, BLAKE3-512 (XOF mode) for ~256-bit quantum preimage resistance. The P2P transport layer uses Kyber1024 for key exchange with periodic rekeying for forward secrecy, Dilithium5 + SPHINCS+ for mutual authentication, and ChaCha20-Poly1305 AEAD, so all node-to-node communication is quantum-resistant.
 
 ### Coin Emission
 
@@ -78,7 +79,7 @@ umbra/
     state.rs                Chain state (bonds, slashing, sled-backed nullifiers), Ledger, parallel verification
     main.rs                 Node + wallet binary with clap subcommands and config file loading
     crypto/
-      keys.rs               Dilithium5 signing + Kyber1024 KEM keypairs
+      keys.rs               Hybrid signing (Dilithium5 + SPHINCS+) + Kyber1024 KEM keypairs
       stealth.rs            Stealth address generation and detection
       commitment.rs         Rescue Prime commitments with field element conversions
       nullifier.rs          Nullifier derivation and double-spend tracking
@@ -124,7 +125,7 @@ umbra/
   tests/
     e2e.rs                  End-to-end integration tests (25 tests across 3 groups)
     consensus_properties.rs Consensus property tests: BFT safety, liveness, consistency (12 tests)
-    stark_constraints.rs    AIR constraint soundness verification (42 adversarial tests)
+    stark_constraints.rs    AIR constraint soundness verification (44 adversarial tests)
   fuzz/
     Cargo.toml              Fuzz crate configuration (cargo-fuzz / libfuzzer-sys)
     fuzz_targets/
@@ -147,7 +148,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **897 tests**.
+**~28,500 lines of Rust** across 43 source files with **910 tests**.
 
 ## Building
 
@@ -482,10 +483,11 @@ Async TCP transport built on tokio with post-quantum encrypted channels:
 - **Encrypted transport** — all peer connections are encrypted and mutually authenticated:
   1. Hello exchange (plaintext) — version check + Kyber1024 public key exchange
   2. Kyber1024 KEM handshake — initiator encapsulates to responder's KEM public key
-  3. Dilithium5 mutual authentication — both sides sign a transcript hash binding peer IDs + KEM ciphertext
+  3. Dilithium5 + SPHINCS+ hybrid mutual authentication — both sides sign a transcript hash binding peer IDs + KEM ciphertext
   4. ChaCha20-Poly1305 AEAD for all subsequent messages (counter-based nonces, TLS 1.3 style)
   5. Authenticated encryption with replay protection via monotonic counters
   6. Domain-separated session key derivation — initiator and responder derive mirrored send/recv keys from the shared secret
+  7. Periodic KEM rekeying — fresh Kyber encapsulation every 10,000 messages or 5 minutes, mixing old and new key material for forward secrecy
 - **Per-peer rate limiting** — token-bucket rate limiter (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 violations
 - **DDoS protections** — per-IP connection limits (max 4), /16 subnet concentration limits (max 8 inbound) for eclipse attack mitigation, snapshot chunk request rate limiting, bounded peer discovery sets, and snapshot buffer OOM prevention
 - Configurable max peers (default 64) and connection timeout (5 seconds)
@@ -500,7 +502,7 @@ Async TCP transport built on tokio with post-quantum encrypted channels:
 
 The `Node` struct ties everything together with a `tokio::select!` event loop:
 
-- **Persistent validator identity** — signing and KEM keypairs are saved to `data_dir/validator.key` on first run and loaded on subsequent startups (legacy key files without KEM are auto-upgraded)
+- **Persistent validator identity** — signing and KEM keypairs are saved to `data_dir/validator.key` on first run and loaded on subsequent startups (legacy key files are detected and regenerated as fresh hybrid keypairs)
 - **Active consensus participation** — when selected for the committee via VRF, the node proposes vertices (draining high-fee transactions from the mempool) and casts BFT votes on incoming vertices
 - **Liveness guarantee** — vertices are proposed even when the mempool is empty, ensuring epoch advancement and coinbase emission regardless of transaction volume
 - **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, creates a coinbase output for the proposer, purges conflicting mempool entries, persists to storage, and slashes equivocators
@@ -522,16 +524,19 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test
+cargo test                       # Full suite (~910 tests)
+cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
-All 897 tests cover:
+The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
+
+All 910 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
-- **Post-quantum crypto** — key generation, signing, KEM roundtrips, fingerprint determinism and uniqueness (signing + KEM), Signature/KemCiphertext byte access, deserialization validation (wrong-size rejection for Signature, SigningPublicKey, KemPublicKey, KemCiphertext), PublicAddress address_id determinism and uniqueness, verify with empty signature
+- **Post-quantum crypto** — hybrid key generation (Dilithium5 + SPHINCS+), hybrid signing and verification (AND composition), KEM roundtrips, fingerprint determinism and uniqueness (signing + KEM), Signature/KemCiphertext byte access, deserialization validation (wrong-size rejection for Signature, SigningPublicKey, KemPublicKey, KemCiphertext), PublicAddress address_id determinism and uniqueness, verify with empty signature, tampered Dilithium component fails verify, tampered SPHINCS+ component fails verify
 - **Stealth addresses** — generation, detection, multi-index scanning, spend auth derivation determinism, index-dependent key uniqueness, per-output spend auth uniqueness
-- **Rescue Prime** — commitments, field element conversions, state_digest_to_hash extraction, hash_to_felts large value reduction, felts_to_hash field-native preservation, exp7 zero and one edge cases
+- **Rescue Prime + BLAKE3-512** — commitments, hybrid blake3_512_binding generation and verification, field element conversions, state_digest_to_hash extraction, hash_to_felts large value reduction, felts_to_hash field-native preservation, exp7 zero and one edge cases
 - **Nullifiers** — determinism, double-spend detection, to_felts roundtrip, as_bytes, NullifierSet len/is_empty/contains/remove/iter
 - **Merkle tree** — construction, path verification, depth-20 canonical padding, restore from stored level data, last-appended path coverage, truncate_to_zero, truncate_partial (root matches fresh build), truncate_noop_when_larger, truncate_then_reappend, build_merkle_tree_empty, level_len, path_out_of_bounds
 - **Encryption** — message roundtrips, authentication, tamper detection, exact block boundary (32 bytes), cross-block boundary (33 bytes), oversized shared secret rejected, AEAD tag tampering, decrypt with wrong shared secret, encrypt at max limit
@@ -722,7 +727,7 @@ Proves in zero knowledge:
 | `PEER_PENALTY_INVALID_MSG`           | 20          | Reputation penalty for invalid message                          |
 | `PEER_PENALTY_HANDSHAKE_FAIL`        | 30          | Reputation penalty for handshake failure                        |
 | `PRUNING_RETAIN_EPOCHS`              | 100         | Epochs of finalized vertices retained in memory                 |
-| `PROTOCOL_VERSION_ID`                | 1           | Current protocol version for vertex signaling                   |
+| `PROTOCOL_VERSION`                   | 3           | Current protocol version for vertex signaling                   |
 | `UPGRADE_THRESHOLD`                  | 75%         | Signal threshold for protocol upgrade activation                |
 | `UPNP_TIMEOUT_MS`                    | 5,000       | UPnP gateway discovery timeout                                  |
 | `UPNP_LEASE_DURATION_SECS`           | 3,600       | UPnP port mapping lease duration (1 hour)                       |
@@ -731,6 +736,8 @@ Proves in zero knowledge:
 | `HOLE_PUNCH_TIMEOUT_MS`              | 5,000       | TCP hole punch connection timeout                               |
 | `HOLE_PUNCH_RETRY_DELAY_MS`          | 500         | Delay between hole punch retry attempts                         |
 | `HOLE_PUNCH_MAX_ATTEMPTS`            | 3           | Maximum hole punch retry attempts                               |
+| `P2P_REKEY_INTERVAL`                 | 10,000      | Messages between KEM rekeying for forward secrecy               |
+| `P2P_REKEY_TIME_SECS`                | 300         | Maximum seconds between KEM rekeying (5 minutes)                |
 | `MAX_CONNECTIONS_PER_IP`             | 4           | Maximum connections from a single IP address                    |
 | `MAX_PEERS_PER_SUBNET`               | 8           | Maximum inbound peers from the same /16 subnet                  |
 | `MAX_RECENTLY_ATTEMPTED`             | 1,000       | Maximum tracked recently-attempted peer addresses               |
@@ -743,6 +750,7 @@ Proves in zero knowledge:
 | -------------------------------- | --------------------------------------------------------- |
 | `pqcrypto-dilithium`             | CRYSTALS-Dilithium5 post-quantum signatures               |
 | `pqcrypto-kyber`                 | CRYSTALS-Kyber1024 post-quantum key encapsulation         |
+| `pqcrypto-sphincsplus`           | SPHINCS+-SHAKE-256s post-quantum hash-based signatures    |
 | `pqcrypto-traits`                | Trait definitions for PQ crypto types                     |
 | `blake3`                         | Fast, quantum-secure hashing                              |
 | `chacha20poly1305`               | Standard AEAD (XChaCha20-Poly1305 / ChaCha20-Poly1305)   |
@@ -784,7 +792,7 @@ All transaction validity is verified via zk-STARKs:
 
 ### Security Hardening
 
-- **Vertex signature verification** — every DAG vertex must carry a valid Dilithium5 signature from its proposer; unsigned vertices are rejected at insertion time
+- **Vertex signature verification** — every DAG vertex must carry a valid hybrid signature (Dilithium5 + SPHINCS+) from its proposer; unsigned vertices are rejected at insertion time
 - **Full transaction validation on apply** — `apply_transaction()` calls `validate_structure()` before any state mutation, verifying all zk-STARK proofs (balance + spend) and structural integrity
 - **VRF anti-grinding** — VRF outputs include a `proof_commitment` (hash of the proof) enabling a commit-reveal scheme that prevents validators from grinding on epoch seeds
 - **Plaintext size limits** — `encrypt_with_shared_secret` rejects plaintexts exceeding `MAX_ENCRYPT_PLAINTEXT`, preventing memory exhaustion attacks
@@ -872,7 +880,7 @@ All transaction validity is verified via zk-STARKs:
 - **Mnemonic zeroization** — recovery phrase words are zeroized from memory immediately after display to minimize secret exposure window
 - **Multi-transaction mempool eviction** — when the mempool is full, lowest-fee transactions are evicted in a loop until space is available, rather than evicting only one
 - **Cached finalized vertex count** — `finalized_vertex_count()` uses an `AtomicU64` cache instead of scanning the sled tree, improving performance for health and metrics endpoints
-- **Validator key size validation** — `ValidatorRegister` transactions validate that signing keys are exactly 2592 bytes (Dilithium5) and KEM keys are exactly 1568 bytes (Kyber1024), rejecting malformed keys
+- **Validator key size validation** — `ValidatorRegister` transactions validate that signing keys are exactly 2592 bytes (Dilithium5) + 64 bytes (SPHINCS+) and KEM keys are exactly 1568 bytes (Kyber1024), rejecting malformed keys
 - **Nullifier persistence propagation** — sled write failures in `record_nullifier()` propagate as errors through `apply_vertex()`, preventing silent state desynchronization between memory and storage that could allow double-spends after restart
 - **Sync epoch validation** — finalized vertices received during sync are rejected if their epoch exceeds the sync peer's claimed epoch + 1, preventing malicious peers from advancing local state to fabricated future epochs
 - **Proof link cross-validation** — each spend proof's `proof_link` is cross-checked against the corresponding entry in the balance proof's `input_proof_links`, providing defense-in-depth against proof_link tampering
@@ -923,7 +931,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 897 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 910 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

@@ -1565,6 +1565,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqcrypto-sphincsplus"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f6ff8925443869aab1332bb8b0fe3b75cf113516bccf05da4dc71bc33162252"
+dependencies = [
+ "cc",
+ "glob",
+ "libc",
+ "pqcrypto-internals",
+ "pqcrypto-traits",
+]
+
+[[package]]
 name = "pqcrypto-traits"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,6 +2496,7 @@ dependencies = [
  "igd-next",
  "pqcrypto-dilithium",
  "pqcrypto-kyber",
+ "pqcrypto-sphincsplus",
  "pqcrypto-traits",
  "rand 0.10.0",
  "rayon",

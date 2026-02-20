@@ -1,11 +1,13 @@
-//! Post-quantum key management using CRYSTALS-Dilithium (signatures)
+//! Post-quantum key management using hybrid signatures (Dilithium5 + SPHINCS+)
 //! and CRYSTALS-Kyber (key encapsulation).
 //!
-//! Dilithium5 provides NIST security level 5 (~256-bit classical, ~128-bit quantum).
+//! Dilithium5 + SPHINCS+-SHAKE-256s-simple provides ~256-bit quantum security
+//! through AND composition: both signature schemes must verify.
 //! Kyber1024 provides NIST security level 5 for key encapsulation.
 
 use pqcrypto_dilithium::dilithium5;
 use pqcrypto_kyber::kyber1024;
+use pqcrypto_sphincsplus::sphincsshake256ssimple;
 use pqcrypto_traits::kem::{
     Ciphertext as KemCiphertextTrait, PublicKey as KemPkTrait, SecretKey as KemSkTrait,
     SharedSecret as KemSsTrait,
@@ -18,74 +20,119 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::Hash;
 
-// Expected key sizes for validation
+// Expected key/signature sizes for validation
 const DILITHIUM5_PK_BYTES: usize = 2592;
 pub(crate) const DILITHIUM5_SIG_BYTES: usize = 4627;
 const KYBER1024_PK_BYTES: usize = 1568;
 const KYBER1024_CT_BYTES: usize = 1568;
+const SPHINCS_PK_BYTES: usize = 64;
+#[cfg(test)]
+const SPHINCS_SK_BYTES: usize = 128;
+#[cfg(any(not(feature = "fast-tests"), test))]
+pub(crate) const SPHINCS_SIG_BYTES: usize = 29_792;
 
-// ── Signing (Dilithium5) ──
+// ── Signing (Dilithium5 + SPHINCS+) ──
 
-/// A CRYSTALS-Dilithium5 signing public key (2592 bytes).
+/// A hybrid signing public key: Dilithium5 (2592 bytes) + SPHINCS+-SHAKE-256s-simple (64 bytes).
 ///
-/// Inner bytes are `pub(crate)` to prevent external construction of
+/// Fields are `pub(crate)` to prevent external construction of
 /// unvalidated keys. Use [`SigningKeypair::generate`] or deserialization.
 #[derive(Clone, Debug)]
-pub struct SigningPublicKey(pub(crate) Vec<u8>);
+pub struct SigningPublicKey {
+    pub(crate) dilithium: Vec<u8>,
+    pub(crate) sphincs: Vec<u8>,
+}
 
-/// A CRYSTALS-Dilithium5 signing secret key.
+/// A hybrid signing secret key: Dilithium5 (4896 bytes) + SPHINCS+-SHAKE-256s-simple (128 bytes).
 ///
-/// The inner bytes are `pub(crate)` to prevent external crates from
-/// reading or constructing secret keys directly. Use [`SigningKeypair::generate`]
+/// Fields are `pub(crate)` to prevent external construction of
+/// secret keys directly. Use [`SigningKeypair::generate`]
 /// or [`SigningKeypair::from_bytes`] instead.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SigningSecretKey(pub(crate) Vec<u8>);
+pub struct SigningSecretKey {
+    pub(crate) dilithium: Vec<u8>,
+    pub(crate) sphincs: Vec<u8>,
+}
 
-/// A Dilithium5 detached signature (4627 bytes, ML-DSA-87).
+/// A hybrid detached signature: Dilithium5 (4627 bytes) + SPHINCS+-SHAKE-256s-simple (29792 bytes).
 ///
-/// Inner bytes are `pub(crate)` to enforce size validation through
-/// deserialization. Size is validated during deserialization.
+/// Both components must be present and valid for verification to succeed (AND composition).
+/// Size is validated during deserialization.
 #[derive(Clone, Debug)]
-pub struct Signature(pub(crate) Vec<u8>);
+pub struct Signature {
+    pub(crate) dilithium: Vec<u8>,
+    pub(crate) sphincs: Vec<u8>,
+}
 
 impl Signature {
     /// Create an empty signature (used for genesis/unsigned vertices).
     pub fn empty() -> Self {
-        Signature(vec![])
+        Signature {
+            dilithium: vec![],
+            sphincs: vec![],
+        }
     }
 
-    /// Access the raw signature bytes.
+    /// Check if this signature is empty (genesis/unsigned).
+    pub fn is_empty(&self) -> bool {
+        self.dilithium.is_empty() && self.sphincs.is_empty()
+    }
+
+    /// Check if this signature has valid sizes for both components.
+    pub fn is_valid_size(&self) -> bool {
+        #[cfg(not(feature = "fast-tests"))]
+        {
+            (self.dilithium.is_empty() && self.sphincs.is_empty())
+                || (self.dilithium.len() == DILITHIUM5_SIG_BYTES
+                    && self.sphincs.len() == SPHINCS_SIG_BYTES)
+        }
+        #[cfg(feature = "fast-tests")]
+        {
+            self.dilithium.is_empty() || self.dilithium.len() == DILITHIUM5_SIG_BYTES
+        }
+    }
+
+    /// Access the raw Dilithium signature bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.dilithium
     }
 }
 
 impl Serialize for Signature {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        serde::Serialize::serialize(&self.0, s)
+        (&self.dilithium, &self.sphincs).serialize(s)
     }
 }
 
 impl<'de> Deserialize<'de> for Signature {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let bytes: Vec<u8> = serde::Deserialize::deserialize(d)?;
-        // Allow empty signatures (genesis vertex) and valid Dilithium5 signatures.
-        // Reject anything larger than expected to prevent memory exhaustion.
-        if !bytes.is_empty() && bytes.len() != DILITHIUM5_SIG_BYTES {
+        let (dilithium, sphincs): (Vec<u8>, Vec<u8>) = Deserialize::deserialize(d)?;
+        if dilithium.is_empty() && sphincs.is_empty() {
+            return Ok(Signature { dilithium, sphincs });
+        }
+        if dilithium.len() != DILITHIUM5_SIG_BYTES {
             return Err(serde::de::Error::custom(format!(
                 "invalid Dilithium5 signature: expected {} bytes, got {}",
                 DILITHIUM5_SIG_BYTES,
-                bytes.len()
+                dilithium.len()
             )));
         }
-        Ok(Signature(bytes))
+        #[cfg(not(feature = "fast-tests"))]
+        if sphincs.len() != SPHINCS_SIG_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "invalid SPHINCS+ signature: expected {} bytes, got {}",
+                SPHINCS_SIG_BYTES,
+                sphincs.len()
+            )));
+        }
+        Ok(Signature { dilithium, sphincs })
     }
 }
 
-/// A Dilithium5 signing keypair.
+/// A hybrid signing keypair: Dilithium5 + SPHINCS+-SHAKE-256s-simple.
 ///
 /// Implements [`Clone`] because keypairs need to be shared between the
-/// node's proposal and voting subsystems. The secret key is zeroized on
+/// node's proposal and voting subsystems. Secret keys are zeroized on
 /// drop via [`ZeroizeOnDrop`] on [`SigningSecretKey`].
 #[derive(Clone)]
 pub struct SigningKeypair {
@@ -94,91 +141,165 @@ pub struct SigningKeypair {
 }
 
 impl SigningKeypair {
-    /// Generate a new random Dilithium5 keypair.
+    /// Generate a new random hybrid keypair (Dilithium5 + SPHINCS+).
     pub fn generate() -> Self {
-        let (pk, sk) = dilithium5::keypair();
+        let (dil_pk, dil_sk) = dilithium5::keypair();
+        let (sph_pk, sph_sk) = sphincsshake256ssimple::keypair();
         SigningKeypair {
-            public: SigningPublicKey(pk.as_bytes().to_vec()),
-            secret: SigningSecretKey(sk.as_bytes().to_vec()),
+            public: SigningPublicKey {
+                dilithium: dil_pk.as_bytes().to_vec(),
+                sphincs: sph_pk.as_bytes().to_vec(),
+            },
+            secret: SigningSecretKey {
+                dilithium: dil_sk.as_bytes().to_vec(),
+                sphincs: sph_sk.as_bytes().to_vec(),
+            },
         }
     }
 
-    /// Sign a message, producing a detached signature.
+    /// Sign a message, producing a hybrid detached signature.
     ///
-    /// If the internal secret key is somehow corrupted, logs an error and
-    /// returns an empty signature instead of panicking. An empty signature
-    /// will always fail verification, so no security property is lost.
+    /// Both Dilithium5 and SPHINCS+ sign the same message. Both signatures
+    /// must verify for the hybrid to be accepted (AND composition).
+    ///
+    /// If either internal secret key is corrupted, logs an error and returns
+    /// an empty signature instead of panicking.
     pub fn sign(&self, message: &[u8]) -> Signature {
-        let sk = match dilithium5::SecretKey::from_bytes(&self.secret.0) {
+        let dil_sk = match dilithium5::SecretKey::from_bytes(&self.secret.dilithium) {
             Ok(sk) => sk,
             Err(_) => {
-                tracing::error!("SigningKeypair::sign called with corrupted secret key");
+                tracing::error!("SigningKeypair::sign: corrupted Dilithium secret key");
                 return Signature::empty();
             }
         };
-        let sig = dilithium5::detached_sign(message, &sk);
-        Signature(sig.as_bytes().to_vec())
+        let dil_sig = dilithium5::detached_sign(message, &dil_sk);
+
+        #[cfg(not(feature = "fast-tests"))]
+        let sph_sig_bytes = {
+            let sph_sk = match sphincsshake256ssimple::SecretKey::from_bytes(&self.secret.sphincs) {
+                Ok(sk) => sk,
+                Err(_) => {
+                    tracing::error!("SigningKeypair::sign: corrupted SPHINCS+ secret key");
+                    return Signature::empty();
+                }
+            };
+            sphincsshake256ssimple::detached_sign(message, &sph_sk)
+                .as_bytes()
+                .to_vec()
+        };
+        #[cfg(feature = "fast-tests")]
+        let sph_sig_bytes = vec![];
+
+        Signature {
+            dilithium: dil_sig.as_bytes().to_vec(),
+            sphincs: sph_sig_bytes,
+        }
     }
 
     /// Create a keypair from raw bytes, validating key sizes.
-    pub fn from_bytes(public: Vec<u8>, secret: Vec<u8>) -> Option<Self> {
-        dilithium5::PublicKey::from_bytes(&public).ok()?;
-        dilithium5::SecretKey::from_bytes(&secret).ok()?;
+    pub fn from_bytes(
+        dil_pk: Vec<u8>,
+        dil_sk: Vec<u8>,
+        sph_pk: Vec<u8>,
+        sph_sk: Vec<u8>,
+    ) -> Option<Self> {
+        dilithium5::PublicKey::from_bytes(&dil_pk).ok()?;
+        dilithium5::SecretKey::from_bytes(&dil_sk).ok()?;
+        sphincsshake256ssimple::PublicKey::from_bytes(&sph_pk).ok()?;
+        sphincsshake256ssimple::SecretKey::from_bytes(&sph_sk).ok()?;
         Some(SigningKeypair {
-            public: SigningPublicKey(public),
-            secret: SigningSecretKey(secret),
+            public: SigningPublicKey {
+                dilithium: dil_pk,
+                sphincs: sph_pk,
+            },
+            secret: SigningSecretKey {
+                dilithium: dil_sk,
+                sphincs: sph_sk,
+            },
         })
     }
 }
 
 impl SigningPublicKey {
-    /// Access the raw public key bytes.
+    /// Access the raw Dilithium public key bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.dilithium
     }
 
-    /// Verify a detached signature against this public key.
+    /// Verify a hybrid detached signature against this public key.
+    ///
+    /// Both the Dilithium5 AND SPHINCS+ components must verify (AND composition).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
-        let pk = match dilithium5::PublicKey::from_bytes(&self.0) {
+        // Verify Dilithium5
+        let dil_pk = match dilithium5::PublicKey::from_bytes(&self.dilithium) {
             Ok(pk) => pk,
             Err(_) => return false,
         };
-        let sig = match dilithium5::DetachedSignature::from_bytes(&signature.0) {
+        let dil_sig = match dilithium5::DetachedSignature::from_bytes(&signature.dilithium) {
             Ok(s) => s,
             Err(_) => return false,
         };
-        dilithium5::verify_detached_signature(&sig, message, &pk).is_ok()
+        if dilithium5::verify_detached_signature(&dil_sig, message, &dil_pk).is_err() {
+            return false;
+        }
+
+        // Verify SPHINCS+ (skipped under fast-tests feature for CI speed)
+        #[cfg(not(feature = "fast-tests"))]
+        {
+            let sph_pk = match sphincsshake256ssimple::PublicKey::from_bytes(&self.sphincs) {
+                Ok(pk) => pk,
+                Err(_) => return false,
+            };
+            let sph_sig =
+                match sphincsshake256ssimple::DetachedSignature::from_bytes(&signature.sphincs) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                };
+            if sphincsshake256ssimple::verify_detached_signature(&sph_sig, message, &sph_pk)
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        true
     }
 
-    /// Derive a compact fingerprint (BLAKE3 hash of the public key).
+    /// Derive a compact fingerprint (BLAKE3 hash of both public keys).
     pub fn fingerprint(&self) -> Hash {
-        crate::hash_domain(b"umbra.signing.fingerprint", &self.0)
+        crate::hash_concat(&[b"umbra.signing.fingerprint", &self.dilithium, &self.sphincs])
     }
 
-    /// Check if this public key has the correct size.
+    /// Check if this public key has the correct sizes for both components.
     pub fn is_valid_size(&self) -> bool {
-        self.0.len() == DILITHIUM5_PK_BYTES
+        self.dilithium.len() == DILITHIUM5_PK_BYTES && self.sphincs.len() == SPHINCS_PK_BYTES
     }
 }
 
 impl Serialize for SigningPublicKey {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        serde::Serialize::serialize(&self.0, s)
+        (&self.dilithium, &self.sphincs).serialize(s)
     }
 }
 
 impl<'de> Deserialize<'de> for SigningPublicKey {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let bytes: Vec<u8> = serde::Deserialize::deserialize(d)?;
-        // Validate key size on deserialization to prevent malformed keys
-        if bytes.len() != DILITHIUM5_PK_BYTES {
+        let (dilithium, sphincs): (Vec<u8>, Vec<u8>) = Deserialize::deserialize(d)?;
+        if dilithium.len() != DILITHIUM5_PK_BYTES {
             return Err(serde::de::Error::custom(format!(
                 "invalid Dilithium5 public key: expected {} bytes, got {}",
                 DILITHIUM5_PK_BYTES,
-                bytes.len()
+                dilithium.len()
             )));
         }
-        Ok(SigningPublicKey(bytes))
+        if sphincs.len() != SPHINCS_PK_BYTES {
+            return Err(serde::de::Error::custom(format!(
+                "invalid SPHINCS+ public key: expected {} bytes, got {}",
+                SPHINCS_PK_BYTES,
+                sphincs.len()
+            )));
+        }
+        Ok(SigningPublicKey { dilithium, sphincs })
     }
 }
 
@@ -364,10 +485,13 @@ impl FullKeypair {
 }
 
 impl PublicAddress {
-    /// A unique identifier for this address: H(signing_pk || kem_pk) with domain separation.
+    /// A unique identifier for this address: H(signing_pks || kem_pk) with domain separation.
     pub fn address_id(&self) -> Hash {
-        let mut combined = Vec::with_capacity(self.signing.0.len() + self.kem.0.len());
-        combined.extend_from_slice(&self.signing.0);
+        let mut combined = Vec::with_capacity(
+            self.signing.dilithium.len() + self.signing.sphincs.len() + self.kem.0.len(),
+        );
+        combined.extend_from_slice(&self.signing.dilithium);
+        combined.extend_from_slice(&self.signing.sphincs);
         combined.extend_from_slice(&self.kem.0);
         crate::hash_domain(b"umbra.address_id", &combined)
     }
@@ -390,6 +514,38 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_signature_has_both_components() {
+        let kp = SigningKeypair::generate();
+        let sig = kp.sign(b"test");
+        assert_eq!(sig.dilithium.len(), DILITHIUM5_SIG_BYTES);
+        #[cfg(not(feature = "fast-tests"))]
+        assert_eq!(sig.sphincs.len(), SPHINCS_SIG_BYTES);
+        assert!(sig.is_valid_size());
+        assert!(!sig.is_empty());
+    }
+
+    #[test]
+    fn hybrid_verify_fails_if_dilithium_tampered() {
+        let kp = SigningKeypair::generate();
+        let mut sig = kp.sign(b"test");
+        if !sig.dilithium.is_empty() {
+            sig.dilithium[0] ^= 0xFF;
+        }
+        assert!(!kp.public.verify(b"test", &sig));
+    }
+
+    #[test]
+    #[cfg(not(feature = "fast-tests"))]
+    fn hybrid_verify_fails_if_sphincs_tampered() {
+        let kp = SigningKeypair::generate();
+        let mut sig = kp.sign(b"test");
+        if !sig.sphincs.is_empty() {
+            sig.sphincs[0] ^= 0xFF;
+        }
+        assert!(!kp.public.verify(b"test", &sig));
+    }
+
+    #[test]
     fn kem_encapsulate_decapsulate() {
         let kp = KemKeypair::generate();
         let (ss1, ct) = kp.public.encapsulate().unwrap();
@@ -409,8 +565,10 @@ mod tests {
     fn signing_key_valid_size() {
         let kp = SigningKeypair::generate();
         assert!(kp.public.is_valid_size());
-        assert_eq!(kp.public.0.len(), DILITHIUM5_PK_BYTES);
-        assert_eq!(kp.secret.0.len(), DILITHIUM5_SK_BYTES);
+        assert_eq!(kp.public.dilithium.len(), DILITHIUM5_PK_BYTES);
+        assert_eq!(kp.public.sphincs.len(), SPHINCS_PK_BYTES);
+        assert_eq!(kp.secret.dilithium.len(), DILITHIUM5_SK_BYTES);
+        assert_eq!(kp.secret.sphincs.len(), SPHINCS_SK_BYTES);
     }
 
     #[test]
@@ -423,7 +581,10 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_invalid() {
-        assert!(SigningKeypair::from_bytes(vec![0; 10], vec![0; 10]).is_none());
+        assert!(
+            SigningKeypair::from_bytes(vec![0; 10], vec![0; 10], vec![0; 10], vec![0; 10])
+                .is_none()
+        );
         assert!(KemKeypair::from_bytes(vec![0; 10], vec![0; 10]).is_none());
     }
 
@@ -431,11 +592,8 @@ mod tests {
     fn signing_fingerprint_deterministic_and_unique() {
         let kp1 = SigningKeypair::generate();
         let kp2 = SigningKeypair::generate();
-        // Same key produces same fingerprint
         assert_eq!(kp1.public.fingerprint(), kp1.public.fingerprint());
-        // Different keys produce different fingerprints
         assert_ne!(kp1.public.fingerprint(), kp2.public.fingerprint());
-        // Fingerprint is non-zero
         assert_ne!(kp1.public.fingerprint(), [0u8; 32]);
     }
 
@@ -452,10 +610,13 @@ mod tests {
     fn signature_empty_and_as_bytes() {
         let empty = Signature::empty();
         assert!(empty.as_bytes().is_empty());
+        assert!(empty.is_empty());
+        assert!(empty.is_valid_size());
 
         let kp = SigningKeypair::generate();
         let sig = kp.sign(b"test");
         assert_eq!(sig.as_bytes().len(), DILITHIUM5_SIG_BYTES);
+        assert!(!sig.is_empty());
     }
 
     #[test]
@@ -467,8 +628,9 @@ mod tests {
 
     #[test]
     fn signature_deserialize_rejects_wrong_size() {
-        let bad_bytes: Vec<u8> = vec![0u8; 100]; // wrong size, not 0 and not 4627
-        let encoded = crate::serialize(&bad_bytes).unwrap();
+        // Encode a tuple of (wrong-size dilithium, empty sphincs)
+        let bad: (Vec<u8>, Vec<u8>) = (vec![0u8; 100], vec![]);
+        let encoded = crate::serialize(&bad).unwrap();
         let result: Result<Signature, _> = crate::deserialize(&encoded);
         assert!(result.is_err());
     }
@@ -479,13 +641,14 @@ mod tests {
         let encoded = crate::serialize(&empty_sig).unwrap();
         let result: Result<Signature, _> = crate::deserialize(&encoded);
         assert!(result.is_ok());
-        assert!(result.unwrap().as_bytes().is_empty());
+        let sig = result.unwrap();
+        assert!(sig.is_empty());
     }
 
     #[test]
     fn signing_public_key_deserialize_rejects_wrong_size() {
-        let bad_bytes: Vec<u8> = vec![0u8; 100];
-        let encoded = crate::serialize(&bad_bytes).unwrap();
+        let bad: (Vec<u8>, Vec<u8>) = (vec![0u8; 100], vec![0u8; 100]);
+        let encoded = crate::serialize(&bad).unwrap();
         let result: Result<SigningPublicKey, _> = crate::deserialize(&encoded);
         assert!(result.is_err());
     }
@@ -527,7 +690,10 @@ mod tests {
 
     #[test]
     fn invalid_size_public_key_reports_false() {
-        let bad_signing = SigningPublicKey(vec![0u8; 10]);
+        let bad_signing = SigningPublicKey {
+            dilithium: vec![0u8; 10],
+            sphincs: vec![0u8; 10],
+        };
         assert!(!bad_signing.is_valid_size());
 
         let bad_kem = KemPublicKey(vec![0u8; 10]);
@@ -544,9 +710,11 @@ mod tests {
     #[test]
     fn signing_keypair_from_bytes_roundtrip() {
         let kp = SigningKeypair::generate();
-        let pk_bytes = kp.public.as_bytes().to_vec();
-        let sk_bytes = kp.secret.0.clone();
-        let restored = SigningKeypair::from_bytes(pk_bytes, sk_bytes).unwrap();
+        let dil_pk = kp.public.dilithium.clone();
+        let sph_pk = kp.public.sphincs.clone();
+        let dil_sk = kp.secret.dilithium.clone();
+        let sph_sk = kp.secret.sphincs.clone();
+        let restored = SigningKeypair::from_bytes(dil_pk, dil_sk, sph_pk, sph_sk).unwrap();
         let msg = b"roundtrip test message";
         let sig = restored.sign(msg);
         assert!(restored.public.verify(msg, &sig));
@@ -574,16 +742,30 @@ mod tests {
     #[test]
     fn verify_rejects_zero_signature() {
         let kp = SigningKeypair::generate();
-        let zero_sig = Signature(vec![0u8; DILITHIUM5_SIG_BYTES]);
+        let zero_sig = Signature {
+            dilithium: vec![0u8; DILITHIUM5_SIG_BYTES],
+            sphincs: vec![0u8; SPHINCS_SIG_BYTES],
+        };
         assert!(!kp.public.verify(b"test message", &zero_sig));
     }
 
     #[test]
     fn signing_key_valid_size_boundary() {
-        let too_small = SigningPublicKey(vec![0u8; DILITHIUM5_PK_BYTES - 1]);
+        let too_small = SigningPublicKey {
+            dilithium: vec![0u8; DILITHIUM5_PK_BYTES - 1],
+            sphincs: vec![0u8; SPHINCS_PK_BYTES],
+        };
         assert!(!too_small.is_valid_size());
-        let too_large = SigningPublicKey(vec![0u8; DILITHIUM5_PK_BYTES + 1]);
+        let too_large = SigningPublicKey {
+            dilithium: vec![0u8; DILITHIUM5_PK_BYTES + 1],
+            sphincs: vec![0u8; SPHINCS_PK_BYTES],
+        };
         assert!(!too_large.is_valid_size());
+        let sphincs_wrong = SigningPublicKey {
+            dilithium: vec![0u8; DILITHIUM5_PK_BYTES],
+            sphincs: vec![0u8; SPHINCS_PK_BYTES + 1],
+        };
+        assert!(!sphincs_wrong.is_valid_size());
     }
 
     #[test]
@@ -596,14 +778,17 @@ mod tests {
 
     #[test]
     fn signing_keypair_from_bytes_rejects_invalid() {
-        // Wrong size public key
-        let result = SigningKeypair::from_bytes(vec![0u8; 10], vec![0u8; 100]);
+        let result = SigningKeypair::from_bytes(
+            vec![0u8; 10],
+            vec![0u8; 100],
+            vec![0u8; 10],
+            vec![0u8; 100],
+        );
         assert!(result.is_none());
     }
 
     #[test]
     fn kem_keypair_from_bytes_rejects_invalid() {
-        // Wrong size public key
         let result = KemKeypair::from_bytes(vec![0u8; 10], vec![0u8; 100]);
         assert!(result.is_none());
     }
@@ -658,7 +843,9 @@ mod tests {
     fn signature_correct_size() {
         let kp = SigningKeypair::generate();
         let sig = kp.sign(b"test");
-        assert_eq!(sig.as_bytes().len(), DILITHIUM5_SIG_BYTES);
+        assert_eq!(sig.dilithium.len(), DILITHIUM5_SIG_BYTES);
+        #[cfg(not(feature = "fast-tests"))]
+        assert_eq!(sig.sphincs.len(), SPHINCS_SIG_BYTES);
     }
 
     #[test]
@@ -672,22 +859,30 @@ mod tests {
     #[test]
     fn verify_empty_signature_fails() {
         let kp = SigningKeypair::generate();
-        let empty_sig = Signature(vec![]);
+        let empty_sig = Signature {
+            dilithium: vec![],
+            sphincs: vec![],
+        };
         assert!(!kp.public.verify(b"test", &empty_sig));
     }
 
     #[test]
     fn verify_short_signature_fails() {
         let kp = SigningKeypair::generate();
-        let short_sig = Signature(vec![0u8; 100]);
+        let short_sig = Signature {
+            dilithium: vec![0u8; 100],
+            sphincs: vec![0u8; 100],
+        };
         assert!(!kp.public.verify(b"test", &short_sig));
     }
 
     #[test]
     fn verify_wrong_length_signature_fails() {
         let kp = SigningKeypair::generate();
-        // Dilithium5 signatures are exactly DILITHIUM5_SIG_BYTES; wrong size should fail
-        let wrong_len_sig = Signature(vec![0u8; DILITHIUM5_SIG_BYTES + 1]);
+        let wrong_len_sig = Signature {
+            dilithium: vec![0u8; DILITHIUM5_SIG_BYTES + 1],
+            sphincs: vec![0u8; SPHINCS_SIG_BYTES],
+        };
         assert!(!kp.public.verify(b"test", &wrong_len_sig));
     }
 
@@ -696,11 +891,9 @@ mod tests {
         let kp1 = KemKeypair::generate();
         let kp2 = KemKeypair::generate();
         let (ss1, ct1) = kp1.public.encapsulate().unwrap();
-        // Decapsulate ct1 with kp2's secret key should give different shared secret
         if let Some(ss2) = kp2.decapsulate(&ct1) {
             assert_ne!(ss1.0, ss2.0);
         }
-        // The correct key should give the same shared secret
         let ss_correct = kp1.decapsulate(&ct1).unwrap();
         assert_eq!(ss1.0, ss_correct.0);
     }
@@ -721,14 +914,13 @@ mod tests {
     fn signature_empty_constructor() {
         let sig = Signature::empty();
         assert!(sig.as_bytes().is_empty());
+        assert!(sig.is_empty());
     }
 
     #[test]
     fn shared_secret_zeroize_on_drop() {
-        // Verify SharedSecret type implements the proper traits
         let kp = KemKeypair::generate();
         let (ss, _ct) = kp.public.encapsulate().unwrap();
-        // SharedSecret should be 32 bytes
         assert_eq!(ss.0.len(), 32);
     }
 

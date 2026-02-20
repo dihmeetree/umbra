@@ -238,11 +238,14 @@ impl Dag {
             parents: vec![],
             epoch: 0,
             round: 0,
-            proposer: SigningPublicKey(vec![0; 2592]), // System (Dilithium5 key size)
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 2592],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 0,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
@@ -553,11 +556,14 @@ mod tests {
             parents,
             epoch: 0,
             round,
-            proposer: SigningPublicKey(vec![nonce; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![nonce; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: round * 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
@@ -796,11 +802,14 @@ mod tests {
             parents: vec![gid],
             epoch: 5,
             round: 1,
-            proposer: SigningPublicKey(vec![1; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![1; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 5000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -823,11 +832,14 @@ mod tests {
             parents: vec![v1.id],
             epoch: 200,
             round: 2,
-            proposer: SigningPublicKey(vec![2; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![2; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 200000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -906,11 +918,14 @@ mod tests {
             parents: vec![gid],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: txs,
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -943,11 +958,14 @@ mod tests {
             parents: vec![v1.id, v1.id],
             epoch: 0,
             round: 2,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 2000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -976,11 +994,14 @@ mod tests {
             parents: vec![],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1071,11 +1092,14 @@ mod tests {
             parents: vec![gid],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![1; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![1; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1097,11 +1121,14 @@ mod tests {
             parents: vec![v1.id],
             epoch: 100,
             round: 2,
-            proposer: SigningPublicKey(vec![2; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![2; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 100000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1271,7 +1298,8 @@ mod tests {
         assert_eq!(genesis.timestamp, 0);
         assert!(genesis.vrf_proof.is_none());
         assert!(genesis.signature.as_bytes().is_empty());
-        assert_eq!(genesis.proposer.0.len(), 2592); // Dilithium5 key size
+        assert_eq!(genesis.proposer.dilithium.len(), 2592); // Dilithium5 key size
+        assert_eq!(genesis.proposer.sphincs.len(), 64); // SPHINCS+ key size
     }
 
     #[test]
@@ -1392,6 +1420,7 @@ mod tests {
                         nonce: [nonce; 24],
                         ciphertext: vec![nonce],
                     },
+                    blake3_binding: [nonce; 64],
                 }],
                 fee: 0,
                 chain_id: [0u8; 32],
@@ -1426,11 +1455,14 @@ mod tests {
             parents: vec![gid],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: txs.clone(),
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1447,11 +1479,14 @@ mod tests {
             parents: vec![gid],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: txs,
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1503,11 +1538,14 @@ mod tests {
             parents: vec![gid],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![tx1, tx2],
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1588,11 +1626,14 @@ mod tests {
             parents: vec![gid],
             epoch: 0,
             round: 1,
-            proposer: SigningPublicKey(vec![0; 32]),
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
             transactions: vec![],
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -1629,8 +1670,8 @@ mod tests {
         // Sign the correct data
         let mut sig = kp.sign(&id.0);
         // Tamper with the signature
-        if !sig.0.is_empty() {
-            sig.0[0] ^= 0xFF;
+        if !sig.dilithium.is_empty() {
+            sig.dilithium[0] ^= 0xFF;
         }
 
         let v = Vertex {

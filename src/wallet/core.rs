@@ -187,6 +187,14 @@ impl Wallet {
         if expected_commitment != output.commitment {
             return None;
         }
+        if !crate::crypto::commitment::verify_blake3_binding(
+            &output.blake3_binding,
+            value,
+            &blinding,
+        ) {
+            tracing::warn!("Blake3-512 binding mismatch on output");
+            return None;
+        }
         Some(OwnedOutput {
             commitment: output.commitment,
             value,
@@ -696,14 +704,20 @@ impl Wallet {
         let mut key = blake3::derive_key("umbra.wallet.recovery", &entropy);
         entropy.zeroize();
         let mut material = zeroize::Zeroizing::new(Vec::new());
-        let spk = &self.keypair.signing.public.0;
-        let ssk = &self.keypair.signing.secret.0;
+        let dil_pk = &self.keypair.signing.public.dilithium;
+        let dil_sk = &self.keypair.signing.secret.dilithium;
+        let sph_pk = &self.keypair.signing.public.sphincs;
+        let sph_sk = &self.keypair.signing.secret.sphincs;
         let kpk = &self.keypair.kem.public.0;
         let ksk = &self.keypair.kem.secret.0;
-        material.extend_from_slice(&(spk.len() as u32).to_le_bytes());
-        material.extend_from_slice(spk);
-        material.extend_from_slice(&(ssk.len() as u32).to_le_bytes());
-        material.extend_from_slice(ssk);
+        material.extend_from_slice(&(dil_pk.len() as u32).to_le_bytes());
+        material.extend_from_slice(dil_pk);
+        material.extend_from_slice(&(dil_sk.len() as u32).to_le_bytes());
+        material.extend_from_slice(dil_sk);
+        material.extend_from_slice(&(sph_pk.len() as u32).to_le_bytes());
+        material.extend_from_slice(sph_pk);
+        material.extend_from_slice(&(sph_sk.len() as u32).to_le_bytes());
+        material.extend_from_slice(sph_sk);
         material.extend_from_slice(&(kpk.len() as u32).to_le_bytes());
         material.extend_from_slice(kpk);
         material.extend_from_slice(&(ksk.len() as u32).to_le_bytes());
@@ -770,12 +784,14 @@ impl Wallet {
             *pos += len;
             Ok(v)
         };
-        let spk = read_vec(&material, &mut pos)?;
-        let ssk = read_vec(&material, &mut pos)?;
+        let dil_pk = read_vec(&material, &mut pos)?;
+        let dil_sk = read_vec(&material, &mut pos)?;
+        let sph_pk = read_vec(&material, &mut pos)?;
+        let sph_sk = read_vec(&material, &mut pos)?;
         let kpk = read_vec(&material, &mut pos)?;
         let ksk = read_vec(&material, &mut pos)?;
         drop(material);
-        let signing = SigningKeypair::from_bytes(spk, ssk)
+        let signing = SigningKeypair::from_bytes(dil_pk, dil_sk, sph_pk, sph_sk)
             .ok_or_else(|| WalletError::Recovery("invalid signing key in backup".into()))?;
         let kem = KemKeypair::from_bytes(kpk, ksk)
             .ok_or_else(|| WalletError::Recovery("invalid KEM key in backup".into()))?;
@@ -798,6 +814,8 @@ struct WalletFile {
     version: u32,
     signing_pk: Vec<u8>,
     signing_sk: Vec<u8>,
+    sphincs_pk: Vec<u8>,
+    sphincs_sk: Vec<u8>,
     kem_pk: Vec<u8>,
     kem_sk: Vec<u8>,
     outputs: Vec<SerializedOutput>,
@@ -864,19 +882,7 @@ impl From<SerializedSpendStatus> for SpendStatus {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct WalletFileV1 {
-    version: u32,
-    signing_pk: Vec<u8>,
-    signing_sk: Vec<u8>,
-    kem_pk: Vec<u8>,
-    kem_sk: Vec<u8>,
-    outputs: Vec<SerializedOutput>,
-    messages: Vec<SerializedMessage>,
-    last_scanned_sequence: u64,
-}
-
-const WALLET_FILE_VERSION: u32 = 2;
+const WALLET_FILE_VERSION: u32 = 3;
 const ENCRYPTED_MAGIC: [u8; 4] = [0x55, 0x4D, 0x42, 0x33]; // "UMB3" (Argon2id + XChaCha20-Poly1305)
 const WALLET_SALT_SIZE: usize = 32;
 const WALLET_NONCE_SIZE: usize = 24;
@@ -929,8 +935,10 @@ impl Wallet {
             .collect();
         let wallet_file = WalletFile {
             version: WALLET_FILE_VERSION,
-            signing_pk: self.keypair.signing.public.0.clone(),
-            signing_sk: self.keypair.signing.secret.0.clone(),
+            signing_pk: self.keypair.signing.public.dilithium.clone(),
+            signing_sk: self.keypair.signing.secret.dilithium.clone(),
+            sphincs_pk: self.keypair.signing.public.sphincs.clone(),
+            sphincs_sk: self.keypair.signing.secret.sphincs.clone(),
             kem_pk: self.keypair.kem.public.0.clone(),
             kem_sk: self.keypair.kem.secret.0.clone(),
             outputs,
@@ -1026,53 +1034,21 @@ impl Wallet {
         } else {
             raw
         };
-        let wallet_file: WalletFile = if let Ok(wf) = crate::deserialize::<WalletFile>(&bytes) {
-            if wf.version == WALLET_FILE_VERSION {
-                wf
-            } else if wf.version == 1 {
-                let wf1: WalletFileV1 = crate::deserialize(&bytes).map_err(|e| {
-                    WalletError::Persistence(format!("v1 deserialization failed: {}", e))
-                })?;
-                WalletFile {
-                    version: WALLET_FILE_VERSION,
-                    signing_pk: wf1.signing_pk,
-                    signing_sk: wf1.signing_sk,
-                    kem_pk: wf1.kem_pk,
-                    kem_sk: wf1.kem_sk,
-                    outputs: wf1.outputs,
-                    messages: wf1.messages,
-                    last_scanned_sequence: wf1.last_scanned_sequence,
-                    history: Vec::new(),
-                }
-            } else {
-                return Err(WalletError::Persistence(format!(
-                    "unsupported wallet version: {} (expected {})",
-                    wf.version, WALLET_FILE_VERSION
-                )));
-            }
-        } else {
-            let wf1: WalletFileV1 = crate::deserialize(&bytes)
-                .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
-            if wf1.version != 1 {
-                return Err(WalletError::Persistence(format!(
-                    "unsupported wallet version: {}",
-                    wf1.version
-                )));
-            }
-            WalletFile {
-                version: WALLET_FILE_VERSION,
-                signing_pk: wf1.signing_pk,
-                signing_sk: wf1.signing_sk,
-                kem_pk: wf1.kem_pk,
-                kem_sk: wf1.kem_sk,
-                outputs: wf1.outputs,
-                messages: wf1.messages,
-                last_scanned_sequence: wf1.last_scanned_sequence,
-                history: Vec::new(),
-            }
-        };
-        let signing = SigningKeypair::from_bytes(wallet_file.signing_pk, wallet_file.signing_sk)
-            .ok_or_else(|| WalletError::Persistence("invalid signing key data".into()))?;
+        let wallet_file: WalletFile = crate::deserialize::<WalletFile>(&bytes)
+            .map_err(|e| WalletError::Persistence(format!("deserialization failed: {}", e)))?;
+        if wallet_file.version != WALLET_FILE_VERSION {
+            return Err(WalletError::Persistence(format!(
+                "unsupported wallet version: {} (expected {}); please create a new wallet",
+                wallet_file.version, WALLET_FILE_VERSION
+            )));
+        }
+        let signing = SigningKeypair::from_bytes(
+            wallet_file.signing_pk,
+            wallet_file.signing_sk,
+            wallet_file.sphincs_pk,
+            wallet_file.sphincs_sk,
+        )
+        .ok_or_else(|| WalletError::Persistence("invalid signing key data".into()))?;
         let kem = KemKeypair::from_bytes(wallet_file.kem_pk, wallet_file.kem_sk)
             .ok_or_else(|| WalletError::Persistence("invalid KEM key data".into()))?;
         let keypair = FullKeypair { signing, kem };
@@ -1744,10 +1720,12 @@ mod tests {
                 &note_data,
             )
             .unwrap();
+        let blake3_binding = crate::crypto::commitment::blake3_512_binding(amount, &blinding);
         let coinbase_output = crate::transaction::TxOutput {
             commitment,
             stealth_address,
             encrypted_note,
+            blake3_binding,
         };
         assert_eq!(wallet.balance(), 0);
         assert_eq!(wallet.history().len(), 0);

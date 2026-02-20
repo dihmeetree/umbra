@@ -405,7 +405,7 @@ async fn address_page(State(state): State<WalletWebState>) -> Response {
 
     let addr = wallet.address();
     let address_id = hex::encode(&addr.address_id()[..16]);
-    let signing_key_size = addr.signing.0.len();
+    let signing_key_size = addr.signing.dilithium.len() + addr.signing.sphincs.len();
     let kem_key_size = addr.kem.0.len();
     let address_hex = match crate::serialize(&addr) {
         Ok(bytes) => hex::encode(&bytes),

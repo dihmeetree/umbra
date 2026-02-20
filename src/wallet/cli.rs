@@ -194,7 +194,11 @@ pub fn cmd_address(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let (wallet, _) = Wallet::load_from_file(&path, None)?;
     let addr = wallet.address();
     println!("Address ID: {}", hex::encode(&addr.address_id()[..16]));
-    println!("Signing key: {} bytes", addr.signing.0.len());
+    println!(
+        "Signing key: {} + {} bytes (Dilithium5 + SPHINCS+)",
+        addr.signing.dilithium.len(),
+        addr.signing.sphincs.len()
+    );
     println!("KEM key: {} bytes", addr.kem.0.len());
 
     // Re-export address file

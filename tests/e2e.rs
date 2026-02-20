@@ -1047,6 +1047,10 @@ fn test_validator_full_lifecycle() {
         commitment: bond_return_commitment,
         stealth_address: stealth_result.address,
         encrypted_note,
+        blake3_binding: umbra::crypto::commitment::blake3_512_binding(
+            bond,
+            &umbra::crypto::commitment::BlindingFactor::from_bytes(dereg_blinding_bytes),
+        ),
     };
 
     // Build deregister tx with placeholder auth signature

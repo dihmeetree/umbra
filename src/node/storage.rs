@@ -547,7 +547,7 @@ mod tests {
             transactions: vec![],
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
@@ -675,7 +675,7 @@ mod tests {
                 transactions: vec![],
                 timestamp: 1000,
                 state_root: [0u8; 32],
-                signature: Signature(vec![]),
+                signature: Signature::empty(),
                 vrf_proof: None,
                 protocol_version: crate::constants::PROTOCOL_VERSION_ID,
             };
@@ -812,10 +812,12 @@ mod tests {
                 &note_data,
             )
             .unwrap();
+        let blake3_binding = crate::crypto::commitment::blake3_512_binding(500, &blinding);
         TxOutput {
             commitment,
             stealth_address: stealth_result.address,
             encrypted_note,
+            blake3_binding,
         }
     }
 
@@ -880,7 +882,7 @@ mod tests {
             transactions: vec![],
             timestamp: 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };
@@ -896,7 +898,7 @@ mod tests {
             transactions: vec![],
             timestamp: 2000,
             state_root: [1u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         };

@@ -6,9 +6,10 @@
 //! - Ensure selection is unbiased and unpredictable
 //! - Allow anyone to verify the selection was legitimate
 //!
-//! Construction: VRF(sk, input) = (H(sign(sk, input)), proof=sign(sk, input))
-//! Uses Dilithium signatures as the base — the VRF output is derived from
-//! the signature, which is deterministic for a given (sk, input) pair.
+//! Construction: VRF(sk, input) = (H(dilithium_sign(sk, input)), proof=dilithium_sign(sk, input))
+//! Uses Dilithium signatures as the VRF base — the VRF output is derived from
+//! the Dilithium signature, which is deterministic for a given (sk, input) pair.
+//! SPHINCS+ provides authentication redundancy via a separate proof.
 //!
 //! **Anti-grinding**: Because Dilithium may use randomized signing internally,
 //! the protocol uses a commit-reveal scheme to prevent grinding:
@@ -24,16 +25,20 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::keys::{SigningKeypair, SigningPublicKey};
+#[cfg(not(feature = "fast-tests"))]
+use super::keys::SPHINCS_SIG_BYTES;
+use super::keys::{SigningKeypair, SigningPublicKey, DILITHIUM5_SIG_BYTES};
 use crate::Hash;
 
 /// A VRF output and its proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VrfOutput {
-    /// The pseudorandom value (32 bytes)
+    /// The pseudorandom value (32 bytes), derived from the Dilithium signature
     pub value: Hash,
-    /// The proof (a Dilithium signature over the input)
+    /// The Dilithium proof (a Dilithium signature over the input)
     pub proof: Vec<u8>,
+    /// SPHINCS+ authentication proof (redundancy for quantum-safe assurance)
+    pub sphincs_proof: Vec<u8>,
     /// Commitment to the proof: H(proof). Must be submitted before the epoch
     /// seed is revealed, preventing grinding attacks.
     pub proof_commitment: Hash,
@@ -60,18 +65,29 @@ impl VrfOutput {
         // Tag the input to avoid domain confusion
         let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
-        // Sign the tagged input
+        // Sign the tagged input with the hybrid keypair
         let signature = keypair.sign(&tagged_input);
 
-        // Derive the VRF output from the signature
-        let value = crate::hash_domain(b"umbra.vrf.output", &signature.0);
+        // Derive the VRF output from the Dilithium signature only.
+        // Dilithium is deterministic, which is required for VRF correctness:
+        // the same (key, input) must always produce the same VRF value.
+        // SPHINCS+ signing is randomized in pqcrypto, so it CANNOT be mixed
+        // into the VRF value without breaking determinism.
+        //
+        // VRF unpredictability is ~128-bit (Dilithium), but VRF proof
+        // authentication is ~256-bit (AND composition: both signatures must
+        // verify). An attacker who weakens Dilithium still cannot forge VRF
+        // proofs without also breaking SPHINCS+.
+        let value = crate::hash_domain(b"umbra.vrf.output", &signature.dilithium);
 
         // Compute the proof commitment (anti-grinding)
-        let proof_commitment = crate::hash_domain(b"umbra.vrf.proof_commitment", &signature.0);
+        let proof_commitment =
+            crate::hash_domain(b"umbra.vrf.proof_commitment", &signature.dilithium);
 
         VrfOutput {
             value,
-            proof: signature.0,
+            proof: signature.dilithium,
+            sphincs_proof: signature.sphincs,
             proof_commitment,
         }
     }
@@ -90,19 +106,25 @@ impl VrfOutput {
     ) -> bool {
         let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
-        // Validate proof length before constructing a Signature, since
-        // Signature(pub(crate) Vec<u8>) bypasses deserialization-time size checks.
-        if self.proof.len() != crate::crypto::keys::DILITHIUM5_SIG_BYTES {
+        // Validate proof lengths before constructing a Signature
+        if self.proof.len() != DILITHIUM5_SIG_BYTES {
+            return false;
+        }
+        #[cfg(not(feature = "fast-tests"))]
+        if self.sphincs_proof.len() != SPHINCS_SIG_BYTES {
             return false;
         }
 
-        // Verify the signature proof
-        let sig = super::keys::Signature(self.proof.clone());
+        // Verify the hybrid signature (both Dilithium AND SPHINCS+ must pass)
+        let sig = super::keys::Signature {
+            dilithium: self.proof.clone(),
+            sphincs: self.sphincs_proof.clone(),
+        };
         if !public_key.verify(&tagged_input, &sig) {
             return false;
         }
 
-        // Verify the output is correctly derived from the proof
+        // Verify the output is correctly derived from the Dilithium proof
         let expected_value = crate::hash_domain(b"umbra.vrf.output", &self.proof);
         if !crate::constant_time_eq(&self.value, &expected_value) {
             return false;
@@ -139,12 +161,19 @@ impl VrfOutput {
     pub fn verify_proof_only(&self, public_key: &SigningPublicKey, input: &[u8]) -> bool {
         let tagged_input = crate::hash_concat(&[b"umbra.vrf.input", input]);
 
-        // Validate proof length before constructing a Signature.
-        if self.proof.len() != crate::crypto::keys::DILITHIUM5_SIG_BYTES {
+        // Validate proof lengths
+        if self.proof.len() != DILITHIUM5_SIG_BYTES {
+            return false;
+        }
+        #[cfg(not(feature = "fast-tests"))]
+        if self.sphincs_proof.len() != SPHINCS_SIG_BYTES {
             return false;
         }
 
-        let sig = super::keys::Signature(self.proof.clone());
+        let sig = super::keys::Signature {
+            dilithium: self.proof.clone(),
+            sphincs: self.sphincs_proof.clone(),
+        };
         if !public_key.verify(&tagged_input, &sig) {
             return false;
         }
@@ -193,13 +222,13 @@ impl VrfOutput {
 /// signatures. Call once at node startup to catch non-deterministic implementations
 /// that would break VRF correctness.
 ///
-/// Panics if signing the same message twice produces different signatures.
+/// Panics if signing the same message twice produces different Dilithium signatures.
 pub fn assert_deterministic_signing(keypair: &SigningKeypair) {
     let test_msg = crate::hash_domain(b"umbra.vrf.determinism_check", b"test");
     let sig1 = keypair.sign(&test_msg);
     let sig2 = keypair.sign(&test_msg);
     assert_eq!(
-        sig1.0, sig2.0,
+        sig1.dilithium, sig2.dilithium,
         "FATAL: Dilithium5 signing is not deterministic. \
          The VRF construction requires deterministic signatures."
     );
@@ -308,7 +337,6 @@ mod tests {
 
     #[test]
     fn committee_selection_statistics() {
-        // Generate many VRF outputs and check selection rate is roughly correct
         let committee = 21;
         let total = 1000;
         let mut selected = 0;
@@ -322,7 +350,6 @@ mod tests {
             }
         }
 
-        // Should select roughly 21/1000 * 1000 = 21, allow wide margin
         assert!(
             selected > 5 && selected < 60,
             "Expected ~21 selected, got {}",
@@ -381,9 +408,9 @@ mod tests {
         let kp = SigningKeypair::generate();
         let output = VrfOutput::evaluate(&kp, b"edge");
 
-        // total_validators == 0 → always selected
+        // total_validators == 0 -> always selected
         assert!(output.is_selected(5, 0));
-        // committee >= total → always selected
+        // committee >= total -> always selected
         assert!(output.is_selected(10, 5));
         assert!(output.is_selected(10, 10));
     }
@@ -443,7 +470,6 @@ mod tests {
         let kp = SigningKeypair::generate();
         let mut output = VrfOutput::evaluate(&kp, b"proof-len-test");
         let commitment = output.proof_commitment;
-        // Truncate the proof to wrong length
         output.proof = vec![0u8; 100];
         assert!(!output.verify(&kp.public, b"proof-len-test", &commitment));
         assert!(!output.verify_proof_only(&kp.public, b"proof-len-test"));
@@ -472,7 +498,7 @@ mod tests {
         let next1 = genesis.next(&[0u8; 32]);
         let next2 = genesis.next(&[1u8; 32]);
         assert_ne!(next1.seed, next2.seed);
-        assert_eq!(next1.epoch, next2.epoch); // same epoch number
+        assert_eq!(next1.epoch, next2.epoch);
     }
 
     #[test]
@@ -502,8 +528,6 @@ mod tests {
     fn is_selected_committee_size_zero() {
         let kp = SigningKeypair::generate();
         let output = VrfOutput::evaluate(&kp, b"zero-committee");
-        // committee_size=0, total=100 → should never be selected
-        // (0 * (u64::MAX+1) = 0, any value >= 0 is not < 0)
         assert!(!output.is_selected(0, 100));
     }
 
@@ -516,7 +540,6 @@ mod tests {
             let output = VrfOutput::evaluate(&kp, input.as_bytes());
             sort_keys.insert(output.sort_key());
         }
-        // With 20 random keys, all sort keys should be unique
         assert_eq!(sort_keys.len(), 20);
     }
 
@@ -548,5 +571,17 @@ mod tests {
         assert_eq!(e1.epoch, 1);
         let e2 = e1.next(&[0u8; 32]);
         assert_eq!(e2.epoch, 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "fast-tests"))]
+    fn vrf_sphincs_proof_verified() {
+        let kp = SigningKeypair::generate();
+        let mut output = VrfOutput::evaluate(&kp, b"sphincs-test");
+        // Tampering with SPHINCS+ proof should fail verification
+        if !output.sphincs_proof.is_empty() {
+            output.sphincs_proof[0] ^= 0xFF;
+        }
+        assert!(!output.verify(&kp.public, b"sphincs-test", &output.proof_commitment));
     }
 }

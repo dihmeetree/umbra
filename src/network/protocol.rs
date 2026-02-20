@@ -147,6 +147,14 @@ pub enum Message {
         requester_peer_id: PeerId,
         requester_external_addr: String,
     },
+
+    // ── Transport Rekeying (v4) ──
+    /// Request a session rekey with a new Kyber KEM ciphertext.
+    /// Sent over the existing encrypted channel for forward secrecy.
+    RekeyRequest { kem_ciphertext: KemCiphertext },
+
+    /// Acknowledge a rekey request. The receiver has derived new session keys.
+    RekeyAck,
 }
 
 /// Information about a known peer.
@@ -700,6 +708,7 @@ mod tests {
                     nonce: [9u8; 24],
                     ciphertext: vec![10],
                 },
+                blake3_binding: [11u8; 64],
             }],
             fee: 100,
             chain_id: [0u8; 32],

@@ -13,6 +13,7 @@ instant finality, and no trusted setup.
 # Post-quantum cryptography (NIST PQC standards)
 pqcrypto-dilithium = "0.5"
 pqcrypto-kyber = "0.8"
+pqcrypto-sphincsplus = "0.7"
 pqcrypto-traits = "0.3"
 
 # Hashing (256-bit post-quantum security via Grover bound)
@@ -77,6 +78,12 @@ rayon = "1.11.0"
 igd-next = { version = "0.16", features = ["aio_tokio"] }
 tempfile = "3"
 colored = "3"
+
+[features]
+# Skip SPHINCS+ signing and verification in tests for ~5-20x speedup.
+# Production builds MUST NOT use this flag.
+# Usage: cargo test --features fast-tests
+fast-tests = []
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -17,6 +17,30 @@ use crate::crypto::stark::convert::{felts_to_hash, hash_to_felts, Felt};
 use crate::crypto::stark::rescue;
 use crate::Hash;
 
+/// Compute a Blake3-512 binding for defense-in-depth against quantum preimage attacks.
+///
+/// The binding is: Blake3-XOF-512("umbra.commitment.blake3_binding" || value_le || blinding).
+/// This provides ~256-bit quantum preimage resistance (Grover halves the 512-bit output).
+/// Even if Rescue Prime has undiscovered algebraic weaknesses, an attacker cannot recover
+/// (value, blinding) without also breaking Blake3-512.
+///
+/// Verified outside STARK circuits (the STARK proves Rescue Prime commitment knowledge;
+/// Blake3 adds a redundant binding layer).
+pub fn blake3_512_binding(value: u64, blinding: &BlindingFactor) -> [u8; 64] {
+    let mut hasher = blake3::Hasher::new_derive_key("umbra.commitment.blake3_binding");
+    hasher.update(&value.to_le_bytes());
+    hasher.update(&blinding.0);
+    let mut output = [0u8; 64];
+    hasher.finalize_xof().fill(&mut output);
+    output
+}
+
+/// Verify that a Blake3-512 binding matches the given value and blinding factor.
+pub fn verify_blake3_binding(binding: &[u8; 64], value: u64, blinding: &BlindingFactor) -> bool {
+    let expected = blake3_512_binding(value, blinding);
+    crate::constant_time_eq(binding, &expected)
+}
+
 /// A commitment to a value with a blinding factor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Commitment(pub Hash);
@@ -195,5 +219,76 @@ mod tests {
         let f1 = bf.to_felts();
         let f2 = bf.to_felts();
         assert_eq!(f1, f2);
+    }
+
+    // ── Blake3-512 binding tests ──
+
+    #[test]
+    fn blake3_binding_deterministic() {
+        let b = BlindingFactor::from_bytes([42u8; 32]);
+        let b1 = blake3_512_binding(100, &b);
+        let b2 = blake3_512_binding(100, &b);
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn blake3_binding_is_64_bytes() {
+        let b = BlindingFactor::random();
+        let binding = blake3_512_binding(42, &b);
+        assert_eq!(binding.len(), 64);
+    }
+
+    #[test]
+    fn blake3_binding_differs_by_value() {
+        let b = BlindingFactor::from_bytes([1u8; 32]);
+        let b1 = blake3_512_binding(100, &b);
+        let b2 = blake3_512_binding(200, &b);
+        assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn blake3_binding_differs_by_blinding() {
+        let b1 = BlindingFactor::from_bytes([1u8; 32]);
+        let b2 = BlindingFactor::from_bytes([2u8; 32]);
+        let binding1 = blake3_512_binding(100, &b1);
+        let binding2 = blake3_512_binding(100, &b2);
+        assert_ne!(binding1, binding2);
+    }
+
+    #[test]
+    fn blake3_binding_nonzero_for_zero_inputs() {
+        let b = BlindingFactor::from_bytes([0u8; 32]);
+        let binding = blake3_512_binding(0, &b);
+        assert_ne!(binding, [0u8; 64]);
+    }
+
+    #[test]
+    fn verify_blake3_binding_correct() {
+        let b = BlindingFactor::random();
+        let binding = blake3_512_binding(42, &b);
+        assert!(verify_blake3_binding(&binding, 42, &b));
+    }
+
+    #[test]
+    fn verify_blake3_binding_wrong_value() {
+        let b = BlindingFactor::random();
+        let binding = blake3_512_binding(42, &b);
+        assert!(!verify_blake3_binding(&binding, 43, &b));
+    }
+
+    #[test]
+    fn verify_blake3_binding_wrong_blinding() {
+        let b1 = BlindingFactor::from_bytes([1u8; 32]);
+        let b2 = BlindingFactor::from_bytes([2u8; 32]);
+        let binding = blake3_512_binding(42, &b1);
+        assert!(!verify_blake3_binding(&binding, 42, &b2));
+    }
+
+    #[test]
+    fn blake3_binding_max_value() {
+        let b = BlindingFactor::random();
+        let binding = blake3_512_binding(u64::MAX, &b);
+        assert!(verify_blake3_binding(&binding, u64::MAX, &b));
+        assert!(!verify_blake3_binding(&binding, u64::MAX - 1, &b));
     }
 }

@@ -1002,10 +1002,12 @@ impl ChainState {
             .checked_add(amount)
             .filter(|&total| total <= crate::constants::MAX_TOTAL_SUPPLY)?;
 
+        let blake3_binding = crate::crypto::commitment::blake3_512_binding(amount, &blinding);
         Some(TxOutput {
             commitment,
             stealth_address,
             encrypted_note,
+            blake3_binding,
         })
     }
 
@@ -1048,10 +1050,12 @@ impl ChainState {
             .checked_add(amount)
             .filter(|&total| total <= crate::constants::MAX_TOTAL_SUPPLY)?;
 
+        let blake3_binding = crate::crypto::commitment::blake3_512_binding(amount, &blinding);
         Some(TxOutput {
             commitment,
             stealth_address,
             encrypted_note,
+            blake3_binding,
         })
     }
 
@@ -1419,7 +1423,7 @@ mod tests {
             transactions,
             timestamp: round * 1000,
             state_root: [0u8; 32],
-            signature: Signature(vec![]),
+            signature: Signature::empty(),
             vrf_proof: None,
             protocol_version: crate::constants::PROTOCOL_VERSION_ID,
         }
@@ -1454,6 +1458,7 @@ mod tests {
                 commitment,
                 stealth_address: stealth_result.address,
                 encrypted_note,
+                blake3_binding: [0u8; 64],
             }],
             fee: 10,
             chain_id: crate::constants::chain_id(),

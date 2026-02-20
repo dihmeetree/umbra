@@ -457,6 +457,7 @@ fn make_dummy_output() -> TxOutput {
         commitment: Commitment(rand::random()),
         stealth_address: stealth.address,
         encrypted_note: note,
+        blake3_binding: [0u8; 64],
     }
 }
 
@@ -1322,6 +1323,7 @@ async fn run_chaos_scenarios(
                     commitment: Commitment([0u8; 32]), // Zero commitment = invalid
                     stealth_address: stealth.address,
                     encrypted_note: note,
+                    blake3_binding: [0u8; 64],
                 }),
                 bond_blinding: [0u8; 32],
             },

@@ -187,6 +187,13 @@ pub mod constants {
     /// Maximum number of hole punch connection attempts.
     pub const HOLE_PUNCH_MAX_ATTEMPTS: u32 = 3;
 
+    // ── P2P Transport Rekeying ──
+
+    /// Number of encrypted messages before triggering automatic session rekey.
+    pub const P2P_REKEY_INTERVAL: u64 = 10_000;
+    /// Maximum time (seconds) between rekeys for forward secrecy.
+    pub const P2P_REKEY_TIME_SECS: u64 = 300;
+
     /// Minimum transaction fee (in base units).
     ///
     /// Enforced by `validate_structure()` to prevent zero-fee spam. Coinbase or
@@ -273,6 +280,29 @@ pub mod constants {
 
 /// 32-byte hash used throughout the protocol
 pub type Hash = [u8; 32];
+
+/// Serde helper for `[u8; 64]` arrays (bincode's serde doesn't support arrays >32).
+pub mod serde_bytes64 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(data: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+        let v: Vec<u8> = data.to_vec();
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+        let v: Vec<u8> = Vec::deserialize(d)?;
+        if v.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 64 bytes for blake3_binding, got {}",
+                v.len()
+            )));
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&v);
+        Ok(arr)
+    }
+}
 
 /// Compute a domain-separated BLAKE3 hash.
 ///

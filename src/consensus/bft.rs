@@ -1271,8 +1271,8 @@ mod tests {
         let msg = vote_sign_data(&vertex_id, 0, 0, &VoteType::Accept, &chain_id);
         let mut sig = keypairs[0].sign(&msg);
         // Tamper with signature bytes
-        if !sig.0.is_empty() {
-            sig.0[0] ^= 0xFF;
+        if !sig.dilithium.is_empty() {
+            sig.dilithium[0] ^= 0xFF;
         }
         let vote = Vote {
             vertex_id,
@@ -2210,8 +2210,8 @@ mod tests {
 
         // One invalid (tampered) signature from validator 2
         let mut sig2 = keypairs[2].sign(&msg);
-        if !sig2.0.is_empty() {
-            sig2.0[0] ^= 0xFF;
+        if !sig2.dilithium.is_empty() {
+            sig2.dilithium[0] ^= 0xFF;
         }
 
         let cert = Certificate {
