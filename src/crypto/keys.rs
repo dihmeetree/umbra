@@ -142,17 +142,37 @@ pub struct SigningKeypair {
 
 impl SigningKeypair {
     /// Generate a new random hybrid keypair (Dilithium5 + SPHINCS+).
+    ///
+    /// Under `fast-tests`, the SPHINCS+ keypair is generated once and reused
+    /// across all calls (signing and verification are also skipped, so sharing
+    /// the SPHINCS+ component is safe). This avoids ~1200 redundant SPHINCS+
+    /// keygen operations in the test suite.
     pub fn generate() -> Self {
         let (dil_pk, dil_sk) = dilithium5::keypair();
-        let (sph_pk, sph_sk) = sphincsshake256ssimple::keypair();
+
+        #[cfg(feature = "fast-tests")]
+        let (sph_pk_bytes, sph_sk_bytes) = {
+            use std::sync::LazyLock;
+            static CACHED_SPH: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
+                let (pk, sk) = sphincsshake256ssimple::keypair();
+                (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+            });
+            (CACHED_SPH.0.clone(), CACHED_SPH.1.clone())
+        };
+        #[cfg(not(feature = "fast-tests"))]
+        let (sph_pk_bytes, sph_sk_bytes) = {
+            let (pk, sk) = sphincsshake256ssimple::keypair();
+            (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+        };
+
         SigningKeypair {
             public: SigningPublicKey {
                 dilithium: dil_pk.as_bytes().to_vec(),
-                sphincs: sph_pk.as_bytes().to_vec(),
+                sphincs: sph_pk_bytes,
             },
             secret: SigningSecretKey {
                 dilithium: dil_sk.as_bytes().to_vec(),
-                sphincs: sph_sk.as_bytes().to_vec(),
+                sphincs: sph_sk_bytes,
             },
         }
     }

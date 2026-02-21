@@ -80,9 +80,11 @@ tempfile = "3"
 colored = "3"
 
 [features]
-# Skip SPHINCS+ signing and verification in tests for ~5-20x speedup.
+# Skip SPHINCS+ keygen (cached), signing, and verification for fast dev/CI tests.
 # Production builds MUST NOT use this flag.
-# Usage: cargo test --features fast-tests
+#   Fast:  cargo test --features fast-tests   (~5 min, Dilithium-only crypto)
+#   Full:  cargo test                          (~3 hrs, real SPHINCS+ everywhere)
+# CI runs fast-tests on every PR; nightly runs the full suite.
 fast-tests = []
 
 [dev-dependencies]

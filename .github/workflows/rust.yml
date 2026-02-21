@@ -4,6 +4,10 @@
 # This workflow ensures code quality, security, and functionality by running
 # comprehensive checks on every push and pull request to the main branch.
 #
+# Two-tier test strategy:
+# - PR/push: fast-tests (skips SPHINCS+ keygen/sign/verify, ~5 min)
+# - Nightly: full production crypto including SPHINCS+ (~3 hours)
+#
 # Pipeline stages:
 # 1. Setup: Install Rust toolchain and setup caching for faster builds
 # 2. Format: Fail fast if code is not formatted
@@ -21,6 +25,9 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  schedule:
+    # Nightly at 03:00 UTC — runs full production test suite with SPHINCS+
+    - cron: "0 3 * * *"
 
 env:
   # Enable colored output for better readability in CI logs
@@ -127,3 +134,22 @@ jobs:
       # Run each fuzz target for 60 seconds. Any panic or crash fails the job.
       - name: Fuzz ${{ matrix.target }}
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+  # Nightly: full production test suite with real SPHINCS+ keygen/sign/verify.
+  # This ensures the hybrid signature scheme works end-to-end. Only runs on
+  # schedule (not on PR/push) since SPHINCS+ operations are very slow.
+  full-crypto:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Full test suite without fast-tests: real SPHINCS+ keygen, signing, and verification
+      - name: Run tests (full SPHINCS+)
+        run: cargo test --workspace --verbose
