@@ -1270,4 +1270,182 @@ mod tests {
         // Should be a JSON array (empty since no peers connected)
         assert!(json.is_array());
     }
+
+    #[tokio::test]
+    async fn commitment_proof_valid_index() {
+        let state = test_rpc_state();
+        {
+            let mut node = state.node.write().await;
+            let commitment = crate::crypto::commitment::Commitment::commit(
+                1000,
+                &crate::crypto::commitment::BlindingFactor::random(),
+            );
+            node.ledger.state.add_commitment(commitment).unwrap();
+        }
+        let app = router(state);
+        let mut request = Request::builder()
+            .uri("/commitment-proof/0")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), HttpStatus::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["index"], 0);
+        assert!(json["commitment"].is_string());
+        assert!(json["merkle_path"].is_array());
+        assert!(json["root"].is_string());
+    }
+
+    #[tokio::test]
+    async fn commitment_proof_rate_limit() {
+        let state = test_rpc_state();
+        {
+            let mut node = state.node.write().await;
+            let commitment = crate::crypto::commitment::Commitment::commit(
+                500,
+                &crate::crypto::commitment::BlindingFactor::random(),
+            );
+            node.ledger.state.add_commitment(commitment).unwrap();
+        }
+        let app = router(state);
+        // Make COMMITMENT_PROOF_RATE_LIMIT requests (should all succeed)
+        for _ in 0..COMMITMENT_PROOF_RATE_LIMIT {
+            let mut request = Request::builder()
+                .uri("/commitment-proof/0")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), HttpStatus::OK);
+        }
+        // 61st request should be rate limited
+        let mut request = Request::builder()
+            .uri("/commitment-proof/0")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), HttpStatus::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn finalized_vertices_with_data() {
+        let state = test_rpc_state();
+        {
+            let node = state.node.write().await;
+            // Store genesis vertex
+            let genesis = crate::consensus::dag::Dag::genesis_vertex();
+            node.storage.put_vertex(&genesis).unwrap();
+            node.storage
+                .put_finalized_vertex_index(0, &genesis.id)
+                .unwrap();
+        }
+        let app = router(state);
+        let (status, json) = get_json(&app, "/vertices/finalized?after=0&limit=10").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(json["vertices"].is_array());
+    }
+
+    #[tokio::test]
+    async fn vertex_by_id_found() {
+        let state = test_rpc_state();
+        // Ledger::new() already inserts the genesis vertex; retrieve its ID directly.
+        let vertex_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let app = router(state);
+        let hex_id = hex::encode(vertex_id.0);
+        let (status, json) = get_json(&app, &format!("/vertex/{}", hex_id)).await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["found"], true);
+    }
+
+    #[tokio::test]
+    async fn validator_found_by_id() {
+        let state = test_rpc_state();
+        let validator_id;
+        {
+            let mut node = state.node.write().await;
+            let kp = crate::crypto::keys::SigningKeypair::generate();
+            let kem = crate::crypto::keys::KemKeypair::generate();
+            let validator = Validator::with_kem(kp.public.clone(), kem.public.clone());
+            validator_id = validator.id;
+            node.ledger.state.register_genesis_validator(validator);
+        }
+        let app = router(state);
+        let hex_id = hex::encode(validator_id);
+        let (status, json) = get_json(&app, &format!("/validator/{}", hex_id)).await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(json["id"].is_string());
+        assert!(json["bond"].is_number());
+    }
+
+    #[tokio::test]
+    async fn get_tx_from_storage() {
+        let state = test_rpc_state();
+        let tx_id_hex;
+        {
+            let node = state.node.write().await;
+            let recipient = crate::crypto::keys::FullKeypair::generate();
+            let tx = crate::transaction::builder::TransactionBuilder::new()
+                .add_input(crate::transaction::builder::InputSpec {
+                    value: 1000,
+                    blinding: crate::crypto::commitment::BlindingFactor::random(),
+                    spend_auth: crate::hash_domain(b"test", b"auth"),
+                    merkle_path: vec![],
+                })
+                .add_output(recipient.kem.public.clone(), 800)
+                .set_proof_options(winterfell::ProofOptions::new(
+                    42,
+                    8,
+                    10,
+                    winterfell::FieldExtension::Cubic,
+                    8,
+                    255,
+                    winterfell::BatchingMethod::Linear,
+                    winterfell::BatchingMethod::Linear,
+                ))
+                .build()
+                .unwrap();
+            let id = tx.tx_id();
+            tx_id_hex = hex::encode(id.0);
+            node.storage.put_transaction(&tx).unwrap();
+        }
+        let app = router(state);
+        let (status, json) = get_json(&app, &format!("/tx/{}", tx_id_hex)).await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["source"], "storage");
+    }
+
+    #[tokio::test]
+    async fn peers_endpoint_format() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/peers").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(json.is_array());
+        assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn state_summary_with_validators() {
+        let state = test_rpc_state();
+        {
+            let mut node = state.node.write().await;
+            let kp = crate::crypto::keys::SigningKeypair::generate();
+            let kem = crate::crypto::keys::KemKeypair::generate();
+            let validator = Validator::with_kem(kp.public.clone(), kem.public.clone());
+            node.ledger.state.register_genesis_validator(validator);
+        }
+        let app = router(state);
+        let (status, json) = get_json(&app, "/state-summary").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(!json["active_validators"].as_array().unwrap().is_empty());
+    }
 }

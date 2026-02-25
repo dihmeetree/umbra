@@ -1022,4 +1022,46 @@ mod tests {
         let sig = kp1.sign(b"test");
         assert!(!kp2.public.verify(b"test", &sig));
     }
+
+    #[test]
+    fn sign_with_corrupted_dilithium_secret_returns_empty() {
+        let kp = SigningKeypair::generate();
+        let corrupted = SigningKeypair {
+            public: kp.public.clone(),
+            secret: SigningSecretKey {
+                dilithium: vec![0u8; 10],
+                sphincs: kp.secret.sphincs.clone(),
+            },
+        };
+        let sig = corrupted.sign(b"test");
+        assert!(sig.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(feature = "fast-tests"))]
+    fn sign_with_corrupted_sphincs_secret_returns_empty() {
+        let kp = SigningKeypair::generate();
+        let corrupted = SigningKeypair {
+            public: kp.public.clone(),
+            secret: SigningSecretKey {
+                dilithium: kp.secret.dilithium.clone(),
+                sphincs: vec![0u8; 10],
+            },
+        };
+        let sig = corrupted.sign(b"test");
+        assert!(sig.is_empty());
+    }
+
+    #[test]
+    fn kem_decapsulate_with_flipped_ciphertext() {
+        let kp = KemKeypair::generate();
+        let (shared_secret, ciphertext) = kp.public.encapsulate().unwrap();
+        let mut flipped_ct = ciphertext.clone();
+        flipped_ct.0[0] ^= 0xFF;
+        let result = kp.decapsulate(&flipped_ct);
+        // Kyber uses implicit rejection: decapsulation always returns Some but
+        // with a pseudorandom secret that differs from the original.
+        let wrong_secret = result.unwrap();
+        assert_ne!(shared_secret.0, wrong_secret.0);
+    }
 }

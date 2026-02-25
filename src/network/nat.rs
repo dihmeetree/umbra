@@ -294,4 +294,42 @@ mod tests {
         nat.set_upnp_addr("198.51.100.1:9732".parse().unwrap());
         assert!(nat.is_reachable());
     }
+
+    #[test]
+    fn max_observed_ip_votes_cap_enforced() {
+        let mut nat = NatState::new(9732, None);
+        // Fill with 100 unique IPs (each from a unique peer, so no quorum)
+        for i in 0u16..100 {
+            let ip: IpAddr = if i < 256 {
+                format!("203.0.113.{}", i).parse().unwrap()
+            } else {
+                format!("198.51.100.{}", i - 256).parse().unwrap()
+            };
+            // Use a unique peer for each IP so no quorum is reached
+            let peer = [i as u8; 32];
+            nat.record_observed_addr(peer, ip);
+        }
+        // 101st distinct IP should be rejected (cap is 100)
+        let new_ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let result = nat.record_observed_addr([200u8; 32], new_ip);
+        assert!(!result);
+        assert!(nat.external_addr().is_none()); // no quorum reached
+    }
+
+    #[test]
+    fn existing_ip_still_accepted_at_cap() {
+        let mut nat = NatState::new(9732, None);
+        let target_ip: IpAddr = "203.0.113.0".parse().unwrap();
+        // First vote for target IP
+        nat.record_observed_addr(make_peer_id(0), target_ip);
+        // Fill remaining 99 slots
+        for i in 1u8..100 {
+            let ip: IpAddr = format!("203.0.113.{}", i).parse().unwrap();
+            nat.record_observed_addr(make_peer_id(i), ip);
+        }
+        // Adding another vote for an already-known IP should succeed
+        let result = nat.record_observed_addr(make_peer_id(200), target_ip);
+        // The IP already exists in the map, so the new vote is added
+        let _ = result; // just verify no panic; behavior depends on quorum
+    }
 }

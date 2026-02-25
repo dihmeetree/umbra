@@ -2191,4 +2191,58 @@ mod tests {
         assert_ne!(keys1.send_key, keys2.send_key);
         assert_ne!(keys0.send_key, keys2.send_key);
     }
+
+    #[test]
+    fn is_valid_public_addr_rejects_loopback() {
+        let addr: SocketAddr = "127.0.0.1:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_unspecified() {
+        let addr: SocketAddr = "0.0.0.0:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_private_10() {
+        let addr: SocketAddr = "10.0.0.1:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_private_172() {
+        let addr: SocketAddr = "172.16.0.1:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_private_192() {
+        let addr: SocketAddr = "192.168.1.1:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_link_local() {
+        let addr: SocketAddr = "169.254.0.1:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_accepts_public_ipv4() {
+        let addr: SocketAddr = "8.8.8.8:9732".parse().unwrap();
+        assert!(is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_ipv6_variants() {
+        let public: SocketAddr = "[2001:db8::1]:9732".parse().unwrap();
+        assert!(is_valid_public_addr(&public));
+
+        let loopback: SocketAddr = "[::1]:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&loopback));
+
+        let unspecified: SocketAddr = "[::]:9732".parse().unwrap();
+        assert!(!is_valid_public_addr(&unspecified));
+    }
 }

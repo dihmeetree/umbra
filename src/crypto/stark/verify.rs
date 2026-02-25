@@ -422,4 +422,223 @@ mod tests {
         assert_eq!(verified.merkle_root, merkle_root);
         assert_eq!(verified.proof_link, proof_link);
     }
+
+    // ── Helper builders for error-path tests ──
+
+    /// Build a minimal valid balance proof (1 input, 1 output, fee=5).
+    fn make_valid_balance_proof() -> BalanceStarkProof {
+        let input_values = vec![100u64];
+        let output_values = vec![95u64];
+        let fee = 5u64;
+
+        let input_blindings = vec![[Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]];
+        let output_blindings = vec![[Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)]];
+        let input_link_nonces = vec![[Felt::new(10), Felt::new(20), Felt::new(30), Felt::new(40)]];
+
+        let input_proof_links = vec![make_input_proof_link(
+            input_values[0],
+            &input_blindings[0],
+            &input_link_nonces[0],
+        )];
+        let output_commitments = vec![rescue::hash_commitment(
+            Felt::new(output_values[0]),
+            &output_blindings[0],
+        )];
+
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links,
+            output_commitments,
+            fee: Felt::new(fee),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let witness = crate::crypto::stark::types::BalanceWitness {
+            input_values,
+            input_blindings,
+            input_link_nonces,
+            output_values,
+            output_blindings,
+        };
+
+        crate::crypto::stark::balance_prover::prove_balance(
+            &witness,
+            &pub_inputs,
+            test_proof_options(),
+        )
+        .expect("make_valid_balance_proof: proving failed")
+    }
+
+    /// Build a minimal valid spend proof (depth-20 Merkle path).
+    fn make_valid_spend_proof() -> SpendStarkProof {
+        let spend_auth = [
+            Felt::new(100),
+            Felt::new(200),
+            Felt::new(300),
+            Felt::new(400),
+        ];
+        let commitment = [Felt::new(42), Felt::new(43), Felt::new(44), Felt::new(45)];
+        let nullifier = rescue::hash_nullifier(&spend_auth, &commitment);
+        let link_nonce = [
+            Felt::new(500),
+            Felt::new(600),
+            Felt::new(700),
+            Felt::new(800),
+        ];
+        let proof_link = rescue::hash_proof_link(&commitment, &link_nonce);
+
+        let mut current = commitment;
+        let mut path = Vec::with_capacity(20);
+        for level in 0..20 {
+            let sibling = [
+                Felt::new((level * 4 + 1000) as u64),
+                Felt::new((level * 4 + 1001) as u64),
+                Felt::new((level * 4 + 1002) as u64),
+                Felt::new((level * 4 + 1003) as u64),
+            ];
+            let is_right = level % 2 == 0;
+            path.push((sibling, is_right));
+            if is_right {
+                current = rescue::hash_merge(&sibling, &current);
+            } else {
+                current = rescue::hash_merge(&current, &sibling);
+            }
+        }
+        let merkle_root = current;
+
+        let pub_inputs = SpendPublicInputs {
+            merkle_root,
+            nullifier,
+            proof_link,
+        };
+        let witness = crate::crypto::stark::types::SpendWitness {
+            spend_auth,
+            commitment,
+            link_nonce,
+            merkle_path: path,
+        };
+
+        crate::crypto::stark::spend_prover::prove_spend(&witness, &pub_inputs, test_proof_options())
+            .expect("make_valid_spend_proof: proving failed")
+    }
+
+    // ── Error-path tests ──
+
+    #[test]
+    fn balance_proof_corrupted_bytes_rejected() {
+        let mut proof = make_valid_balance_proof();
+        // Flip a byte in the middle of the proof bytes to corrupt the proof.
+        let mid = proof.proof_bytes.len() / 2;
+        proof.proof_bytes[mid] ^= 0xFF;
+        let result = verify_balance_proof(&proof);
+        assert!(
+            result.is_err(),
+            "corrupted balance proof bytes should fail verification"
+        );
+        match result.unwrap_err() {
+            StarkError::VerificationFailed(_) | StarkError::DeserializationFailed(_) => {}
+            e => panic!("unexpected error variant: {e}"),
+        }
+    }
+
+    #[test]
+    fn balance_proof_truncated_bytes_rejected() {
+        let mut proof = make_valid_balance_proof();
+        let half = proof.proof_bytes.len() / 2;
+        proof.proof_bytes.truncate(half);
+        let result = verify_balance_proof(&proof);
+        assert!(result.is_err(), "truncated balance proof bytes should fail");
+        match result.unwrap_err() {
+            StarkError::DeserializationFailed(_) => {}
+            e => panic!("expected DeserializationFailed, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn balance_proof_empty_bytes_rejected() {
+        let mut proof = make_valid_balance_proof();
+        proof.proof_bytes = Vec::new();
+        let result = verify_balance_proof(&proof);
+        assert!(result.is_err(), "empty balance proof bytes should fail");
+        match result.unwrap_err() {
+            StarkError::DeserializationFailed(_) => {}
+            e => panic!("expected DeserializationFailed, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn balance_proof_corrupted_public_inputs_rejected() {
+        let proof = make_valid_balance_proof();
+        // Deserialize, mutate the fee field element, re-serialize, then re-verify.
+        // This keeps the byte length valid so deserialization succeeds but the
+        // public inputs no longer match the proof, causing VerificationFailed.
+        let mut pub_inputs = BalancePublicInputs::from_bytes(&proof.public_inputs_bytes)
+            .expect("valid proof should have valid public inputs bytes");
+        // Change the fee to a different value so the proof no longer matches.
+        pub_inputs.fee = Felt::new(pub_inputs.fee.as_int().wrapping_add(1));
+        let tampered = BalanceStarkProof {
+            proof_bytes: proof.proof_bytes.clone(),
+            public_inputs_bytes: pub_inputs.to_bytes(),
+        };
+        let result = verify_balance_proof(&tampered);
+        assert!(
+            result.is_err(),
+            "corrupted balance public inputs should fail verification"
+        );
+        match result.unwrap_err() {
+            StarkError::VerificationFailed(_) => {}
+            e => panic!("expected VerificationFailed, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn spend_proof_corrupted_bytes_rejected() {
+        let mut proof = make_valid_spend_proof();
+        let mid = proof.proof_bytes.len() / 2;
+        proof.proof_bytes[mid] ^= 0xFF;
+        let result = verify_spend_proof(&proof);
+        assert!(
+            result.is_err(),
+            "corrupted spend proof bytes should fail verification"
+        );
+        match result.unwrap_err() {
+            StarkError::VerificationFailed(_) | StarkError::DeserializationFailed(_) => {}
+            e => panic!("unexpected error variant: {e}"),
+        }
+    }
+
+    #[test]
+    fn spend_proof_wrong_nullifier_rejected() {
+        let proof = make_valid_spend_proof();
+        // Decode the public inputs, replace the nullifier, re-encode.
+        let mut pub_inputs = SpendPublicInputs::from_bytes(&proof.public_inputs_bytes)
+            .expect("valid proof should have valid spend public inputs bytes");
+        // Flip every element of the nullifier so it is entirely different.
+        for elem in &mut pub_inputs.nullifier {
+            *elem = Felt::new(elem.as_int().wrapping_add(1));
+        }
+        let tampered = SpendStarkProof {
+            proof_bytes: proof.proof_bytes.clone(),
+            public_inputs_bytes: pub_inputs.to_bytes(),
+        };
+        let result = verify_spend_proof(&tampered);
+        assert!(
+            result.is_err(),
+            "spend proof with wrong nullifier should fail verification"
+        );
+        match result.unwrap_err() {
+            StarkError::VerificationFailed(_) => {}
+            e => panic!("expected VerificationFailed, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn spend_proof_empty_bytes_rejected() {
+        let mut proof = make_valid_spend_proof();
+        proof.proof_bytes = Vec::new();
+        let result = verify_spend_proof(&proof);
+        assert!(result.is_err(), "empty spend proof bytes should fail");
+        match result.unwrap_err() {
+            StarkError::DeserializationFailed(_) => {}
+            e => panic!("expected DeserializationFailed, got: {e}"),
+        }
+    }
 }

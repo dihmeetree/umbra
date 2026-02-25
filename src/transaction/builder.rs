@@ -806,4 +806,128 @@ mod tests {
         assert_eq!(value, 0);
         assert_eq!(restored.0, blinding_zero.0);
     }
+
+    #[test]
+    fn build_rejects_no_inputs() {
+        let recipient = FullKeypair::generate();
+        let result = TransactionBuilder::new()
+            .add_output(recipient.kem.public.clone(), 1000)
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(matches!(result, Err(TxBuildError::NoInputs)));
+    }
+
+    #[test]
+    fn build_rejects_no_outputs() {
+        let input_blinding = BlindingFactor::random();
+        let spend_auth = crate::hash_domain(b"test.spend_auth", b"secret");
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: input_blinding,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(matches!(result, Err(TxBuildError::NoOutputs)));
+    }
+
+    #[test]
+    fn build_rejects_zero_value_output() {
+        let recipient = FullKeypair::generate();
+        let input_blinding = BlindingFactor::random();
+        let spend_auth = crate::hash_domain(b"test.spend_auth", b"secret");
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: input_blinding,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 0)
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(matches!(result, Err(TxBuildError::ZeroValueOutput)));
+    }
+
+    #[test]
+    fn build_rejects_too_many_messages() {
+        let recipient = FullKeypair::generate();
+        let input_blinding = BlindingFactor::random();
+        let spend_auth = crate::hash_domain(b"test.spend_auth", b"secret");
+        let mut builder = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 100_000,
+                blinding: input_blinding,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 1000);
+        for _ in 0..=crate::constants::MAX_MESSAGES_PER_TX {
+            builder = builder.add_message(recipient.kem.public.clone(), b"test".to_vec());
+        }
+        let result = builder.set_proof_options(test_proof_options()).build();
+        assert!(matches!(result, Err(TxBuildError::TooManyMessages)));
+    }
+
+    #[test]
+    fn build_rejects_message_too_large() {
+        let recipient = FullKeypair::generate();
+        let input_blinding = BlindingFactor::random();
+        let spend_auth = crate::hash_domain(b"test.spend_auth", b"secret");
+        let big_message = vec![0u8; crate::constants::MAX_MESSAGE_SIZE + 1];
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 100_000,
+                blinding: input_blinding,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 1000)
+            .add_message(recipient.kem.public.clone(), big_message)
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(matches!(result, Err(TxBuildError::MessageTooLarge)));
+    }
+
+    #[test]
+    fn build_rejects_validator_register_zero_fee() {
+        let recipient = FullKeypair::generate();
+        let input_blinding = BlindingFactor::random();
+        let spend_auth = crate::hash_domain(b"test.spend_auth", b"secret");
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 1000,
+                blinding: input_blinding,
+                spend_auth,
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 500)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: recipient.signing.public.clone(),
+                kem_public_key: recipient.kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build();
+        assert!(matches!(result, Err(TxBuildError::FeeRequired)));
+    }
+
+    #[test]
+    fn decode_note_wrong_length_returns_none() {
+        assert!(decode_note(&[]).is_none());
+        assert!(decode_note(&[0u8; 39]).is_none());
+        assert!(decode_note(&[0u8; 41]).is_none());
+        assert!(decode_note(&[1u8; 100]).is_none());
+    }
+
+    #[test]
+    fn decode_note_exact_40_bytes() {
+        let data = [0u8; 40];
+        let result = decode_note(&data);
+        assert!(result.is_some());
+        let (value, blinding) = result.unwrap();
+        assert_eq!(value, 0);
+        assert_eq!(blinding.0, [0u8; 32]);
+    }
 }

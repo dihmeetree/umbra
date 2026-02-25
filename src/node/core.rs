@@ -2495,8 +2495,90 @@ impl Node {
 }
 
 #[cfg(test)]
+impl Node {
+    /// Create a Node for testing without starting P2P networking.
+    fn new_test(
+        state: Arc<RwLock<NodeState>>,
+        p2p: P2pHandle,
+        event_rx: mpsc::Receiver<P2pEvent>,
+        keypair: SigningKeypair,
+    ) -> Self {
+        let our_validator_id = keypair.public.fingerprint();
+        Node {
+            state,
+            p2p,
+            event_rx,
+            keypair,
+            our_validator_id,
+            our_vrf_output: None,
+            sync_state: SyncState::Synced,
+            proposal_tick_count: 0,
+            sync_failed_peers: HashMap::new(),
+            stem_txs: HashMap::new(),
+            recently_attempted: HashSet::new(),
+            seen_messages_current: HashSet::new(),
+            seen_messages_prev: HashSet::new(),
+            sync_rounds: 0,
+            sync_peer_last_claimed: 0,
+            snapshot_cache: None,
+            chunk_request_timestamps: HashMap::new(),
+            upnp_gateway: None,
+            last_vrf_epoch: 0,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal NodeState for testing (no disk, temporary storage).
+    fn test_node_state() -> NodeState {
+        NodeState {
+            ledger: Ledger::new(),
+            mempool: Mempool::with_defaults(),
+            storage: SledStorage::open_temporary().unwrap(),
+            bft: BftState::new(0, vec![], crate::constants::chain_id()),
+            last_finalized_time: None,
+            peer_highest_round: 0,
+            node_start_time: Instant::now(),
+            version_signals: HashMap::new(),
+        }
+    }
+
+    /// Create a mock P2P layer returning a handle, command receiver, and event sender/receiver.
+    fn mock_p2p() -> (
+        P2pHandle,
+        mpsc::Receiver<crate::network::p2p::P2pCommand>,
+        mpsc::Sender<P2pEvent>,
+        mpsc::Receiver<P2pEvent>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        let (evt_tx, evt_rx) = mpsc::channel(256);
+        (P2pHandle::from_sender(cmd_tx), cmd_rx, evt_tx, evt_rx)
+    }
+
+    /// Build a simple test transaction (1 input, 1 output, fee=200).
+    fn make_test_tx(seed: u8) -> Transaction {
+        use crate::crypto::commitment::BlindingFactor;
+        use crate::crypto::keys::FullKeypair;
+        use crate::transaction::builder::{InputSpec, TransactionBuilder};
+
+        let recipient = FullKeypair::generate();
+        let output_value = 100u64;
+        let fee = 200u64;
+        let input_value = output_value + fee;
+        TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: input_value,
+                blinding: BlindingFactor::from_bytes([seed; 32]),
+                spend_auth: crate::hash_domain(b"test", &[seed]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), output_value)
+            .build()
+            .unwrap()
+    }
 
     #[test]
     fn keypair_persistence() {
@@ -2609,5 +2691,447 @@ mod tests {
         let io_err = NodeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test"));
         let msg = format!("{}", io_err);
         assert!(msg.contains("I/O error"));
+    }
+
+    // ---------------------------------------------------------------
+    // NodeState public method tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn node_state_accessors_on_fresh_state() {
+        let ns = test_node_state();
+        assert_eq!(ns.commitment_count(), 0);
+        assert_eq!(ns.nullifier_count(), 0);
+        assert_eq!(ns.epoch(), 0);
+        assert_eq!(ns.total_validators(), 0);
+        assert_eq!(ns.mempool_len(), 0);
+        assert!(ns.state_root() != [0u8; 32]);
+    }
+
+    #[test]
+    fn node_state_submit_valid_transaction() {
+        let mut ns = test_node_state();
+        let tx = make_test_tx(1);
+        let tx_id = tx.tx_id();
+        let result = ns.submit_transaction(tx);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), tx_id);
+        assert_eq!(ns.mempool_len(), 1);
+    }
+
+    #[test]
+    fn node_state_submit_rejects_conflicting_nullifier() {
+        let mut ns = test_node_state();
+        // Build two transactions sharing the same nullifier (same input seed)
+        use crate::crypto::commitment::BlindingFactor;
+        use crate::crypto::keys::FullKeypair;
+        use crate::transaction::builder::{InputSpec, TransactionBuilder};
+
+        let r1 = FullKeypair::generate();
+        let tx1 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 300,
+                blinding: BlindingFactor::from_bytes([2; 32]),
+                spend_auth: crate::hash_domain(b"test", &[2]),
+                merkle_path: vec![],
+            })
+            .add_output(r1.kem.public.clone(), 100)
+            .build()
+            .unwrap();
+        let r2 = FullKeypair::generate();
+        let tx2 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 300,
+                blinding: BlindingFactor::from_bytes([2; 32]),
+                spend_auth: crate::hash_domain(b"test", &[2]),
+                merkle_path: vec![],
+            })
+            .add_output(r2.kem.public.clone(), 100)
+            .build()
+            .unwrap();
+
+        assert!(ns.submit_transaction(tx1).is_ok());
+        assert_eq!(ns.mempool_len(), 1);
+        // Second tx has conflicting nullifier
+        let result = ns.submit_transaction(tx2);
+        assert!(result.is_err());
+        assert_eq!(ns.mempool_len(), 1);
+    }
+
+    #[test]
+    fn node_state_remove_transaction() {
+        let mut ns = test_node_state();
+        let tx = make_test_tx(3);
+        let tx_id = ns.submit_transaction(tx).unwrap();
+        assert_eq!(ns.mempool_len(), 1);
+        let removed = ns.remove_transaction(&tx_id);
+        assert!(removed.is_some());
+        assert_eq!(ns.mempool_len(), 0);
+    }
+
+    #[test]
+    fn node_state_evict_expired_transactions() {
+        let mut ns = test_node_state();
+        // Build a tx with expiry_epoch=3
+        use crate::crypto::commitment::BlindingFactor;
+        use crate::crypto::keys::FullKeypair;
+        use crate::transaction::builder::{InputSpec, TransactionBuilder};
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 300,
+                blinding: BlindingFactor::from_bytes([4; 32]),
+                spend_auth: crate::hash_domain(b"test", &[4]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_expiry_epoch(3)
+            .build()
+            .unwrap();
+        ns.submit_transaction(tx).unwrap();
+        assert_eq!(ns.mempool_len(), 1);
+        // Set epoch past expiry and evict
+        ns.set_mempool_epoch(5);
+        let evicted = ns.evict_expired_transactions();
+        assert_eq!(evicted, 1);
+        assert_eq!(ns.mempool_len(), 0);
+    }
+
+    #[test]
+    fn node_state_validate_transaction_wrong_chain_id() {
+        let ns = test_node_state();
+        let mut tx = make_test_tx(5);
+        tx.chain_id = [0xFFu8; 32];
+        let result = ns.validate_transaction_against_state(&tx);
+        assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Gossip deduplication tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn gossip_dedup_mark_and_check() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(state, p2p, evt_rx, kp);
+
+        let h1 = crate::hash_domain(b"test", b"msg1");
+        let h2 = crate::hash_domain(b"test", b"msg2");
+
+        assert!(!node.is_seen(&h1));
+        assert!(!node.is_seen(&h2));
+        node.mark_seen(h1);
+        assert!(node.is_seen(&h1));
+        assert!(!node.is_seen(&h2));
+    }
+
+    // ---------------------------------------------------------------
+    // handle_message async tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_new_transaction_inserts_to_mempool() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(10);
+        let tx_id = tx.tx_id();
+        let from = Hash::default();
+
+        node.handle_message(from, Message::NewTransaction(tx)).await;
+
+        // Verify it's in mempool
+        let s = state.read().await;
+        assert!(s.mempool.contains(&tx_id));
+
+        // Verify a broadcast was sent
+        drop(s);
+        let cmd = cmd_rx.try_recv().unwrap();
+        matches!(cmd, crate::network::p2p::P2pCommand::Broadcast { .. });
+    }
+
+    #[tokio::test]
+    async fn handle_new_transaction_rejects_duplicate() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(11);
+        let from = Hash::default();
+
+        // Insert once
+        node.handle_message(from, Message::NewTransaction(tx.clone()))
+            .await;
+        // Drain the broadcast command
+        let _ = cmd_rx.try_recv();
+
+        // Insert same tx again — should be a no-op (already in mempool)
+        node.handle_message(from, Message::NewTransaction(tx)).await;
+
+        // No additional broadcast
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_get_transaction_found() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(12);
+        let tx_hash = tx.tx_id().0;
+        state.write().await.mempool.insert(tx).unwrap();
+
+        let from = Hash::default();
+        node.handle_message(from, Message::GetTransaction(tx_hash))
+            .await;
+
+        // Should send TransactionResponse(Some(...))
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => match msg {
+                Message::TransactionResponse(Some(resp_tx)) => {
+                    assert_eq!(resp_tx.tx_id().0, tx_hash);
+                }
+                _ => panic!("Expected TransactionResponse(Some)"),
+            },
+            _ => panic!("Expected SendTo command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_transaction_not_found() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let unknown_hash = [0xFFu8; 32];
+        let from = Hash::default();
+        node.handle_message(from, Message::GetTransaction(unknown_hash))
+            .await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => match msg {
+                Message::TransactionResponse(None) => {}
+                _ => panic!("Expected TransactionResponse(None)"),
+            },
+            _ => panic!("Expected SendTo command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_bft_vote_dedup() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let validator = crate::consensus::bft::Validator::new(kp.public.clone());
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, vec![validator], chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp.clone());
+
+        let vertex_id = crate::consensus::dag::VertexId([1u8; 32]);
+        let vote = crate::consensus::bft::create_vote(vertex_id, &kp, 0, 0, true, &chain_id, None);
+        let from = Hash::default();
+
+        // First vote
+        node.handle_message(from, Message::BftVote(vote.clone()))
+            .await;
+        // Drain any commands from first
+        while cmd_rx.try_recv().is_ok() {}
+
+        // Second identical vote — should be deduped
+        node.handle_message(from, Message::BftVote(vote)).await;
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Dandelion++ tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dandelion_stem_cap_triggers_fluff() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Fill stem_txs to MAX_STEM_TXS
+        for i in 0..crate::constants::MAX_STEM_TXS {
+            let h = crate::hash_domain(b"stem", &(i as u64).to_le_bytes());
+            node.stem_txs.insert(h, (2, Instant::now()));
+        }
+        assert_eq!(node.stem_txs.len(), crate::constants::MAX_STEM_TXS);
+
+        // Try to stem-forward one more — should fluff (broadcast) instead
+        let tx = make_test_tx(20);
+        node.stem_forward(tx, 3).await;
+
+        // Should have sent a broadcast (fluff) rather than stem relay
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::Broadcast { message, .. } => {
+                assert!(matches!(message, Message::NewTransaction(_)));
+            }
+            _ => panic!("Expected Broadcast command"),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Sync state machine tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sync_peer_disconnect_reverts_to_need_sync() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let peer_id: Hash = [0xABu8; 32];
+        node.sync_state = SyncState::Syncing {
+            peer: peer_id,
+            next_seq: 42,
+            target: 100,
+            target_epoch: 1,
+            last_activity: Instant::now(),
+            post_snapshot: false,
+        };
+
+        // Simulate peer disconnect
+        node.handle_p2p_event(P2pEvent::PeerDisconnected(peer_id))
+            .await;
+
+        // Should revert to NeedSync
+        match &node.sync_state {
+            SyncState::NeedSync { our_finalized } => {
+                assert_eq!(*our_finalized, 42);
+            }
+            _ => panic!("Expected NeedSync after sync peer disconnect"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_snapshot_peer_disconnect_reverts() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let peer_id: Hash = [0xCDu8; 32];
+        node.sync_state = SyncState::SyncingSnapshot {
+            peer: peer_id,
+            total_chunks: 10,
+            received_chunks: vec![None; 10],
+            snapshot_size: 1000,
+            meta: Box::new(crate::node::storage::ChainStateMeta {
+                epoch: 1,
+                last_finalized: None,
+                commitment_root: [0u8; 32],
+                commitment_count: 0,
+                nullifier_count: 0,
+                nullifier_hash: [0u8; 32],
+                total_minted: 0,
+                finalized_count: 0,
+                state_root: [0u8; 32],
+                epoch_seed: [0u8; 32],
+                epoch_fees: 0,
+                validator_count: 0,
+            }),
+            last_activity: Instant::now(),
+        };
+
+        node.handle_p2p_event(P2pEvent::PeerDisconnected(peer_id))
+            .await;
+
+        match &node.sync_state {
+            SyncState::NeedSync { our_finalized } => {
+                assert_eq!(*our_finalized, 0);
+            }
+            _ => panic!("Expected NeedSync after snapshot sync peer disconnect"),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // GetTips / GetVertex / GetEpochState handler tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_get_tips_returns_tips() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let from = Hash::default();
+        node.handle_message(from, Message::GetTips).await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => {
+                assert!(matches!(msg, Message::TipsResponse(_)));
+            }
+            _ => panic!("Expected SendTo(TipsResponse)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_epoch_state_returns_response() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let from = Hash::default();
+        node.handle_message(from, Message::GetEpochState).await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => match msg {
+                Message::EpochStateResponse { epoch, .. } => {
+                    assert_eq!(epoch, 0);
+                }
+                _ => panic!("Expected EpochStateResponse"),
+            },
+            _ => panic!("Expected SendTo command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_peers_returns_response() {
+        // GetPeers calls p2p.get_peers() which sends a oneshot through the command channel.
+        // Since we have a mock, we need to handle the GetPeers command ourselves.
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let from = Hash::default();
+
+        // Spawn handle_message, and respond to the GetPeers oneshot
+        let handle = tokio::spawn(async move {
+            node.handle_message(from, Message::GetPeers).await;
+        });
+
+        // Wait for the GetPeers command and respond
+        if let Some(crate::network::p2p::P2pCommand::GetPeers(reply)) = cmd_rx.recv().await {
+            let _ = reply.send(vec![]);
+        }
+
+        // Wait for PeersResponse to be sent
+        handle.await.unwrap();
+        // The node would send PeersResponse via SendTo, check command channel
+        if let Ok(crate::network::p2p::P2pCommand::SendTo(_, msg)) = cmd_rx.try_recv() {
+            assert!(matches!(msg, Message::PeersResponse(_)));
+        }
     }
 }

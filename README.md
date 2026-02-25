@@ -148,7 +148,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **924 tests**.
+**~35,000 lines of Rust** across 45 source files with **977 tests**.
 
 ## Building
 
@@ -524,13 +524,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (~924 tests)
+cargo test                       # Full suite (~977 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 924 tests cover:
+All 977 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -931,7 +931,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 924 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 977 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 
