@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/umbra-header.jpg?v=2" alt="Umbra" width="850">
+  <img src="assets/umbra-header.jpg?v=3" alt="Umbra" width="850">
 </p>
 
 Umbra is a post-quantum private cryptocurrency with zk-STARKs and DAG-BFT consensus — **anonymous**, **unlinkable**, **untraceable**, **quantum-resistant**, and **instantly final**, with no trusted setup required.

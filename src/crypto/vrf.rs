@@ -25,6 +25,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{DetachedSignature as SigTrait, SecretKey as SignSkTrait};
+
 #[cfg(not(feature = "fast-tests"))]
 use super::keys::SPHINCS_SIG_BYTES;
 use super::keys::{SigningKeypair, SigningPublicKey, DILITHIUM5_SIG_BYTES};
@@ -225,10 +228,13 @@ impl VrfOutput {
 /// Panics if signing the same message twice produces different Dilithium signatures.
 pub fn assert_deterministic_signing(keypair: &SigningKeypair) {
     let test_msg = crate::hash_domain(b"umbra.vrf.determinism_check", b"test");
-    let sig1 = keypair.sign(&test_msg);
-    let sig2 = keypair.sign(&test_msg);
+    let dil_sk = dilithium5::SecretKey::from_bytes(&keypair.secret.dilithium)
+        .expect("FATAL: corrupted Dilithium5 secret key");
+    let sig1 = dilithium5::detached_sign(&test_msg, &dil_sk);
+    let sig2 = dilithium5::detached_sign(&test_msg, &dil_sk);
     assert_eq!(
-        sig1.dilithium, sig2.dilithium,
+        sig1.as_bytes(),
+        sig2.as_bytes(),
         "FATAL: Dilithium5 signing is not deterministic. \
          The VRF construction requires deterministic signatures."
     );
