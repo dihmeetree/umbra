@@ -108,6 +108,13 @@ pub trait Storage {
     fn put_coinbase_output(&self, sequence: u64, output: &TxOutput) -> Result<(), StorageError>;
     fn get_coinbase_output(&self, sequence: u64) -> Result<Option<TxOutput>, StorageError>;
 
+    /// Persist a peer ban. `banned_until_ms` is ms since UNIX epoch.
+    fn put_peer_ban(&self, peer_id: &Hash, banned_until_ms: u64) -> Result<(), StorageError>;
+    /// Load all persisted peer bans (peer_id, banned_until_ms).
+    fn get_peer_bans(&self) -> Result<Vec<(Hash, u64)>, StorageError>;
+    /// Remove a peer ban (e.g. after expiry).
+    fn remove_peer_ban(&self, peer_id: &Hash) -> Result<(), StorageError>;
+
     fn flush(&self) -> Result<(), StorageError>;
 
     /// Apply a batch of finalization writes atomically.
@@ -156,6 +163,7 @@ pub struct SledStorage {
     validators: sled::Tree,
     finalized_index: sled::Tree,
     coinbase_outputs: sled::Tree,
+    peer_bans: sled::Tree,
     finalized_count: std::sync::atomic::AtomicU64,
 }
 
@@ -198,6 +206,9 @@ impl SledStorage {
         let coinbase_outputs = db
             .open_tree("coinbase_outputs")
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        let peer_bans = db
+            .open_tree("peer_bans")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         let finalized_count = std::sync::atomic::AtomicU64::new(finalized_index.len() as u64);
         Ok(SledStorage {
             db,
@@ -209,6 +220,7 @@ impl SledStorage {
             validators,
             finalized_index,
             coinbase_outputs,
+            peer_bans,
             finalized_count,
         })
     }
@@ -519,6 +531,34 @@ impl Storage for SledStorage {
             }
             None => Ok(None),
         }
+    }
+
+    fn put_peer_ban(&self, peer_id: &Hash, banned_until_ms: u64) -> Result<(), StorageError> {
+        self.peer_bans
+            .insert(peer_id, &banned_until_ms.to_be_bytes())
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_peer_bans(&self) -> Result<Vec<(Hash, u64)>, StorageError> {
+        let mut bans = Vec::new();
+        for entry in self.peer_bans.iter() {
+            let (key, value) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            if key.len() == 32 && value.len() == 8 {
+                let mut peer_id = [0u8; 32];
+                peer_id.copy_from_slice(&key);
+                let banned_until = u64::from_be_bytes(value[..8].try_into().unwrap());
+                bans.push((peer_id, banned_until));
+            }
+        }
+        Ok(bans)
+    }
+
+    fn remove_peer_ban(&self, peer_id: &Hash) -> Result<(), StorageError> {
+        self.peer_bans
+            .remove(peer_id)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
     }
 
     fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError> {
@@ -1304,5 +1344,46 @@ mod tests {
         // Should be empty now
         assert!(!storage.has_nullifier(&n).unwrap());
         assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn peer_ban_roundtrip() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let peer_id = [42u8; 32];
+        let banned_until = 1_700_000_000_000u64;
+
+        // Initially empty
+        assert!(storage.get_peer_bans().unwrap().is_empty());
+
+        // Store a ban
+        storage.put_peer_ban(&peer_id, banned_until).unwrap();
+        let bans = storage.get_peer_bans().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].0, peer_id);
+        assert_eq!(bans[0].1, banned_until);
+
+        // Store another
+        let peer2 = [99u8; 32];
+        storage.put_peer_ban(&peer2, banned_until + 1000).unwrap();
+        assert_eq!(storage.get_peer_bans().unwrap().len(), 2);
+
+        // Remove first
+        storage.remove_peer_ban(&peer_id).unwrap();
+        let bans = storage.get_peer_bans().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].0, peer2);
+    }
+
+    #[test]
+    fn peer_ban_overwrite() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let peer_id = [42u8; 32];
+
+        storage.put_peer_ban(&peer_id, 1000).unwrap();
+        storage.put_peer_ban(&peer_id, 2000).unwrap();
+
+        let bans = storage.get_peer_bans().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].1, 2000);
     }
 }

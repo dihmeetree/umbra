@@ -143,7 +143,7 @@ fn register_genesis_validator(state: &mut ChainState) -> (SigningKeypair, KemKey
     let signing = SigningKeypair::generate();
     let kem = KemKeypair::generate();
     let validator = Validator::with_kem(signing.public.clone(), kem.public.clone());
-    state.register_genesis_validator(validator);
+    state.register_genesis_validator(validator).unwrap();
     (signing, kem)
 }
 
@@ -238,7 +238,7 @@ fn test_equivocation_slashing() {
     let kem = KemKeypair::generate();
     let validator = Validator::with_kem(kp.public.clone(), kem.public.clone());
     let vid = validator.id;
-    state.register_genesis_validator(validator);
+    state.register_genesis_validator(validator).unwrap();
 
     assert!(state.is_active_validator(&vid));
     assert_eq!(
@@ -284,7 +284,7 @@ fn test_epoch_fee_distribution() {
     let kp = SigningKeypair::generate();
     let validator = Validator::new(kp.public.clone());
     let vid = validator.id;
-    state.register_genesis_validator(validator);
+    state.register_genesis_validator(validator).unwrap();
     state.slash_validator(&vid).unwrap();
 
     let fees_before = state.epoch_fees();
@@ -325,7 +325,7 @@ fn test_snapshot_export_import() {
     // Add a validator
     let kp = SigningKeypair::generate();
     let validator = Validator::new(kp.public.clone());
-    state.register_genesis_validator(validator.clone());
+    state.register_genesis_validator(validator.clone()).unwrap();
 
     // Persist tree nodes to storage
     let depth = constants::MERKLE_DEPTH;
@@ -546,7 +546,7 @@ fn test_ledger_finalize_with_certificate() {
         let kp = SigningKeypair::generate();
         let kem = KemKeypair::generate();
         let v = Validator::with_kem(kp.public.clone(), kem.public.clone());
-        ledger.state.register_genesis_validator(v.clone());
+        ledger.state.register_genesis_validator(v.clone()).unwrap();
         keypairs.push(kp);
         validators.push(v);
     }

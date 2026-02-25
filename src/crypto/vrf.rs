@@ -212,6 +212,31 @@ impl VrfOutput {
             < (committee_size as u128) * ((u64::MAX as u128) + 1)
     }
 
+    /// Weighted committee selection: probability of selection is proportional
+    /// to the validator's bonded weight relative to total weight.
+    ///
+    /// P(selected) = committee_size * weight / total_weight
+    pub fn is_selected_weighted(
+        &self,
+        committee_size: usize,
+        total_weight: u64,
+        weight: u64,
+    ) -> bool {
+        if total_weight == 0 || weight == 0 {
+            return false;
+        }
+        // All validators selected if committee >= total (by weight interpretation)
+        if (committee_size as u128) * (weight as u128) >= (total_weight as u128) {
+            return true;
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.value[..8]);
+        let random_val = u64::from_le_bytes(bytes);
+        // selected if random_val / u64::MAX < committee_size * weight / total_weight
+        (random_val as u128) * (total_weight as u128)
+            < (committee_size as u128) * (weight as u128) * ((u64::MAX as u128) + 1)
+    }
+
     /// Derive a sort key from the VRF output.
     /// Used to deterministically order committee members.
     pub fn sort_key(&self) -> u64 {
@@ -256,8 +281,9 @@ impl EpochSeed {
         }
     }
 
-    /// Derive the next epoch's seed from the current epoch's final state.
-    pub fn next(&self, epoch_final_hash: &Hash) -> Self {
+    /// Derive the next epoch's seed from the current epoch's final state
+    /// and VRF commitment mix from the epoch's validators.
+    pub fn next(&self, epoch_final_hash: &Hash, vrf_mix: &Hash) -> Self {
         EpochSeed {
             epoch: self.epoch.checked_add(1).expect("epoch overflow"),
             seed: crate::hash_concat(&[
@@ -265,6 +291,7 @@ impl EpochSeed {
                 &self.epoch.to_le_bytes(),
                 &self.seed,
                 epoch_final_hash,
+                vrf_mix,
             ]),
         }
     }
@@ -336,7 +363,7 @@ mod tests {
     #[test]
     fn epoch_seed_progression() {
         let genesis = EpochSeed::genesis();
-        let next = genesis.next(&[0u8; 32]);
+        let next = genesis.next(&[0u8; 32], &[0u8; 32]);
         assert_eq!(next.epoch, 1);
         assert_ne!(next.seed, genesis.seed);
     }
@@ -401,7 +428,7 @@ mod tests {
     #[test]
     fn epoch_seed_vrf_input_differs_by_epoch() {
         let genesis = EpochSeed::genesis();
-        let next = genesis.next(&[0u8; 32]);
+        let next = genesis.next(&[0u8; 32], &[0u8; 32]);
         let validator_id = [42u8; 32];
         assert_ne!(
             genesis.vrf_input(&validator_id),
@@ -467,7 +494,7 @@ mod tests {
     #[test]
     fn epoch_seed_different_after_next() {
         let genesis = EpochSeed::genesis();
-        let next = genesis.next(&[0u8; 32]);
+        let next = genesis.next(&[0u8; 32], &[0u8; 32]);
         assert_ne!(genesis.seed, next.seed);
     }
 
@@ -501,17 +528,33 @@ mod tests {
     #[test]
     fn epoch_seed_next_differs_by_hash() {
         let genesis = EpochSeed::genesis();
-        let next1 = genesis.next(&[0u8; 32]);
-        let next2 = genesis.next(&[1u8; 32]);
+        let next1 = genesis.next(&[0u8; 32], &[0u8; 32]);
+        let next2 = genesis.next(&[1u8; 32], &[0u8; 32]);
         assert_ne!(next1.seed, next2.seed);
         assert_eq!(next1.epoch, next2.epoch);
     }
 
     #[test]
+    fn epoch_seed_differs_by_vrf_mix() {
+        let genesis = EpochSeed::genesis();
+        let seed_a = genesis.next(&[0u8; 32], &[0u8; 32]);
+        let seed_b = genesis.next(&[0u8; 32], &[1u8; 32]);
+        assert_ne!(
+            seed_a.seed, seed_b.seed,
+            "different VRF mixes must produce different seeds"
+        );
+        assert_eq!(seed_a.epoch, seed_b.epoch);
+    }
+
+    #[test]
     fn epoch_seed_chain_is_deterministic() {
         let genesis = EpochSeed::genesis();
-        let chain1 = genesis.next(&[42u8; 32]).next(&[43u8; 32]);
-        let chain2 = genesis.next(&[42u8; 32]).next(&[43u8; 32]);
+        let chain1 = genesis
+            .next(&[42u8; 32], &[0u8; 32])
+            .next(&[43u8; 32], &[0u8; 32]);
+        let chain2 = genesis
+            .next(&[42u8; 32], &[0u8; 32])
+            .next(&[43u8; 32], &[0u8; 32]);
         assert_eq!(chain1.seed, chain2.seed);
         assert_eq!(chain1.epoch, chain2.epoch);
     }
@@ -573,10 +616,56 @@ mod tests {
     fn epoch_seed_next_increments_epoch() {
         let genesis = EpochSeed::genesis();
         assert_eq!(genesis.epoch, 0);
-        let e1 = genesis.next(&[0u8; 32]);
+        let e1 = genesis.next(&[0u8; 32], &[0u8; 32]);
         assert_eq!(e1.epoch, 1);
-        let e2 = e1.next(&[0u8; 32]);
+        let e2 = e1.next(&[0u8; 32], &[0u8; 32]);
         assert_eq!(e2.epoch, 2);
+    }
+
+    #[test]
+    fn is_selected_weighted_higher_weight_more_likely() {
+        // Statistical test: a validator with 10x weight should be selected
+        // more often than one with 1x weight
+        let mut high_count = 0usize;
+        let mut low_count = 0usize;
+        let total_weight = 100u64;
+        let committee_size = 10;
+
+        for i in 0..1000u32 {
+            let kp = SigningKeypair::generate();
+            let input = format!("weighted-test-{}", i);
+            let output = VrfOutput::evaluate(&kp, input.as_bytes());
+
+            if output.is_selected_weighted(committee_size, total_weight, 50) {
+                high_count += 1;
+            }
+            if output.is_selected_weighted(committee_size, total_weight, 5) {
+                low_count += 1;
+            }
+        }
+        assert!(
+            high_count > low_count,
+            "higher weight ({}) should be selected more than lower weight ({})",
+            high_count,
+            low_count
+        );
+    }
+
+    #[test]
+    fn is_selected_weighted_zero_weight_never_selected() {
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"zero-weight");
+        assert!(!output.is_selected_weighted(21, 100, 0));
+    }
+
+    #[test]
+    fn is_selected_weighted_equal_weights_matches_uniform() {
+        // With equal weights, weighted selection should match uniform
+        let kp = SigningKeypair::generate();
+        let output = VrfOutput::evaluate(&kp, b"equal-weights");
+        let uniform = output.is_selected(10, 100);
+        let weighted = output.is_selected_weighted(10, 100, 1);
+        assert_eq!(uniform, weighted);
     }
 
     #[test]

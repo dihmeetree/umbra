@@ -28,8 +28,10 @@ pub mod constants {
     pub const MAX_MESSAGE_SIZE: usize = 65_536;
     /// Number of validators in each BFT committee
     pub const COMMITTEE_SIZE: usize = 21;
-    /// Minimum committee size for BFT safety (need at least 4 for f=1)
-    pub const MIN_COMMITTEE_SIZE: usize = 4;
+    /// Minimum committee size for BFT safety (need at least 7 for f=2)
+    pub const MIN_COMMITTEE_SIZE: usize = 7;
+    /// Maximum number of registered validators (prevents DoS on committee selection).
+    pub const MAX_VALIDATORS: usize = 10_000;
     /// Base bond for validator registration (in base units).
     /// The actual required bond scales with the number of active validators
     /// via [`required_validator_bond`].
@@ -37,6 +39,11 @@ pub mod constants {
     /// Scaling factor for the superlinear validator bonding curve.
     /// required_bond(n) = BASE_BOND * (1 + n / SCALING_FACTOR)
     pub const BOND_SCALING_FACTOR: u64 = 100;
+    /// Epochs after a slashing event during which new validator registrations
+    /// require SLASH_BOND_MULTIPLIER times the normal bond.
+    pub const SLASH_REGISTRATION_COOLDOWN_EPOCHS: u64 = 10;
+    /// Bond multiplier applied to new registrations during slashing cooldown.
+    pub const SLASH_BOND_MULTIPLIER: u64 = 3;
     /// Maximum transactions per DAG vertex
     pub const MAX_TXS_PER_VERTEX: usize = 10_000;
     /// Target vertex interval in milliseconds

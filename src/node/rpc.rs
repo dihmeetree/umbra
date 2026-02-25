@@ -881,7 +881,7 @@ mod tests {
             let mut node = state.node.write().await;
             let kp = crate::crypto::keys::SigningKeypair::generate();
             let v = Validator::new(kp.public);
-            node.ledger.state.register_genesis_validator(v);
+            node.ledger.state.register_genesis_validator(v).unwrap();
         }
         let app = router(state);
         let (status, json) = get_json(&app, "/validators").await;
@@ -1376,7 +1376,10 @@ mod tests {
             let kem = crate::crypto::keys::KemKeypair::generate();
             let validator = Validator::with_kem(kp.public.clone(), kem.public.clone());
             validator_id = validator.id;
-            node.ledger.state.register_genesis_validator(validator);
+            node.ledger
+                .state
+                .register_genesis_validator(validator)
+                .unwrap();
         }
         let app = router(state);
         let hex_id = hex::encode(validator_id);
@@ -1441,7 +1444,10 @@ mod tests {
             let kp = crate::crypto::keys::SigningKeypair::generate();
             let kem = crate::crypto::keys::KemKeypair::generate();
             let validator = Validator::with_kem(kp.public.clone(), kem.public.clone());
-            node.ledger.state.register_genesis_validator(validator);
+            node.ledger
+                .state
+                .register_genesis_validator(validator)
+                .unwrap();
         }
         let app = router(state);
         let (status, json) = get_json(&app, "/state-summary").await;

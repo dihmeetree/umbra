@@ -351,6 +351,11 @@ pub enum P2pEvent {
     PeerDisconnected(PeerId),
     /// A message was received from a peer.
     MessageReceived { from: PeerId, message: Box<Message> },
+    /// A peer was banned (for persistence by the node layer).
+    PeerBanned {
+        peer_id: PeerId,
+        banned_until_ms: u64,
+    },
 }
 
 /// Handle for the application to interact with the P2P layer.
@@ -373,6 +378,8 @@ pub struct P2pConfig {
     pub our_signing_keypair: SigningKeypair,
     /// Pre-determined external address (from UPnP or manual config).
     pub external_addr: Option<SocketAddr>,
+    /// Peer bans loaded from persistent storage (peer_id, banned_until_ms).
+    pub initial_bans: Vec<(PeerId, u64)>,
 }
 
 /// Peer reputation tracking (F7).
@@ -571,10 +578,33 @@ async fn p2p_loop(
     let mut outbound_count: usize = 0;
     let mut connections_per_ip: HashMap<IpAddr, usize> = HashMap::new();
     let mut inbound_per_subnet: HashMap<[u8; 2], usize> = HashMap::new();
+    let mut outbound_per_subnet: HashMap<[u8; 2], usize> = HashMap::new();
     let max_inbound = config.max_peers / 2;
     let max_outbound = config.max_peers - max_inbound;
     let (internal_tx, mut internal_rx) = mpsc::channel::<InternalEvent>(256);
     let handshake_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
+
+    // Seed reputation map from persisted bans.
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        for (peer_id, banned_until_ms) in &config.initial_bans {
+            if *banned_until_ms > now_ms {
+                let remaining = std::time::Duration::from_millis(banned_until_ms - now_ms);
+                reputations.insert(
+                    *peer_id,
+                    PeerReputation {
+                        score: 0,
+                        violations: 0,
+                        banned_until: Some(Instant::now() + remaining),
+                    },
+                );
+            }
+        }
+    }
 
     // NAT state: tracks our external address via manual config, UPnP, or peer observation.
     let mut nat_state = NatState::new(config.listen_port, config.external_addr);
@@ -622,6 +652,13 @@ async fn p2p_loop(
                     P2pCommand::Connect(addr) => {
                         // Connection diversity — enforce outbound slot limit
                         if outbound_count >= max_outbound || peers.len() >= config.max_peers {
+                            continue;
+                        }
+                        // Eclipse mitigation: enforce outbound subnet diversity
+                        let out_subnet = subnet_prefix(addr.ip());
+                        let out_subnet_count = outbound_per_subnet.get(&out_subnet).copied().unwrap_or(0);
+                        if out_subnet_count >= crate::constants::MAX_PEERS_PER_SUBNET {
+                            tracing::debug!(subnet = ?out_subnet, "Outbound subnet limit reached, skipping");
                             continue;
                         }
                         let config_clone = config.clone();
@@ -709,6 +746,8 @@ async fn p2p_loop(
                             // Update connection direction counters
                             if is_outbound {
                                 outbound_count += 1;
+                                // Eclipse mitigation: Track outbound subnet concentration
+                                *outbound_per_subnet.entry(subnet_prefix(addr.ip())).or_insert(0) += 1;
                             } else {
                                 inbound_count += 1;
                                 // DDoS: Track inbound subnet concentration
@@ -874,6 +913,11 @@ async fn p2p_loop(
                         if let Some(peer) = peers.remove(&peer_id) {
                             if peer.is_outbound {
                                 outbound_count = outbound_count.saturating_sub(1);
+                                let subnet = subnet_prefix(peer.addr.ip());
+                                if let Some(c) = outbound_per_subnet.get_mut(&subnet) {
+                                    *c = c.saturating_sub(1);
+                                    if *c == 0 { outbound_per_subnet.remove(&subnet); }
+                                }
                             } else {
                                 inbound_count = inbound_count.saturating_sub(1);
                                 let subnet = subnet_prefix(peer.addr.ip());
@@ -915,6 +959,11 @@ async fn p2p_loop(
                             if let Some(peer) = peers.remove(&peer_id) {
                                 if peer.is_outbound {
                                     outbound_count = outbound_count.saturating_sub(1);
+                                    let subnet = subnet_prefix(peer.addr.ip());
+                                    if let Some(c) = outbound_per_subnet.get_mut(&subnet) {
+                                        *c = c.saturating_sub(1);
+                                        if *c == 0 { outbound_per_subnet.remove(&subnet); }
+                                    }
                                 } else {
                                     inbound_count = inbound_count.saturating_sub(1);
                                     let subnet = subnet_prefix(peer.addr.ip());
@@ -930,6 +979,20 @@ async fn p2p_loop(
                                 }
                             }
                             let _ = event_tx.send(P2pEvent::PeerDisconnected(peer_id)).await;
+                            // Notify node layer for persistence
+                            if let Some(banned_until) = rep.banned_until {
+                                use std::time::{SystemTime, UNIX_EPOCH};
+                                let remaining = banned_until.duration_since(Instant::now());
+                                let now_ms = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let banned_until_ms = now_ms + remaining.as_millis() as u64;
+                                let _ = event_tx.send(P2pEvent::PeerBanned {
+                                    peer_id,
+                                    banned_until_ms,
+                                }).await;
+                            }
                         }
                     }
                 }
@@ -1509,6 +1572,7 @@ mod tests {
             our_kem_keypair: kem_kp,
             our_signing_keypair: kp,
             external_addr: None,
+            initial_bans: vec![],
         }
     }
 

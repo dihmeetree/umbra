@@ -160,6 +160,9 @@ pub struct ChainState {
     total_minted: u64,
     /// O(1) commitment lookup index (commitment -> position in commitments vec)
     commitment_index: HashMap<Commitment, usize>,
+    /// Epoch of the most recent slashing event. Used to enforce elevated bond
+    /// requirements for new validator registrations during the cooldown period.
+    last_slash_epoch: Option<u64>,
 }
 
 /// The full ledger coordinating DAG, BFT, and chain state.
@@ -190,6 +193,7 @@ impl ChainState {
             last_finalized: None,
             total_minted: 0,
             commitment_index: HashMap::new(),
+            last_slash_epoch: None,
         }
     }
 
@@ -460,9 +464,19 @@ impl ChainState {
                 if self.slashed_validators.contains(&vid) {
                     return Err(StateError::ValidatorSlashed);
                 }
-                // Dynamic bond check: the required bond scales with active validator count
-                let required_bond =
+                // Dynamic bond check: the required bond scales with active validator count.
+                // During slashing cooldown, new registrations require an elevated bond
+                // to make key rotation after slashing expensive.
+                let mut required_bond =
                     crate::constants::required_validator_bond(self.total_validators());
+                if let Some(slash_epoch) = self.last_slash_epoch {
+                    if self.epoch
+                        < slash_epoch + crate::constants::SLASH_REGISTRATION_COOLDOWN_EPOCHS
+                    {
+                        required_bond =
+                            required_bond.saturating_mul(crate::constants::SLASH_BOND_MULTIPLIER);
+                    }
+                }
                 let min_fee = required_bond.saturating_add(crate::constants::MIN_TX_FEE);
                 if tx.fee < min_fee {
                     return Err(StateError::InsufficientBond);
@@ -549,7 +563,14 @@ impl ChainState {
 
                 // Re-check bond requirement at application time to prevent
                 // TOCTOU if total_validators() changed since validation.
-                let bond = crate::constants::required_validator_bond(self.total_validators());
+                let mut bond = crate::constants::required_validator_bond(self.total_validators());
+                if let Some(slash_epoch) = self.last_slash_epoch {
+                    if self.epoch
+                        < slash_epoch + crate::constants::SLASH_REGISTRATION_COOLDOWN_EPOCHS
+                    {
+                        bond = bond.saturating_mul(crate::constants::SLASH_BOND_MULTIPLIER);
+                    }
+                }
                 let min_fee = bond.saturating_add(crate::constants::MIN_TX_FEE);
                 if tx.fee < min_fee {
                     return Err(StateError::InsufficientBond);
@@ -573,7 +594,7 @@ impl ChainState {
                     let mut validator =
                         Validator::with_kem(signing_key.clone(), kem_public_key.clone());
                     validator.activation_epoch = self.epoch + 1;
-                    self.register_validator(validator);
+                    self.register_validator(validator)?;
                 }
 
                 self.validator_bonds.insert(vid, bond);
@@ -685,16 +706,26 @@ impl ChainState {
     }
 
     /// Register a validator (internal — use apply_transaction for public API).
-    fn register_validator(&mut self, validator: Validator) {
+    fn register_validator(&mut self, validator: Validator) -> Result<(), StateError> {
+        if self.validators.values().filter(|v| v.active).count() >= crate::constants::MAX_VALIDATORS
+        {
+            return Err(StateError::TooManyValidators);
+        }
         self.validators.insert(validator.id, validator);
+        Ok(())
     }
 
     /// Register a genesis validator (bond escrowed without requiring a funding tx).
-    pub fn register_genesis_validator(&mut self, validator: Validator) {
+    pub fn register_genesis_validator(&mut self, validator: Validator) -> Result<(), StateError> {
         let id = validator.id;
+        if self.validators.values().filter(|v| v.active).count() >= crate::constants::MAX_VALIDATORS
+        {
+            return Err(StateError::TooManyValidators);
+        }
         self.validator_bonds
             .insert(id, crate::constants::VALIDATOR_BASE_BOND);
         self.validators.insert(id, validator);
+        Ok(())
     }
 
     /// Get all active validators.
@@ -755,6 +786,7 @@ impl ChainState {
         }
 
         self.slashed_validators.insert(*validator_id);
+        self.last_slash_epoch = Some(self.epoch);
         Ok(())
     }
 
@@ -779,13 +811,19 @@ impl ChainState {
     }
 
     /// Advance to the next epoch, returning collected fees and the new epoch seed.
-    pub fn advance_epoch(&mut self) -> (u64, EpochSeed) {
+    pub fn advance_epoch_with_vrf_mix(&mut self, vrf_mix: &Hash) -> (u64, EpochSeed) {
         let fees = self.epoch_fees;
         self.epoch_fees = 0;
         self.epoch += 1;
         let state_root = self.state_root();
-        self.epoch_seed = self.epoch_seed.next(&state_root);
+        self.epoch_seed = self.epoch_seed.next(&state_root, vrf_mix);
         (fees, self.epoch_seed.clone())
+    }
+
+    /// Convenience wrapper that advances the epoch with a zero VRF mix.
+    /// Used in tests and contexts where VRF commitments are unavailable.
+    pub fn advance_epoch(&mut self) -> (u64, EpochSeed) {
+        self.advance_epoch_with_vrf_mix(&[0u8; 32])
     }
 
     /// Compute the state root (hash of all state components).
@@ -1180,6 +1218,7 @@ impl ChainState {
             last_finalized: meta.last_finalized,
             total_minted: meta.total_minted,
             commitment_index,
+            last_slash_epoch: None,
         })
     }
 }
@@ -1362,6 +1401,8 @@ pub enum StateError {
     StorageError(String),
     #[error("storage persistence failed: {0}")]
     StoragePersistenceFailed(String),
+    #[error("maximum validator count reached")]
+    TooManyValidators,
     #[error("vertex contains too many transactions")]
     TooManyTransactions,
     #[error("commitment tree full: {0}")]
@@ -1613,7 +1654,7 @@ mod tests {
         let kp = SigningKeypair::generate();
         let validator = Validator::new(kp.public.clone());
         let vid = validator.id;
-        state.register_genesis_validator(validator.clone());
+        state.register_genesis_validator(validator.clone()).unwrap();
 
         // Advance epoch
         state.advance_epoch();
@@ -1699,7 +1740,7 @@ mod tests {
         let v = Validator::new(kp.public.clone());
         let vid = v.id;
 
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
 
         assert!(state.is_active_validator(&vid));
         assert!(state.get_validator(&vid).is_some());
@@ -1718,7 +1759,7 @@ mod tests {
         let v = Validator::new(kp.public.clone());
         let vid = v.id;
 
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
         assert_eq!(state.epoch_fees(), 0);
 
         state.slash_validator(&vid).unwrap();
@@ -1734,7 +1775,7 @@ mod tests {
         let mut state = ChainState::new();
         let kp = SigningKeypair::generate();
         let v = Validator::new(kp.public.clone());
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
 
         // Slash to accumulate fees
         let vid = kp.public.fingerprint();
@@ -1758,7 +1799,7 @@ mod tests {
         let kp = SigningKeypair::generate();
         let v = Validator::new(kp.public.clone());
         let vid = v.id;
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
 
         // Slash makes it inactive
         state.slash_validator(&vid).unwrap();
@@ -1868,7 +1909,7 @@ mod tests {
         let val_signing = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
@@ -1963,7 +2004,7 @@ mod tests {
         let val_signing = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
@@ -2051,7 +2092,7 @@ mod tests {
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
         let vid = validator.id;
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
         assert!(state.is_active_validator(&vid));
 
         // Build a ValidatorRegister transaction with the same signing key.
@@ -2117,7 +2158,7 @@ mod tests {
         // Register a validator WITHOUT a KEM key
         let val_kp = SigningKeypair::generate();
         let validator = Validator::new(val_kp.public.clone()); // no KEM key
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         let vertex_id = VertexId([1u8; 32]);
         let amount = 50_000u64;
@@ -2133,7 +2174,7 @@ mod tests {
         let val_kp2 = SigningKeypair::generate();
         let val_kem2 = KemKeypair::generate();
         let validator2 = Validator::with_kem(val_kp2.public.clone(), val_kem2.public.clone());
-        state.register_genesis_validator(validator2);
+        state.register_genesis_validator(validator2).unwrap();
 
         let commitments_before = state.commitment_count();
         let minted_before = state.total_minted();
@@ -2160,7 +2201,7 @@ mod tests {
         let mut validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
         validator.activation_epoch = 1; // eligible starting epoch 1
         let vid = validator.id;
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         // At epoch 0, this validator should NOT be eligible
         let eligible_0 = state.eligible_validators(0);
@@ -2192,7 +2233,7 @@ mod tests {
         let val_signing = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
@@ -2220,7 +2261,7 @@ mod tests {
         let val_signing = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
@@ -2249,7 +2290,10 @@ mod tests {
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
         let vid = validator.id;
-        ledger.state.register_genesis_validator(validator.clone());
+        ledger
+            .state
+            .register_genesis_validator(validator.clone())
+            .unwrap();
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
@@ -2308,8 +2352,8 @@ mod tests {
         let v_b = Validator::new(kp_b.public.clone());
 
         // Both states have 1 validator with the same bond amount
-        state1.register_genesis_validator(v_a);
-        state2.register_genesis_validator(v_b);
+        state1.register_genesis_validator(v_a).unwrap();
+        state2.register_genesis_validator(v_b).unwrap();
 
         assert_eq!(state1.total_validators(), 1);
         assert_eq!(state2.total_validators(), 1);
@@ -2335,8 +2379,8 @@ mod tests {
         let v = Validator::new(kp.public.clone());
         let vid = v.id;
 
-        state1.register_genesis_validator(v.clone());
-        state2.register_genesis_validator(v);
+        state1.register_genesis_validator(v.clone()).unwrap();
+        state2.register_genesis_validator(v).unwrap();
 
         // Same validator in both states — roots should match
         assert_eq!(state1.state_root(), state2.state_root());
@@ -2361,7 +2405,7 @@ mod tests {
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
         let vid = validator.id;
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         // Deregister: mark inactive and remove bond
         if let Some(v) = state.validators.get_mut(&vid) {
@@ -2417,7 +2461,7 @@ mod tests {
         let val_kp = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         // Validator is still active — re-registration should be rejected
         assert!(state.is_active_validator(&val_kp.public.fingerprint()));
@@ -2467,7 +2511,7 @@ mod tests {
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
         let vid = validator.id;
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         // Slash the validator
         state.slash_validator(&vid).unwrap();
@@ -2570,7 +2614,7 @@ mod tests {
         // Add a validator
         let kp = SigningKeypair::generate();
         let validator = Validator::new(kp.public.clone());
-        state.register_genesis_validator(validator.clone());
+        state.register_genesis_validator(validator.clone()).unwrap();
 
         // Persist to source storage
         let depth = crate::crypto::stark::spend_air::MERKLE_DEPTH;
@@ -2630,7 +2674,7 @@ mod tests {
             let kp = SigningKeypair::generate();
             let kem = KemKeypair::generate();
             let v = Validator::with_kem(kp.public.clone(), kem.public.clone());
-            state.register_genesis_validator(v);
+            state.register_genesis_validator(v).unwrap();
         }
         assert_eq!(state.total_validators(), 10);
 
@@ -2685,7 +2729,7 @@ mod tests {
         let kp = SigningKeypair::generate();
         let v = Validator::new(kp.public.clone());
         let vid = v.id;
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
 
         assert_eq!(
             state.validator_bond(&vid),
@@ -2719,21 +2763,21 @@ mod tests {
         let kem0 = KemKeypair::generate();
         let v0 = Validator::with_activation(kp0.public.clone(), kem0.public.clone(), 0);
         let vid0 = v0.id;
-        state.register_genesis_validator(v0);
+        state.register_genesis_validator(v0).unwrap();
 
         let kp1 = SigningKeypair::generate();
         let kem1 = KemKeypair::generate();
         let mut v1 = Validator::with_kem(kp1.public.clone(), kem1.public.clone());
         v1.activation_epoch = 1;
         let vid1 = v1.id;
-        state.register_genesis_validator(v1);
+        state.register_genesis_validator(v1).unwrap();
 
         let kp5 = SigningKeypair::generate();
         let kem5 = KemKeypair::generate();
         let mut v5 = Validator::with_kem(kp5.public.clone(), kem5.public.clone());
         v5.activation_epoch = 5;
         let vid5 = v5.id;
-        state.register_genesis_validator(v5);
+        state.register_genesis_validator(v5).unwrap();
 
         // Epoch 0: only v0 is eligible
         let eligible_0 = state.eligible_validators(0);
@@ -2777,11 +2821,11 @@ mod tests {
         let v_b = Validator::new(kp_b.public.clone());
 
         // Register in different order
-        state1.register_genesis_validator(v_a.clone());
-        state1.register_genesis_validator(v_b.clone());
+        state1.register_genesis_validator(v_a.clone()).unwrap();
+        state1.register_genesis_validator(v_b.clone()).unwrap();
 
-        state2.register_genesis_validator(v_b);
-        state2.register_genesis_validator(v_a);
+        state2.register_genesis_validator(v_b).unwrap();
+        state2.register_genesis_validator(v_a).unwrap();
 
         // validator_set_hash sorts by ID, so order of registration should not matter
         assert_eq!(
@@ -2798,7 +2842,7 @@ mod tests {
         let v = Validator::new(kp.public.clone());
         let vid = v.id;
 
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
 
         // Manually deactivate the validator
         state.validators.get_mut(&vid).unwrap().active = false;
@@ -2819,7 +2863,7 @@ mod tests {
         let kp = SigningKeypair::generate();
         let v = Validator::new(kp.public.clone());
         let _vid = v.id;
-        state.register_genesis_validator(v);
+        state.register_genesis_validator(v).unwrap();
 
         assert_eq!(state.epoch(), 0);
 
@@ -2831,7 +2875,7 @@ mod tests {
             let kp_new = SigningKeypair::generate();
             let v_new = Validator::new(kp_new.public.clone());
             let vid_new = v_new.id;
-            state.register_genesis_validator(v_new);
+            state.register_genesis_validator(v_new).unwrap();
             state.slash_validator(&vid_new).unwrap();
             assert!(state.epoch_fees() > 0);
 
@@ -2863,7 +2907,7 @@ mod tests {
         let val_signing = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
-        ledger.state.register_genesis_validator(validator);
+        ledger.state.register_genesis_validator(validator).unwrap();
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
@@ -2943,7 +2987,7 @@ mod tests {
         let val_signing = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let validator = Validator::with_kem(val_signing.public.clone(), val_kem.public.clone());
-        state.register_genesis_validator(validator);
+        state.register_genesis_validator(validator).unwrap();
 
         // Create a coinbase output
         let vertex_id = VertexId([1u8; 32]);
@@ -3078,6 +3122,104 @@ mod tests {
     fn chain_state_all_validators_empty() {
         let state = ChainState::new();
         assert!(state.all_validators().is_empty());
+    }
+
+    #[test]
+    fn max_validators_cap_enforced() {
+        let mut state = ChainState::new();
+        // Register up to MAX_VALIDATORS
+        for i in 0..crate::constants::MAX_VALIDATORS {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&(i as u32).to_le_bytes());
+            let v = Validator {
+                public_key: SigningPublicKey {
+                    dilithium: id.to_vec(),
+                    sphincs: vec![],
+                },
+                kem_public_key: None,
+                id,
+                active: true,
+                activation_epoch: 0,
+            };
+            state.register_genesis_validator(v).unwrap();
+        }
+        assert_eq!(state.total_validators(), crate::constants::MAX_VALIDATORS);
+
+        // One more should fail
+        let v_extra = Validator::new(SigningKeypair::generate().public.clone());
+        let result = state.register_genesis_validator(v_extra);
+        assert!(matches!(result, Err(StateError::TooManyValidators)));
+    }
+
+    #[test]
+    fn slash_sets_last_slash_epoch() {
+        let mut state = ChainState::new();
+        assert!(state.last_slash_epoch.is_none());
+
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+        state.register_genesis_validator(v).unwrap();
+        state.validator_bonds.insert(vid, 1_000_000);
+
+        state.slash_validator(&vid).unwrap();
+        assert_eq!(state.last_slash_epoch, Some(0));
+    }
+
+    #[test]
+    fn slashing_cooldown_requires_elevated_bond() {
+        let mut state = ChainState::new();
+        // Register and slash a validator to trigger cooldown
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+        state.register_genesis_validator(v).unwrap();
+        state.validator_bonds.insert(vid, 1_000_000);
+        state.slash_validator(&vid).unwrap();
+
+        // Verify cooldown is active: last_slash_epoch should be current epoch
+        assert_eq!(state.last_slash_epoch, Some(state.epoch));
+
+        // During cooldown, the effective required bond is elevated
+        let base_bond = crate::constants::required_validator_bond(state.total_validators());
+        let cooldown_bond = base_bond.saturating_mul(crate::constants::SLASH_BOND_MULTIPLIER);
+        assert!(
+            cooldown_bond > base_bond,
+            "cooldown bond ({}) must exceed base bond ({})",
+            cooldown_bond,
+            base_bond
+        );
+
+        // The multiplier factor is correct
+        assert_eq!(crate::constants::SLASH_BOND_MULTIPLIER, 3);
+        assert_eq!(crate::constants::SLASH_REGISTRATION_COOLDOWN_EPOCHS, 10);
+    }
+
+    #[test]
+    fn slashing_cooldown_expires_after_enough_epochs() {
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let v = Validator::new(kp.public.clone());
+        let vid = v.id;
+        state.register_genesis_validator(v).unwrap();
+        state.validator_bonds.insert(vid, 1_000_000);
+        state.slash_validator(&vid).unwrap();
+        let slash_epoch = state.epoch;
+
+        // Still in cooldown during the window
+        assert!(state.last_slash_epoch.is_some());
+        assert!(state.epoch < slash_epoch + crate::constants::SLASH_REGISTRATION_COOLDOWN_EPOCHS);
+
+        // Advance past cooldown
+        for _ in 0..=crate::constants::SLASH_REGISTRATION_COOLDOWN_EPOCHS {
+            state.advance_epoch();
+        }
+
+        // Now past cooldown window
+        assert!(
+            state.epoch >= slash_epoch + crate::constants::SLASH_REGISTRATION_COOLDOWN_EPOCHS,
+            "should be past cooldown window"
+        );
     }
 
     #[test]

@@ -400,7 +400,10 @@ impl Node {
                 config.keypair.public.clone(),
                 config.kem_keypair.public.clone(),
             );
-            ledger.state.register_genesis_validator(validator);
+            ledger
+                .state
+                .register_genesis_validator(validator)
+                .expect("genesis validator registration should not fail");
 
             // Evaluate VRF for epoch 0
             let epoch_seed = ledger.state.epoch_seed().clone();
@@ -509,6 +512,12 @@ impl Node {
 
         let resolved_external = external_addr.or(upnp_gateway.as_ref().map(|(a, _)| *a));
 
+        // Load persisted peer bans from storage
+        let initial_bans = storage.get_peer_bans().unwrap_or_default();
+        if !initial_bans.is_empty() {
+            tracing::info!(count = initial_bans.len(), "Loaded persisted peer bans");
+        }
+
         // Start P2P
         let p2p_config = P2pConfig {
             listen_addr: config.listen_addr,
@@ -519,6 +528,7 @@ impl Node {
             our_kem_keypair: config.kem_keypair.clone(),
             our_signing_keypair: config.keypair.clone(),
             external_addr: resolved_external,
+            initial_bans,
         };
         let p2p_result = crate::network::p2p::start(p2p_config).await?;
         let p2p = p2p_result.handle;
@@ -716,6 +726,15 @@ impl Node {
                         self.sync_state = SyncState::NeedSync { our_finalized: 0 };
                     }
                     _ => {}
+                }
+            }
+            P2pEvent::PeerBanned {
+                peer_id,
+                banned_until_ms,
+            } => {
+                let state = self.state.read().await;
+                if let Err(e) = state.storage.put_peer_ban(&peer_id, banned_until_ms) {
+                    tracing::warn!(error = %e, "Failed to persist peer ban");
                 }
             }
         }
@@ -2047,7 +2066,8 @@ impl Node {
                 // Check for epoch transition
                 let dag_epoch = state.ledger.dag.epoch();
                 if dag_epoch > state.bft.epoch {
-                    let (fees, new_seed) = state.ledger.state.advance_epoch();
+                    let vrf_mix = state.bft.vrf_mix_hash();
+                    let (fees, new_seed) = state.ledger.state.advance_epoch_with_vrf_mix(&vrf_mix);
                     tracing::info!(epoch = new_seed.epoch, fees = fees, "Epoch advanced");
 
                     // Persist chain state immediately after epoch advance

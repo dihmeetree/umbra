@@ -296,6 +296,19 @@ impl BftState {
         self.vrf_commitments.get(validator_id)
     }
 
+    /// Compute a deterministic mix hash from all VRF commitments in this epoch.
+    /// Sorted by validator ID for determinism, then hashed together.
+    pub fn vrf_mix_hash(&self) -> Hash {
+        let mut sorted: Vec<_> = self.vrf_commitments.iter().collect();
+        sorted.sort_by_key(|(vid, _)| *vid);
+        let mut parts: Vec<&[u8]> = vec![b"umbra.vrf.mix"];
+        for (vid, commitment) in &sorted {
+            parts.push(vid.as_ref());
+            parts.push(commitment.as_ref());
+        }
+        crate::hash_concat(&parts)
+    }
+
     /// Get our VRF proof for this epoch.
     pub fn our_vrf_proof(&self) -> Option<&VrfOutput> {
         self.our_vrf_proof.as_ref()
@@ -702,7 +715,28 @@ pub fn select_committee(
     validators: &[(SigningKeypair, Validator)],
     committee_size: usize,
 ) -> Vec<(Validator, VrfOutput)> {
+    select_committee_weighted(epoch_seed, validators, committee_size, &HashMap::new())
+}
+
+/// Weighted committee selection: validators with higher bonds have proportionally
+/// higher probability of selection. Falls back to uniform selection when no bonds
+/// are provided.
+pub fn select_committee_weighted(
+    epoch_seed: &EpochSeed,
+    validators: &[(SigningKeypair, Validator)],
+    committee_size: usize,
+    bonds: &HashMap<Hash, u64>,
+) -> Vec<(Validator, VrfOutput)> {
     let total = validators.len();
+    let total_weight: u64 = if bonds.is_empty() {
+        total as u64
+    } else {
+        validators
+            .iter()
+            .filter(|(_, v)| v.active && v.activation_epoch <= epoch_seed.epoch)
+            .map(|(_, v)| bonds.get(&v.id).copied().unwrap_or(1))
+            .sum()
+    };
     let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
 
     let current_epoch = epoch_seed.epoch;
@@ -713,7 +747,12 @@ pub fn select_committee(
         let input = epoch_seed.vrf_input(&validator.id);
         let vrf_output = VrfOutput::evaluate(keypair, &input);
 
-        if vrf_output.is_selected(committee_size, total) {
+        let weight = if bonds.is_empty() {
+            1u64
+        } else {
+            bonds.get(&validator.id).copied().unwrap_or(1)
+        };
+        if vrf_output.is_selected_weighted(committee_size, total_weight, weight) {
             candidates.push((validator.clone(), vrf_output));
         }
     }
@@ -732,7 +771,7 @@ pub fn select_committee(
             candidates.push((validator.clone(), vrf_output));
         }
         // Warn when committee is below MIN_COMMITTEE_SIZE.
-        // With n < 4 validators, BFT tolerance is degraded (f=0 for n<=3).
+        // With n < 7 validators, BFT tolerance is degraded (f<=1 for n<=6).
         if candidates.len() < crate::constants::MIN_COMMITTEE_SIZE {
             tracing::warn!(
                 committee_size = candidates.len(),
@@ -776,7 +815,34 @@ pub fn select_committee_from_proofs(
     committee_size: usize,
     total_validators: usize,
 ) -> Vec<(Validator, VrfOutput)> {
+    select_committee_from_proofs_weighted(
+        epoch_seed,
+        proofs,
+        committee_size,
+        total_validators,
+        &HashMap::new(),
+    )
+}
+
+/// Weighted production committee selection from verified VRF proofs.
+pub fn select_committee_from_proofs_weighted(
+    epoch_seed: &EpochSeed,
+    proofs: &[(Validator, VrfOutput)],
+    committee_size: usize,
+    total_validators: usize,
+    bonds: &HashMap<Hash, u64>,
+) -> Vec<(Validator, VrfOutput)> {
     let total = total_validators.max(proofs.len());
+    let total_weight: u64 = if bonds.is_empty() {
+        total as u64
+    } else {
+        proofs
+            .iter()
+            .filter(|(v, _)| v.active && v.activation_epoch <= epoch_seed.epoch)
+            .map(|(v, _)| bonds.get(&v.id).copied().unwrap_or(1))
+            .sum::<u64>()
+            .max(total as u64)
+    };
     let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
 
     let current_epoch = epoch_seed.epoch;
@@ -784,7 +850,12 @@ pub fn select_committee_from_proofs(
         if !validator.active || validator.activation_epoch > current_epoch {
             continue;
         }
-        if vrf_output.is_selected(committee_size, total) {
+        let weight = if bonds.is_empty() {
+            1u64
+        } else {
+            bonds.get(&validator.id).copied().unwrap_or(1)
+        };
+        if vrf_output.is_selected_weighted(committee_size, total_weight, weight) {
             candidates.push((validator.clone(), vrf_output.clone()));
         }
     }
@@ -2638,5 +2709,65 @@ mod tests {
         assert!(bft.register_vrf_commitment(vid, [42u8; 32]));
         // Different commitment should return false
         assert!(!bft.register_vrf_commitment(vid, [99u8; 32]));
+    }
+
+    #[test]
+    fn vrf_mix_hash_deterministic() {
+        let (_keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(0, validators.clone(), test_chain_id());
+
+        // Empty commitments produce a consistent hash
+        let mix1 = bft.vrf_mix_hash();
+        let mix2 = bft.vrf_mix_hash();
+        assert_eq!(mix1, mix2);
+
+        // Adding commitments changes the mix
+        bft.register_vrf_commitment(validators[0].id, [10u8; 32]);
+        let mix3 = bft.vrf_mix_hash();
+        assert_ne!(mix1, mix3);
+
+        // Different commitments produce different mixes
+        let mut bft2 = BftState::new(0, validators.clone(), test_chain_id());
+        bft2.register_vrf_commitment(validators[0].id, [20u8; 32]);
+        let mix4 = bft2.vrf_mix_hash();
+        assert_ne!(mix3, mix4);
+    }
+
+    #[test]
+    fn weighted_committee_selection_favors_higher_bonds() {
+        // Create 20 validators: half with high bond, half with low bond
+        let mut validators = Vec::new();
+        let mut bonds = HashMap::new();
+        for i in 0..20 {
+            let kp = SigningKeypair::generate();
+            let v = Validator::new(kp.public.clone());
+            let bond = if i < 10 { 100u64 } else { 10u64 };
+            bonds.insert(v.id, bond);
+            validators.push((kp, v));
+        }
+
+        // Run selection many times with different seeds
+        let mut high_selections = 0usize;
+        let mut low_selections = 0usize;
+        let genesis = crate::crypto::vrf::EpochSeed::genesis();
+
+        for trial in 0..50u32 {
+            let seed_hash = crate::hash_domain(b"test.trial", &trial.to_le_bytes());
+            let seed = genesis.next(&seed_hash, &[0u8; 32]);
+            let committee = select_committee_weighted(&seed, &validators, 10, &bonds);
+            for (v, _) in &committee {
+                if bonds.get(&v.id).copied().unwrap_or(0) == 100 {
+                    high_selections += 1;
+                } else {
+                    low_selections += 1;
+                }
+            }
+        }
+        assert!(
+            high_selections > low_selections,
+            "high-bond validators ({}) should be selected more than low-bond ({})",
+            high_selections,
+            low_selections
+        );
     }
 }
