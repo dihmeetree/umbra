@@ -37,12 +37,11 @@ const TAG_SIZE: usize = 16;
 
 /// Pad plaintext with a 4-byte length prefix and random padding to the next
 /// multiple of `ENCRYPT_PADDING_BUCKET`.
-fn pad_plaintext(plaintext: &[u8]) -> Vec<u8> {
+fn pad_plaintext(plaintext: &[u8]) -> Option<Vec<u8>> {
     // Guard against silent truncation when casting length to u32.
-    assert!(
-        plaintext.len() <= u32::MAX as usize,
-        "plaintext length exceeds u32::MAX, length prefix would truncate"
-    );
+    if plaintext.len() > u32::MAX as usize {
+        return None;
+    }
     let len = plaintext.len() as u32;
     let total = 4 + plaintext.len();
     let padded_len = total.div_ceil(ENCRYPT_PADDING_BUCKET) * ENCRYPT_PADDING_BUCKET;
@@ -56,7 +55,7 @@ fn pad_plaintext(plaintext: &[u8]) -> Vec<u8> {
         rand::Rng::fill_bytes(&mut rand::rng(), &mut pad);
         buf.extend_from_slice(&pad);
     }
-    buf
+    Some(buf)
 }
 
 /// Remove padding: read 4-byte length prefix, return that many bytes.
@@ -95,7 +94,7 @@ impl EncryptedPayload {
         let nonce = random_nonce();
         let mut key = derive_key(&shared_secret, &nonce);
 
-        let padded = pad_plaintext(plaintext);
+        let padded = pad_plaintext(plaintext)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let xnonce = XNonce::from_slice(&nonce);
         let ciphertext = cipher
@@ -151,7 +150,7 @@ impl EncryptedPayload {
         }
         let nonce = random_nonce();
         let mut key = derive_key(shared_secret, &nonce);
-        let padded = pad_plaintext(plaintext);
+        let padded = pad_plaintext(plaintext)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let xnonce = XNonce::from_slice(&nonce);
         let ciphertext = cipher

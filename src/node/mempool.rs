@@ -22,6 +22,8 @@ pub enum MempoolError {
     FeeTooLow { fee: u64, min_fee: u64 },
     #[error("mempool full: all transactions have maximum fee, no eviction possible")]
     MempoolFullMaxFee,
+    #[error("nullifier already spent in finalized state")]
+    NullifierAlreadySpent(Nullifier),
 }
 
 /// A transaction entry in the mempool with metadata.
@@ -150,10 +152,15 @@ impl Mempool {
         let fee = tx.fee;
         let size = tx.estimated_size();
 
-        // 4. Size-limit eviction: evict lowest-fee txs until there is space
+        // 4. Size-limit eviction: evict lowest-fee txs until there is space.
+        // Cap evictions to prevent excessive churn from a single insert.
+        let mut evictions = 0usize;
         while self.txs.len() >= self.config.max_transactions
             || self.total_bytes + size > self.config.max_bytes
         {
+            if evictions >= crate::constants::MAX_MEMPOOL_EVICTIONS {
+                return Err(MempoolError::MempoolFullMaxFee);
+            }
             // Find the lowest-fee transaction (last entry in BTreeMap)
             if let Some((&lowest_key, _)) = self.fee_index.last_key_value() {
                 let lowest_fee = lowest_key.fee();
@@ -171,6 +178,7 @@ impl Mempool {
                     break;
                 };
                 self.remove_entry(&lowest_id);
+                evictions += 1;
             } else {
                 break;
             }
@@ -197,6 +205,28 @@ impl Mempool {
         );
 
         Ok(tx_id)
+    }
+
+    /// Insert a transaction into the mempool with an additional state check.
+    ///
+    /// Before inserting, checks each nullifier against finalized state using the
+    /// provided `is_spent` closure. This prevents re-accepting transactions whose
+    /// nullifiers have already been finalized but whose mempool conflict entries
+    /// may have been cleared.
+    pub fn insert_with_state_check<F>(
+        &mut self,
+        tx: Transaction,
+        is_spent: F,
+    ) -> Result<TxId, MempoolError>
+    where
+        F: Fn(&Nullifier) -> bool,
+    {
+        for input in &tx.inputs {
+            if is_spent(&input.nullifier) {
+                return Err(MempoolError::NullifierAlreadySpent(input.nullifier));
+            }
+        }
+        self.insert(tx)
     }
 
     /// Remove a transaction by TxId.

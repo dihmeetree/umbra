@@ -25,7 +25,11 @@ pub fn felts_to_hash(elements: &[Felt; DIGEST_SIZE]) -> Hash {
 /// Convert a 32-byte hash to 4 Goldilocks field elements.
 ///
 /// Each 8-byte chunk is interpreted as a little-endian u64 and reduced mod p
-/// (where p = 2^64 - 2^32 + 1, the Goldilocks prime).
+/// (where p = 2^64 - 2^32 + 1, the Goldilocks prime) via `Felt::new()`.
+///
+/// Both in-circuit (AIR constraints) and out-of-circuit (this function) use the
+/// same `Felt::new()` reduction, so there is no mismatch between the prover's
+/// witness and the verifier's public inputs.
 ///
 /// **Important:** This conversion is lossy for non-field-native values. A u64 value
 /// in `[p, 2^64)` will be reduced mod p, so `felts_to_hash(hash_to_felts(h))` may

@@ -41,6 +41,7 @@ sled = "0.34"
 # HTTP RPC server
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 # TLS (mTLS for RPC authentication)
 rustls = "0.23"
@@ -94,6 +95,29 @@ http-body-util = "0.1"
 [[bin]]
 name = "simulator"
 path = "src/bin/simulator.rs"
+
+# Compile STARK/math-heavy dependencies with optimizations even in debug/test mode.
+# This gives ~10-20x speedup for proof generation without affecting test correctness.
+[profile.dev.package.winter-prover]
+opt-level = 3
+[profile.dev.package.winter-math]
+opt-level = 3
+[profile.dev.package.winter-crypto]
+opt-level = 3
+[profile.dev.package.winter-fri]
+opt-level = 3
+[profile.dev.package.winter-air]
+opt-level = 3
+[profile.dev.package.winter-verifier]
+opt-level = 3
+[profile.dev.package.winter-utils]
+opt-level = 3
+
+# Also optimize blake3 (used heavily for hashing) and argon2 (key derivation)
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

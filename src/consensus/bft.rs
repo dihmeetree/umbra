@@ -18,7 +18,7 @@
 //! - Duplicate votes from the same validator are rejected
 //! - Committee selection guarantees MIN_COMMITTEE_SIZE members for BFT safety
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -232,6 +232,9 @@ pub struct BftState {
     /// proofs from the same validator must match. This provides first-seen
     /// binding to prevent grinding after the initial commitment is locked in.
     vrf_commitments: HashMap<Hash, Hash>,
+    /// Recent committee history for cross-epoch equivocation verification.
+    /// Capped at MAX_EQUIVOCATION_EVIDENCE_EPOCHS entries.
+    historical_committees: VecDeque<(u64, Vec<Validator>)>,
 }
 
 impl BftState {
@@ -252,6 +255,7 @@ impl BftState {
             epoch_seed: None,
             total_validators: 0,
             vrf_commitments: HashMap::new(),
+            historical_committees: VecDeque::new(),
         }
     }
 
@@ -546,6 +550,17 @@ impl BftState {
         self.round += 1;
     }
 
+    /// Advance round for view-change: clears votes but preserves equivocations.
+    ///
+    /// Use this instead of `advance_round()` when the round change is triggered
+    /// by a timeout (view-change), since equivocation evidence from the timed-out
+    /// round should still be processed.
+    pub fn try_advance_round(&mut self) {
+        self.votes.clear();
+        self.round_votes.clear();
+        self.round += 1;
+    }
+
     /// Clear processed equivocation evidence (call after slashing).
     pub fn clear_equivocations(&mut self) {
         self.equivocations.clear();
@@ -553,15 +568,26 @@ impl BftState {
 
     /// Verify equivocation evidence received from the network.
     ///
-    /// Returns true if the evidence is cryptographically valid: epoch matches,
-    /// voter is a committee member, vertices differ, and both signatures verify.
+    /// Returns true if the evidence is cryptographically valid: the voter
+    /// was a committee member in the evidence's epoch, vertices differ, and
+    /// both signatures verify. Supports cross-epoch verification using
+    /// retained historical committee data.
     pub fn verify_equivocation_evidence(&self, evidence: &EquivocationEvidence) -> bool {
-        // Epoch must match current
-        if evidence.epoch != self.epoch {
-            return false;
-        }
-        // Voter must be a current committee member
-        let voter = match self.committee.iter().find(|v| v.id == evidence.voter_id) {
+        // Look up the committee for the evidence's epoch
+        let committee = if evidence.epoch == self.epoch {
+            &self.committee
+        } else {
+            match self
+                .historical_committees
+                .iter()
+                .find(|(e, _)| *e == evidence.epoch)
+            {
+                Some((_, c)) => c,
+                None => return false,
+            }
+        };
+        // Voter must be a committee member for that epoch
+        let voter = match committee.iter().find(|v| v.id == evidence.voter_id) {
             Some(v) => v,
             None => return false,
         };
@@ -593,6 +619,16 @@ impl BftState {
 
     /// Advance to a new epoch, clearing all per-epoch state.
     pub fn advance_epoch(&mut self, epoch: u64, committee: Vec<Validator>) {
+        // Preserve current committee in history for cross-epoch equivocation checks
+        if !self.committee.is_empty() {
+            self.historical_committees
+                .push_back((self.epoch, self.committee.clone()));
+            while self.historical_committees.len()
+                > crate::constants::MAX_EQUIVOCATION_EVIDENCE_EPOCHS
+            {
+                self.historical_committees.pop_front();
+            }
+        }
         self.epoch = epoch;
         self.round = 0;
         self.committee = committee;
@@ -738,8 +774,9 @@ pub fn select_committee_from_proofs(
     epoch_seed: &EpochSeed,
     proofs: &[(Validator, VrfOutput)],
     committee_size: usize,
+    total_validators: usize,
 ) -> Vec<(Validator, VrfOutput)> {
-    let total = proofs.len();
+    let total = total_validators.max(proofs.len());
     let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
 
     let current_epoch = epoch_seed.epoch;
@@ -816,6 +853,7 @@ pub fn create_vote(
 
 /// Compute the dynamic BFT quorum for a given committee size: 2/3 + 1.
 pub fn dynamic_quorum(committee_size: usize) -> usize {
+    // Returns 1 for committee_size == 0 (vacuous quorum); callers ensure committee is non-empty.
     (committee_size * 2) / 3 + 1
 }
 
@@ -837,7 +875,7 @@ pub fn vote_sign_data(
         VoteType::Accept => 1u8,
         VoteType::Reject => 0u8,
     };
-    let mut data = Vec::with_capacity(93);
+    let mut data = Vec::with_capacity(91);
     data.extend_from_slice(b"umbra.vote");
     data.extend_from_slice(chain_id);
     data.extend_from_slice(&epoch.to_le_bytes());
@@ -1012,11 +1050,11 @@ mod tests {
         assert_eq!(ev.second_vertex, vertex_b);
         // Both signatures must be non-empty (independently verifiable evidence)
         assert!(
-            !ev.first_signature.as_bytes().is_empty(),
+            !ev.first_signature.dilithium_bytes().is_empty(),
             "first_signature should be present in equivocation evidence"
         );
         assert!(
-            !ev.second_signature.as_bytes().is_empty(),
+            !ev.second_signature.dilithium_bytes().is_empty(),
             "second_signature should be present in equivocation evidence"
         );
         // Vote types must be recorded
@@ -2260,7 +2298,7 @@ mod tests {
             let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
             proofs.push((v, vrf_output));
         }
-        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5, proofs.len());
         // Should return at least MIN_COMMITTEE_SIZE members
         assert!(committee.len() >= crate::constants::MIN_COMMITTEE_SIZE);
     }
@@ -2279,7 +2317,7 @@ mod tests {
             let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
             proofs.push((v, vrf_output));
         }
-        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5, proofs.len());
         // All returned validators should be active
         for (v, _) in &committee {
             assert!(v.active);
@@ -2301,7 +2339,7 @@ mod tests {
             let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
             proofs.push((v, vrf_output));
         }
-        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5, proofs.len());
         for (v, _) in &committee {
             assert!(v.activation_epoch <= epoch_seed.epoch);
         }
@@ -2318,8 +2356,8 @@ mod tests {
             let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
             proofs.push((v, vrf_output));
         }
-        let c1 = select_committee_from_proofs(&epoch_seed, &proofs, 5);
-        let c2 = select_committee_from_proofs(&epoch_seed, &proofs, 5);
+        let c1 = select_committee_from_proofs(&epoch_seed, &proofs, 5, proofs.len());
+        let c2 = select_committee_from_proofs(&epoch_seed, &proofs, 5, proofs.len());
         assert_eq!(c1.len(), c2.len());
         for (a, b) in c1.iter().zip(c2.iter()) {
             assert_eq!(a.0.id, b.0.id);
@@ -2329,7 +2367,7 @@ mod tests {
     #[test]
     fn select_committee_from_proofs_empty_input() {
         let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
-        let committee = select_committee_from_proofs(&epoch_seed, &[], 5);
+        let committee = select_committee_from_proofs(&epoch_seed, &[], 5, 0);
         assert!(committee.is_empty());
     }
 
@@ -2346,7 +2384,7 @@ mod tests {
             proofs.push((v, vrf_output));
         }
         // With 3 validators and committee_size=21, fallback should include all 3
-        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 21);
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 21, proofs.len());
         assert_eq!(committee.len(), 3);
     }
 

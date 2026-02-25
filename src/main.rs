@@ -167,6 +167,10 @@ enum WalletAction {
         /// Web UI listen port.
         #[arg(long, default_value = "9734")]
         port: u16,
+
+        /// Allow binding to non-loopback addresses (exposes wallet to network).
+        #[arg(long, default_value = "false")]
+        allow_remote: bool,
     },
 }
 
@@ -381,9 +385,20 @@ async fn run_wallet_command(
         WalletAction::Consolidate => wallet_cli::cmd_consolidate(data_dir, rpc_addr, tls_ref).await,
         WalletAction::Recover { phrase } => wallet_cli::cmd_recover(data_dir, &phrase),
         WalletAction::Export { file } => wallet_cli::cmd_export(data_dir, &file),
-        WalletAction::Web { host, port } => {
+        WalletAction::Web {
+            host,
+            port,
+            allow_remote,
+        } => {
             let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
-            umbra::wallet::web::serve(addr, data_dir.to_path_buf(), rpc_addr, wallet_tls).await
+            umbra::wallet::web::serve(
+                addr,
+                data_dir.to_path_buf(),
+                rpc_addr,
+                wallet_tls,
+                allow_remote,
+            )
+            .await
         }
     }
 }

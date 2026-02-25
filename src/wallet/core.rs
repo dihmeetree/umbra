@@ -73,6 +73,9 @@ pub struct ReceivedMessage {
     pub content: Vec<u8>,
 }
 
+/// Clone is intentional: the web wallet uses Arc<RwLock<Wallet>> for shared state
+/// and clones the wallet for read operations. Secret keys within FullKeypair
+/// are zeroized on drop via the ZeroizeOnDrop derive.
 #[derive(Clone)]
 pub struct Wallet {
     keypair: FullKeypair,
@@ -549,6 +552,11 @@ impl Wallet {
         &self.history
     }
 
+    /// Clear all transaction history entries.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
     fn push_history(&mut self, entry: TxHistoryEntry) {
         self.history.push(entry);
         if self.history.len() > MAX_HISTORY_ENTRIES {
@@ -946,7 +954,7 @@ impl Wallet {
             last_scanned_sequence: last_scanned_seq,
             history: self.history.clone(),
         };
-        let plaintext = crate::serialize(&wallet_file)
+        let mut plaintext = crate::serialize(&wallet_file)
             .map_err(|e| WalletError::Persistence(format!("serialize failed: {}", e)))?;
         let bytes = if let Some(pw) = password {
             use chacha20poly1305::aead::{Aead, KeyInit};
@@ -960,6 +968,8 @@ impl Wallet {
                 .encrypt(XNonce::from_slice(&nonce), plaintext.as_ref())
                 .map_err(|_| WalletError::Persistence("encryption failed".into()))?;
             enc_key.zeroize();
+            // Zeroize serialized plaintext now that it's encrypted
+            plaintext.zeroize();
             let mut out =
                 Vec::with_capacity(4 + WALLET_SALT_SIZE + WALLET_NONCE_SIZE + ciphertext.len());
             out.extend_from_slice(&ENCRYPTED_MAGIC);

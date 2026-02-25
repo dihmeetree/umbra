@@ -64,6 +64,12 @@ impl NatState {
     /// Record an observed IP from a peer. Returns `true` if this changes
     /// the quorum outcome (i.e., we now have a new observed address).
     pub fn record_observed_addr(&mut self, peer: PeerId, ip: IpAddr) -> bool {
+        // Cap total distinct IPs to prevent memory exhaustion from diverse spoofed reports
+        if !self.observed_ip_votes.contains_key(&ip)
+            && self.observed_ip_votes.len() >= crate::constants::MAX_OBSERVED_IP_VOTES
+        {
+            return false;
+        }
         let had_quorum = self.observed_external_addr().is_some();
         let voters = self.observed_ip_votes.entry(ip).or_default();
         voters.insert(peer);

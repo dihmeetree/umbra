@@ -129,6 +129,9 @@ pub fn build_balance_trace(
             // Padding block: all-zero state, zero value.
             // Use or_all_values for bit columns to break symmetry with
             // proof_link blocks (which use complement of individual inputs).
+            // The reconstruction constraint includes a state[4] factor that
+            // makes it trivially zero for padding blocks (state[4] = 0),
+            // so the bit columns can safely hold non-zero values.
             let state = [Felt::ZERO; 12];
             (state, Felt::ZERO, Felt::ZERO, or_all_values)
         };

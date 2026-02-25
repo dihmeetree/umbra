@@ -5,6 +5,15 @@
 //! 2. Kyber1024 KEM handshake — initiator encapsulates to responder's KEM PK
 //! 3. Dilithium5 auth — both sides sign the handshake transcript
 //! 4. Encrypted transport — ChaCha20-Poly1305 AEAD per message
+//!
+//! Known limitations:
+//! - The node's KEM keypair is static across connections. Ephemeral per-connection
+//!   KEM keys would improve forward secrecy but require a protocol redesign.
+//! - The Hello message is sent in plaintext, leaking peer identity before the
+//!   encrypted channel is established. A Noise-protocol handshake pattern would
+//!   mitigate this.
+//! - Peer reputation scores are not persisted across restarts, so a misbehaving
+//!   peer regains a clean slate after node restart.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -20,6 +29,23 @@ use crate::crypto::keys::{KemKeypair, KemPublicKey, SigningKeypair, SigningPubli
 use crate::network::nat::NatState;
 use crate::network::{self, Message, PeerId, PeerInfo, PROTOCOL_VERSION};
 use crate::Hash;
+
+/// Check whether a socket address is a valid public (non-private, non-loopback) address.
+///
+/// Rejects loopback, unspecified, private, link-local, and broadcast addresses.
+/// Used to validate addresses received from peers before connecting or storing.
+pub fn is_valid_public_addr(addr: &SocketAddr) -> bool {
+    match addr.ip() {
+        IpAddr::V4(v4) => {
+            !v4.is_loopback()
+                && !v4.is_unspecified()
+                && !v4.is_private()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified(),
+    }
+}
 
 // ── Rate Limiting ──
 
@@ -516,14 +542,19 @@ pub async fn start(config: P2pConfig) -> Result<P2pStartResult, P2pError> {
 }
 
 /// Extract the /16 subnet prefix from an IP address.
-/// Returns the first two octets for IPv4; `[0, 0]` for IPv6 (treated as one bucket).
+/// Returns the first two octets for IPv4; first two bytes of the first segment
+/// for IPv6 (approximating a /16 bucket).
 fn subnet_prefix(ip: IpAddr) -> [u8; 2] {
     match ip {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
             [octets[0], octets[1]]
         }
-        IpAddr::V6(_) => [0, 0],
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            let bytes = segments[0].to_be_bytes();
+            [bytes[0], bytes[1]]
+        }
     }
 }
 
@@ -719,8 +750,10 @@ async fn p2p_loop(
                                 // Update the peer's external address in our records
                                 if let Some(ext_str) = external_addr {
                                     if let Ok(ext_addr) = ext_str.parse::<SocketAddr>() {
-                                        if let Some(peer) = peers.get_mut(&from) {
-                                            peer.external_addr = Some(ext_addr);
+                                        if is_valid_public_addr(&ext_addr) {
+                                            if let Some(peer) = peers.get_mut(&from) {
+                                                peer.external_addr = Some(ext_addr);
+                                            }
                                         }
                                     }
                                 }
@@ -789,6 +822,10 @@ async fn p2p_loop(
                             Message::NatPunchNotify { requester_external_addr, requester_peer_id } => {
                                 // Someone wants to connect to us — try connecting back to them
                                 if let Ok(addr) = requester_external_addr.parse::<SocketAddr>() {
+                                    if !is_valid_public_addr(&addr) {
+                                        tracing::debug!(addr = %addr, "Ignoring NatPunchNotify with non-public address");
+                                        continue;
+                                    }
                                     let config_clone = config.clone();
                                     let internal_tx_clone = internal_tx.clone();
                                     let hs_permit = handshake_semaphore.clone();
@@ -1017,78 +1054,89 @@ async fn handle_outbound(
     config: &P2pConfig,
     internal_tx: mpsc::Sender<InternalEvent>,
 ) -> Result<(), P2pError> {
-    let timeout = std::time::Duration::from_millis(crate::constants::PEER_CONNECT_TIMEOUT_MS);
-    let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+    let connect_timeout =
+        std::time::Duration::from_millis(crate::constants::PEER_CONNECT_TIMEOUT_MS);
+    let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
         .await
-        .map_err(|_| P2pError::ConnectionFailed("timeout".into()))?
+        .map_err(|_| P2pError::ConnectionFailed("connect timeout".into()))?
         .map_err(|e| P2pError::ConnectionFailed(e.to_string()))?;
 
     let (mut reader, mut writer) = stream.into_split();
 
-    // 1. Hello exchange (plaintext)
-    let hello = Message::Hello {
-        version: PROTOCOL_VERSION,
-        peer_id: config.our_peer_id,
-        public_key: config.our_public_key.clone(),
-        listen_port: config.listen_port,
-        kem_public_key: config.our_kem_keypair.public.clone(),
-    };
-    write_message(&mut writer, &hello).await?;
+    // Wrap the entire handshake in a timeout to prevent slowloris-style stalls
+    let handshake_timeout =
+        std::time::Duration::from_millis(crate::constants::PEER_CONNECT_TIMEOUT_MS * 2);
+    let (peer_id, public_key, peer_kem_pk, session_keys) =
+        tokio::time::timeout(handshake_timeout, async {
+            // 1. Hello exchange (plaintext)
+            let hello = Message::Hello {
+                version: PROTOCOL_VERSION,
+                peer_id: config.our_peer_id,
+                public_key: config.our_public_key.clone(),
+                listen_port: config.listen_port,
+                kem_public_key: config.our_kem_keypair.public.clone(),
+            };
+            write_message(&mut writer, &hello).await?;
 
-    let their_hello = read_message(&mut reader).await?;
-    let (peer_id, public_key, peer_kem_pk) = match their_hello {
-        Message::Hello {
-            version,
-            peer_id,
-            public_key,
-            kem_public_key,
-            ..
-        } => {
-            // Accept v2 (pre-NAT) and v3+ peers
-            if !(2..=PROTOCOL_VERSION).contains(&version) {
-                return Err(P2pError::InvalidHandshake);
+            let their_hello = read_message(&mut reader).await?;
+            let (peer_id, public_key, peer_kem_pk) = match their_hello {
+                Message::Hello {
+                    version,
+                    peer_id,
+                    public_key,
+                    kem_public_key,
+                    ..
+                } => {
+                    // Accept v2 (pre-NAT) and v3+ peers
+                    if !(2..=PROTOCOL_VERSION).contains(&version) {
+                        return Err(P2pError::InvalidHandshake);
+                    }
+                    // Verify peer_id matches the fingerprint of their public key
+                    if peer_id != public_key.fingerprint() {
+                        return Err(P2pError::InvalidHandshake);
+                    }
+                    (peer_id, public_key, kem_public_key)
+                }
+                _ => return Err(P2pError::InvalidHandshake),
+            };
+
+            // 2. KEM encapsulate to peer's public key
+            let (shared_secret, kem_ct) = peer_kem_pk
+                .encapsulate()
+                .ok_or(P2pError::InvalidHandshake)?;
+
+            // 3. Derive session keys and transcript BEFORE sending (kem_ct is moved by send)
+            let session_keys = SessionKeys::derive(&shared_secret.0, true);
+            let transcript = compute_transcript_hash(&config.our_peer_id, &peer_id, &kem_ct.0);
+
+            // 4. Send KEM ciphertext
+            write_message(
+                &mut writer,
+                &Message::KeyExchange {
+                    kem_ciphertext: kem_ct,
+                },
+            )
+            .await?;
+
+            // 5. Sign transcript and send auth
+            let signature = config.our_signing_keypair.sign(&transcript);
+            write_message(&mut writer, &Message::AuthResponse { signature }).await?;
+
+            // 6. Verify responder's auth signature
+            let auth_msg = read_message(&mut reader).await?;
+            match auth_msg {
+                Message::AuthResponse { signature } => {
+                    if !public_key.verify(&transcript, &signature) {
+                        return Err(P2pError::InvalidHandshake);
+                    }
+                }
+                _ => return Err(P2pError::InvalidHandshake),
             }
-            // Verify peer_id matches the fingerprint of their public key
-            if peer_id != public_key.fingerprint() {
-                return Err(P2pError::InvalidHandshake);
-            }
-            (peer_id, public_key, kem_public_key)
-        }
-        _ => return Err(P2pError::InvalidHandshake),
-    };
 
-    // 2. KEM encapsulate to peer's public key
-    let (shared_secret, kem_ct) = peer_kem_pk
-        .encapsulate()
-        .ok_or(P2pError::InvalidHandshake)?;
-
-    // 3. Derive session keys and transcript BEFORE sending (kem_ct is moved by send)
-    let session_keys = SessionKeys::derive(&shared_secret.0, true);
-    let transcript = compute_transcript_hash(&config.our_peer_id, &peer_id, &kem_ct.0);
-
-    // 4. Send KEM ciphertext
-    write_message(
-        &mut writer,
-        &Message::KeyExchange {
-            kem_ciphertext: kem_ct,
-        },
-    )
-    .await?;
-
-    // 5. Sign transcript and send auth
-    let signature = config.our_signing_keypair.sign(&transcript);
-    write_message(&mut writer, &Message::AuthResponse { signature }).await?;
-
-    // 6. Verify responder's auth signature
-    let auth_msg = read_message(&mut reader).await?;
-    match auth_msg {
-        Message::AuthResponse { signature } => {
-            if !public_key.verify(&transcript, &signature) {
-                return Err(P2pError::InvalidHandshake);
-            }
-        }
-        _ => return Err(P2pError::InvalidHandshake),
-    }
+            Ok((peer_id, public_key, peer_kem_pk, session_keys))
+        })
+        .await
+        .map_err(|_| P2pError::ConnectionFailed("handshake timeout".into()))??;
 
     // 7. Switch to encrypted transport
     spawn_encrypted_connection_tasks(
@@ -1281,6 +1329,9 @@ async fn spawn_encrypted_connection_tasks(
                 }
             }
         }
+        // Zeroize keys on exit
+        recv_key.zeroize();
+        send_key_copy.zeroize();
     });
 
     // Encrypted write task with rekey initiation
@@ -1937,7 +1988,7 @@ mod tests {
         assert_eq!(subnet_prefix(ip), [0, 0]);
 
         let ip2: IpAddr = "2001:db8::1".parse().unwrap();
-        assert_eq!(subnet_prefix(ip2), [0, 0]);
+        assert_eq!(subnet_prefix(ip2), [0x20, 0x01]);
     }
 
     #[test]

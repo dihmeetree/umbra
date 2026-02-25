@@ -59,6 +59,8 @@ pub struct TxOutput {
     /// Blake3-512 defense-in-depth binding: Blake3-XOF-512(value || blinding).
     /// Provides ~256-bit quantum preimage resistance even if Rescue Prime has
     /// undiscovered algebraic weaknesses. Verified outside STARK circuits.
+    /// Note: this binding is verified by the recipient (who decrypts the note to
+    /// recover value and blinding), not by validators during consensus.
     #[serde(
         serialize_with = "crate::serde_bytes64::serialize",
         deserialize_with = "crate::serde_bytes64::deserialize"
@@ -225,6 +227,13 @@ impl Transaction {
         }
         if self.messages.len() > crate::constants::MAX_MESSAGES_PER_TX {
             return Err(TxValidationError::TooManyMessages);
+        }
+
+        // Check message sizes early (before expensive STARK verification)
+        for msg in &self.messages {
+            if msg.payload.ciphertext.len() > crate::constants::MAX_MESSAGE_SIZE {
+                return Err(TxValidationError::MessageTooLarge);
+            }
         }
 
         // Enforce minimum fee to prevent zero-fee spam
@@ -396,13 +405,6 @@ impl Transaction {
             // merkle_root is checked in state.rs, not here
         }
 
-        // Check message sizes
-        for msg in &self.messages {
-            if msg.payload.ciphertext.len() > crate::constants::MAX_MESSAGE_SIZE {
-                return Err(TxValidationError::MessageTooLarge);
-            }
-        }
-
         Ok(())
     }
 
@@ -440,7 +442,9 @@ impl Transaction {
                 + m.payload.ciphertext.len() // ciphertext
             })
             .sum();
-        base + balance + inputs + outputs + messages + 32
+        let raw = base + balance + inputs + outputs + messages + 32;
+        // Add 10% overhead margin for bincode framing and field delimiters
+        raw + raw / 10
     }
 }
 
@@ -909,32 +913,17 @@ mod tests {
 
     #[test]
     fn validate_rejects_message_too_large() {
-        // Build a TX via the builder with a message whose plaintext is larger than
-        // MAX_MESSAGE_SIZE (65536). The ciphertext will be the same size as the
-        // plaintext (XOR cipher), so it will exceed the limit. The builder does
-        // not enforce MAX_MESSAGE_SIZE, only MAX_ENCRYPT_PLAINTEXT (1 MiB).
-        // validate_structure checks message size AFTER proof verification, so the
-        // TX must have valid proofs — which the builder provides.
-        let recipient = FullKeypair::generate();
-        let oversized_plaintext = vec![0xAA; crate::constants::MAX_MESSAGE_SIZE + 1];
-        // 1 input, 1 output, 1 message (65537 bytes plaintext):
-        // ciphertext after padding = ceil((4+65537)/64)*64 = 65600 bytes
-        // message_kb = ceil(65600/1024) = 65
-        // deterministic fee = 100 + 100 + 65*10 = 850
-        let tx = TransactionBuilder::new()
-            .add_input(InputSpec {
-                value: 1850,
-                blinding: BlindingFactor::random(),
-                spend_auth: crate::hash_domain(b"test", b"auth"),
-                merkle_path: vec![],
-            })
-            .add_output(recipient.kem.public.clone(), 1000)
-            .add_message(recipient.kem.public.clone(), oversized_plaintext)
-            .set_proof_options(test_proof_options())
-            .build()
-            .unwrap();
-
-        assert!(tx.messages[0].payload.ciphertext.len() > crate::constants::MAX_MESSAGE_SIZE);
+        // Construct a TX directly with an oversized message ciphertext.
+        // Message size is checked early in validate_structure (before STARK
+        // verification), so dummy proofs are fine.
+        let mut tx = make_test_tx();
+        tx.messages.push(TxMessage {
+            payload: crate::crypto::encryption::EncryptedPayload {
+                ciphertext: vec![0u8; crate::constants::MAX_MESSAGE_SIZE + 1],
+                nonce: [0u8; 24],
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![]),
+            },
+        });
         assert!(matches!(
             tx.validate_structure(0),
             Err(TxValidationError::MessageTooLarge)

@@ -206,6 +206,8 @@ pub struct Dag {
     current_round: u64,
     /// Current epoch
     current_epoch: u64,
+    /// Per-proposer vertex count in the current epoch (rate limiting).
+    proposer_vertex_count: HashMap<Hash, usize>,
 }
 
 impl Dag {
@@ -227,6 +229,7 @@ impl Dag {
             finalized,
             current_round: 0,
             current_epoch: 0,
+            proposer_vertex_count: HashMap::new(),
         }
     }
 
@@ -307,6 +310,24 @@ impl Dag {
         if self.vertices.contains_key(&vertex.id) {
             return Err(VertexError::DuplicateVertex);
         }
+
+        // Check for duplicate transactions within the vertex
+        if !vertex.transactions.is_empty() {
+            let mut seen_txids = HashSet::with_capacity(vertex.transactions.len());
+            for tx in &vertex.transactions {
+                if !seen_txids.insert(tx.tx_id()) {
+                    return Err(VertexError::DuplicateTransaction);
+                }
+            }
+        }
+
+        // Per-proposer rate limiting: cap vertices per proposer per epoch
+        let proposer_id = vertex.proposer.fingerprint();
+        let count = self.proposer_vertex_count.entry(proposer_id).or_insert(0);
+        if *count >= crate::constants::MAX_VERTICES_PER_PROPOSER_PER_EPOCH {
+            return Err(VertexError::ProposerRateLimited);
+        }
+        *count += 1;
 
         let id = vertex.id;
 
@@ -427,6 +448,9 @@ impl Dag {
     }
 
     /// Advance the round counter.
+    ///
+    /// When the round crosses an epoch boundary (every EPOCH_LENGTH rounds),
+    /// the epoch counter increments and per-proposer rate limits reset.
     pub fn advance_round(&mut self) {
         self.current_round += 1;
         if self
@@ -434,6 +458,7 @@ impl Dag {
             .is_multiple_of(crate::constants::EPOCH_LENGTH)
         {
             self.current_epoch += 1;
+            self.proposer_vertex_count.clear();
         }
     }
 
@@ -534,6 +559,10 @@ pub enum VertexError {
     TooManyUnfinalized,
     #[error("vertex timestamp is too far in the future")]
     TimestampTooFarInFuture,
+    #[error("duplicate transaction in vertex")]
+    DuplicateTransaction,
+    #[error("proposer exceeded per-epoch vertex rate limit")]
+    ProposerRateLimited,
 }
 
 #[cfg(test)]
@@ -1297,7 +1326,7 @@ mod tests {
         assert!(genesis.transactions.is_empty());
         assert_eq!(genesis.timestamp, 0);
         assert!(genesis.vrf_proof.is_none());
-        assert!(genesis.signature.as_bytes().is_empty());
+        assert!(genesis.signature.dilithium_bytes().is_empty());
         assert_eq!(genesis.proposer.dilithium.len(), 2592); // Dilithium5 key size
         assert_eq!(genesis.proposer.sphincs.len(), 64); // SPHINCS+ key size
     }

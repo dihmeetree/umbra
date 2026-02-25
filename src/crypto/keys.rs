@@ -93,7 +93,7 @@ impl Signature {
     }
 
     /// Access the raw Dilithium signature bytes.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub fn dilithium_bytes(&self) -> &[u8] {
         &self.dilithium
     }
 }
@@ -131,9 +131,10 @@ impl<'de> Deserialize<'de> for Signature {
 
 /// A hybrid signing keypair: Dilithium5 + SPHINCS+-SHAKE-256s-simple.
 ///
-/// Implements [`Clone`] because keypairs need to be shared between the
-/// node's proposal and voting subsystems. Secret keys are zeroized on
-/// drop via [`ZeroizeOnDrop`] on [`SigningSecretKey`].
+/// [`Clone`] is intentionally derived because keypairs need to be shared
+/// between the node's proposal and voting subsystems, and stored in
+/// configuration snapshots. Secret keys are zeroized on drop via
+/// [`ZeroizeOnDrop`] on [`SigningSecretKey`].
 #[derive(Clone)]
 pub struct SigningKeypair {
     pub public: SigningPublicKey,
@@ -629,13 +630,13 @@ mod tests {
     #[test]
     fn signature_empty_and_as_bytes() {
         let empty = Signature::empty();
-        assert!(empty.as_bytes().is_empty());
+        assert!(empty.dilithium_bytes().is_empty());
         assert!(empty.is_empty());
         assert!(empty.is_valid_size());
 
         let kp = SigningKeypair::generate();
         let sig = kp.sign(b"test");
-        assert_eq!(sig.as_bytes().len(), DILITHIUM5_SIG_BYTES);
+        assert_eq!(sig.dilithium_bytes().len(), DILITHIUM5_SIG_BYTES);
         assert!(!sig.is_empty());
     }
 
@@ -950,7 +951,7 @@ mod tests {
     #[test]
     fn signature_empty_constructor() {
         let sig = Signature::empty();
-        assert!(sig.as_bytes().is_empty());
+        assert!(sig.dilithium_bytes().is_empty());
         assert!(sig.is_empty());
     }
 

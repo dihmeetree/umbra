@@ -54,8 +54,13 @@ pub struct NodeState {
 
 impl NodeState {
     /// Submit a transaction to the mempool.
+    ///
+    /// Checks nullifiers against finalized state before inserting to prevent
+    /// accepting transactions that spend already-finalized outputs.
     pub fn submit_transaction(&mut self, tx: Transaction) -> Result<TxId, MempoolError> {
-        self.mempool.insert(tx)
+        let state = &self.ledger.state;
+        self.mempool
+            .insert_with_state_check(tx, |n| state.is_spent(n))
     }
 
     /// Remove a transaction from the mempool by ID.
@@ -325,7 +330,7 @@ pub fn load_or_generate_keypair(
     };
 
     if key_path.exists() {
-        let bytes = std::fs::read(&key_path)?;
+        let bytes = zeroize::Zeroizing::new(std::fs::read(&key_path)?);
         if let Some((keypair, kem_kp)) = load_hybrid(&bytes) {
             tracing::info!("Loaded validator key (hybrid format)");
             return Ok((keypair, kem_kp));
@@ -744,6 +749,16 @@ impl Node {
 
                 // Validate and insert into mempool, then broadcast (fluff)
                 let mut state = self.state.write().await;
+                // Check nullifiers against finalized state before insert to prevent
+                // accepting transactions that spend already-finalized outputs
+                let already_spent = tx
+                    .inputs
+                    .iter()
+                    .any(|i| state.ledger.state.is_spent(&i.nullifier));
+                if already_spent {
+                    tracing::debug!("Rejected tx: nullifier already spent in finalized state");
+                    return;
+                }
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
                         drop(state);
@@ -1005,7 +1020,9 @@ impl Node {
                         break;
                     }
                     if let Ok(addr) = peer_info.address.parse::<SocketAddr>() {
-                        if !self.recently_attempted.contains(&addr) {
+                        if crate::network::p2p::is_valid_public_addr(&addr)
+                            && !self.recently_attempted.contains(&addr)
+                        {
                             self.recently_attempted.insert(addr);
                             let _ = self.p2p.connect(addr).await;
                             connected += 1;
@@ -1028,7 +1045,14 @@ impl Node {
             }
             Message::GetTips => {
                 let state = self.state.read().await;
-                let tips: Vec<_> = state.ledger.dag.tips().iter().copied().collect();
+                let tips: Vec<_> = state
+                    .ledger
+                    .dag
+                    .tips()
+                    .iter()
+                    .copied()
+                    .take(crate::constants::MAX_TIPS_RESPONSE)
+                    .collect();
                 let _ = self.p2p.send_to(from, Message::TipsResponse(tips)).await;
             }
             Message::GetEpochState => {
@@ -1787,9 +1811,9 @@ impl Node {
             }
         };
 
-        // Import into storage
+        // Import into storage (write lock needed since storage is mutated)
         {
-            let state = self.state.read().await;
+            let state = self.state.write().await;
             if let Err(e) = crate::state::import_snapshot_to_storage(&state.storage, &snapshot) {
                 tracing::error!(error = %e, "Snapshot import failed");
                 self.sync_failed_peers.insert(peer, Instant::now());
@@ -1902,42 +1926,30 @@ impl Node {
                 // Remove conflicting mempool txs
                 state.mempool.remove_conflicting(&nullifiers);
 
-                // -- Persist finalized vertex and state --
-                if let Some(v) = state.ledger.dag.get(vertex_id) {
-                    if let Err(e) = state.storage.put_vertex(v) {
-                        tracing::error!(error = %e, "Failed to persist finalized vertex");
-                    }
-
-                    // Persist individual transactions and their nullifiers
-                    for tx in &v.transactions {
-                        if let Err(e) = state.storage.put_transaction(tx) {
-                            tracing::error!(error = %e, "Failed to persist transaction");
-                        }
-                        for input in &tx.inputs {
-                            if let Err(e) = state.storage.put_nullifier(&input.nullifier) {
-                                tracing::error!(error = %e, "Failed to persist nullifier");
-                            }
-                        }
-                    }
-                }
-
-                // Persist finalized vertex index
+                // -- Persist finalized vertex and state atomically via batch --
                 let finalized_count = state.storage.finalized_vertex_count().unwrap_or(0);
-                if let Err(e) = state
-                    .storage
-                    .put_finalized_vertex_index(finalized_count, vertex_id)
-                {
-                    tracing::error!(error = %e, "Failed to persist finalized vertex index");
-                }
+                let mut batch = crate::node::storage::FinalizationBatch::default();
 
-                // Persist coinbase output if created
-                if let Some(ref cb) = coinbase {
-                    if let Err(e) = state.storage.put_coinbase_output(finalized_count, cb) {
-                        tracing::error!(error = %e, "Failed to persist coinbase output");
+                if let Some(v) = state.ledger.dag.get(vertex_id) {
+                    // Collect transactions and nullifiers
+                    for tx in &v.transactions {
+                        batch.transactions.push(tx.clone());
+                        for input in &tx.inputs {
+                            batch.nullifiers.push(input.nullifier);
+                        }
                     }
+                    batch.vertices.push(v.clone());
                 }
 
-                // Persist modified commitment tree nodes (incremental)
+                // Finalized vertex index
+                batch.finalized_indices.push((finalized_count, *vertex_id));
+
+                // Coinbase output
+                if let Some(ref cb) = coinbase {
+                    batch.coinbase_outputs.push((finalized_count, cb.clone()));
+                }
+
+                // Modified commitment tree nodes (incremental)
                 let new_commitment_count = state.ledger.state.commitment_count();
                 if new_commitment_count > old_commitment_count {
                     for level in 0..=MERKLE_DEPTH {
@@ -1945,14 +1957,12 @@ impl Node {
                         let range_end = ((new_commitment_count - 1) >> level) + 1;
                         for idx in range_start..range_end {
                             let hash = state.ledger.state.commitment_tree_node(level, idx);
-                            if let Err(e) = state.storage.put_commitment_level(level, idx, &hash) {
-                                tracing::error!(error = %e, level, idx, "Failed to persist commitment tree node");
-                            }
+                            batch.commitment_levels.push((level, idx, hash));
                         }
                     }
                 }
 
-                // Persist validators (update all active + bonded)
+                // Validators (update all active + bonded)
                 for validator in state.ledger.state.all_validators() {
                     let bond = state
                         .ledger
@@ -1960,24 +1970,24 @@ impl Node {
                         .validator_bond(&validator.id)
                         .unwrap_or(0);
                     let slashed = state.ledger.state.is_slashed(&validator.id);
-                    if let Err(e) = state.storage.put_validator(validator, bond, slashed) {
-                        tracing::error!(error = %e, "Failed to persist validator state");
-                    }
+                    batch.validators.push((validator.clone(), bond, slashed));
                 }
 
-                // Persist chain state meta snapshot
+                // Chain state meta snapshot
                 let meta = state.ledger.state.to_chain_state_meta(finalized_count + 1);
-                if let Err(e) = state.storage.put_chain_state_meta(&meta) {
-                    tracing::error!(error = %e, "Failed to persist chain state meta");
-                }
+                batch.chain_state_meta = Some(meta);
 
-                // Flush to disk
+                // Apply batch atomically and flush
+                if let Err(e) = state.storage.apply_finalization_batch(&batch) {
+                    tracing::error!(error = %e, "Failed to persist finalization batch");
+                }
                 if let Err(e) = state.storage.flush() {
                     tracing::error!(error = %e, "Failed to flush storage to disk");
                 }
 
                 // Check for equivocation evidence, slash, and broadcast to network
                 let evidence_to_broadcast: Vec<_> = state.bft.equivocations().to_vec();
+                let mut slashed_any = false;
                 for evidence in &evidence_to_broadcast {
                     if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
                         tracing::warn!(
@@ -1985,6 +1995,24 @@ impl Node {
                             round = evidence.round,
                             "Slashed validator for equivocation"
                         );
+                        slashed_any = true;
+                    }
+                }
+                // Immediately persist slashed validator state
+                if slashed_any {
+                    for validator in state.ledger.state.all_validators() {
+                        let bond = state
+                            .ledger
+                            .state
+                            .validator_bond(&validator.id)
+                            .unwrap_or(0);
+                        let slashed = state.ledger.state.is_slashed(&validator.id);
+                        if let Err(e) = state.storage.put_validator(validator, bond, slashed) {
+                            tracing::error!(error = %e, "Failed to persist validator state after slashing");
+                        }
+                    }
+                    if let Err(e) = state.storage.flush() {
+                        tracing::error!(error = %e, "Failed to flush after slashing");
                     }
                 }
                 // Clear processed evidence to avoid re-processing
@@ -2021,6 +2049,16 @@ impl Node {
                 if dag_epoch > state.bft.epoch {
                     let (fees, new_seed) = state.ledger.state.advance_epoch();
                     tracing::info!(epoch = new_seed.epoch, fees = fees, "Epoch advanced");
+
+                    // Persist chain state immediately after epoch advance
+                    let fc = state.storage.finalized_vertex_count().unwrap_or(0);
+                    let epoch_meta = state.ledger.state.to_chain_state_meta(fc);
+                    if let Err(e) = state.storage.put_chain_state_meta(&epoch_meta) {
+                        tracing::error!(error = %e, "Failed to persist chain state after epoch advance");
+                    }
+                    if let Err(e) = state.storage.flush() {
+                        tracing::error!(error = %e, "Failed to flush after epoch advance");
+                    }
 
                     // Re-evaluate our VRF for the new epoch
                     let total_validators = state.ledger.state.total_validators();
@@ -2161,10 +2199,23 @@ impl Node {
             }
         }
 
-        // Clean expired cooldowns
+        // Clean expired cooldowns and cap size to prevent unbounded growth
         let cutoff = std::time::Duration::from_millis(crate::constants::SYNC_PEER_COOLDOWN_MS);
         self.sync_failed_peers
             .retain(|_, failed_at| failed_at.elapsed() < cutoff);
+        while self.sync_failed_peers.len() > crate::constants::MAX_SYNC_FAILED_PEERS {
+            // Evict the oldest entry
+            if let Some(oldest) = self
+                .sync_failed_peers
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| *k)
+            {
+                self.sync_failed_peers.remove(&oldest);
+            } else {
+                break;
+            }
+        }
 
         // View change: if synced but no finalization for too long, or peers
         // are ahead, broadcast GetTips to discover missing state

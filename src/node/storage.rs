@@ -110,11 +110,38 @@ pub trait Storage {
 
     fn flush(&self) -> Result<(), StorageError>;
 
+    /// Apply a batch of finalization writes atomically.
+    ///
+    /// Groups all writes (vertex, transactions, nullifiers, commitment levels,
+    /// finalized index, validators, coinbase output, chain meta) into per-tree
+    /// sled batches and applies them together, reducing fsync overhead.
+    fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError>;
+
+    /// Mark that a snapshot import is in progress (crash-recovery flag).
+    fn set_import_in_progress(&self, in_progress: bool) -> Result<(), StorageError>;
+
+    /// Check whether a snapshot import was interrupted.
+    fn is_import_in_progress(&self) -> Result<bool, StorageError>;
+
     /// Clear all state-related trees for snapshot import.
     ///
     /// Clears: nullifiers, commitment_levels, validators, chain_meta, finalized_index.
     /// Does NOT clear: vertices, transactions, coinbase_outputs (historical data).
     fn clear_for_snapshot_import(&self) -> Result<(), StorageError>;
+}
+
+/// A batch of writes to apply atomically during vertex finalization.
+#[derive(Default)]
+pub struct FinalizationBatch {
+    pub vertices: Vec<Vertex>,
+    pub transactions: Vec<Transaction>,
+    pub nullifiers: Vec<Nullifier>,
+    pub commitment_levels: Vec<(usize, usize, Hash)>,
+    pub finalized_indices: Vec<(u64, VertexId)>,
+    pub validators: Vec<(Validator, u64, bool)>,
+    pub removed_validators: Vec<Hash>,
+    pub coinbase_outputs: Vec<(u64, TxOutput)>,
+    pub chain_state_meta: Option<ChainStateMeta>,
 }
 
 /// Sled-backed storage implementation.
@@ -492,6 +519,126 @@ impl Storage for SledStorage {
             }
             None => Ok(None),
         }
+    }
+
+    fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError> {
+        let mut vert_batch = sled::Batch::default();
+        for v in &batch.vertices {
+            let value =
+                crate::serialize(v).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            vert_batch.insert(&v.id.0, value);
+        }
+
+        let mut tx_batch = sled::Batch::default();
+        for tx in &batch.transactions {
+            let id = tx.tx_id();
+            let value =
+                crate::serialize(tx).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            tx_batch.insert(&id.0, value);
+        }
+
+        let mut null_batch = sled::Batch::default();
+        for n in &batch.nullifiers {
+            null_batch.insert(&n.0, &[1u8]);
+        }
+
+        let mut cl_batch = sled::Batch::default();
+        for &(level, index, ref hash) in &batch.commitment_levels {
+            let key = commitment_level_key(level, index);
+            cl_batch.insert(&key, hash.as_ref());
+        }
+
+        let mut fi_batch = sled::Batch::default();
+        for &(seq, ref vid) in &batch.finalized_indices {
+            fi_batch.insert(&seq.to_be_bytes(), &vid.0);
+        }
+
+        let mut val_batch = sled::Batch::default();
+        for (validator, bond, slashed) in &batch.validators {
+            let record = ValidatorRecord {
+                validator: validator.clone(),
+                bond: *bond,
+                slashed: *slashed,
+            };
+            let value = crate::serialize(&record)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            val_batch.insert(&validator.id, value);
+        }
+        for id in &batch.removed_validators {
+            val_batch.remove(id.as_ref());
+        }
+
+        let mut cb_batch = sled::Batch::default();
+        for (seq, output) in &batch.coinbase_outputs {
+            let value =
+                crate::serialize(output).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            cb_batch.insert(&seq.to_be_bytes(), value);
+        }
+
+        let mut meta_batch = sled::Batch::default();
+        if let Some(ref meta) = batch.chain_state_meta {
+            let value =
+                crate::serialize(meta).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            meta_batch.insert(b"current".as_ref(), value);
+        }
+
+        // Apply all batches
+        self.vertices
+            .apply_batch(vert_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.transactions
+            .apply_batch(tx_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.nullifiers
+            .apply_batch(null_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.commitment_levels
+            .apply_batch(cl_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.finalized_index
+            .apply_batch(fi_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.validators
+            .apply_batch(val_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.coinbase_outputs
+            .apply_batch(cb_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.chain_meta
+            .apply_batch(meta_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+
+        self.finalized_count.fetch_add(
+            batch.finalized_indices.len() as u64,
+            std::sync::atomic::Ordering::Release,
+        );
+
+        self.db
+            .flush()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn set_import_in_progress(&self, in_progress: bool) -> Result<(), StorageError> {
+        if in_progress {
+            self.chain_meta
+                .insert(b"import_in_progress", &[1u8])
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+        } else {
+            self.chain_meta
+                .remove(b"import_in_progress")
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+        }
+        self.db
+            .flush()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn is_import_in_progress(&self) -> Result<bool, StorageError> {
+        self.chain_meta
+            .contains_key(b"import_in_progress")
+            .map_err(|e| StorageError::Io(e.to_string()))
     }
 
     fn flush(&self) -> Result<(), StorageError> {
@@ -967,6 +1114,70 @@ mod tests {
         assert!(storage.get_all_validators().unwrap().is_empty());
         assert!(storage.get_chain_state_meta().unwrap().is_none());
         assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn apply_finalization_batch_roundtrip() {
+        let storage = temp_storage();
+
+        let v = test_vertex();
+        let vid = v.id;
+        let tx = make_test_tx(10);
+        let tx_id = tx.tx_id();
+        let nullifier = Nullifier([77u8; 32]);
+        let commit_hash = [88u8; 32];
+        let cb_output = make_test_output();
+
+        let meta = ChainStateMeta {
+            epoch: 3,
+            last_finalized: Some(vid),
+            state_root: [9u8; 32],
+            commitment_root: [10u8; 32],
+            commitment_count: 1,
+            nullifier_count: 1,
+            nullifier_hash: [11u8; 32],
+            epoch_fees: 200,
+            validator_count: 0,
+            epoch_seed: [12u8; 32],
+            finalized_count: 1,
+            total_minted: 50_000,
+        };
+
+        let batch = super::FinalizationBatch {
+            vertices: vec![v],
+            transactions: vec![tx],
+            nullifiers: vec![nullifier],
+            commitment_levels: vec![(0, 0, commit_hash)],
+            finalized_indices: vec![(0, vid)],
+            validators: vec![],
+            removed_validators: vec![],
+            coinbase_outputs: vec![(0, cb_output)],
+            chain_state_meta: Some(meta),
+        };
+
+        storage.apply_finalization_batch(&batch).unwrap();
+
+        assert!(storage.has_vertex(&vid).unwrap());
+        assert!(storage.get_transaction(&tx_id).unwrap().is_some());
+        assert!(storage.has_nullifier(&nullifier).unwrap());
+        assert_eq!(
+            storage.get_commitment_level(0, 0).unwrap().unwrap(),
+            commit_hash
+        );
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 1);
+        assert!(storage.get_coinbase_output(0).unwrap().is_some());
+        let restored_meta = storage.get_chain_state_meta().unwrap().unwrap();
+        assert_eq!(restored_meta.epoch, 3);
+    }
+
+    #[test]
+    fn import_in_progress_flag() {
+        let storage = temp_storage();
+        assert!(!storage.is_import_in_progress().unwrap());
+        storage.set_import_in_progress(true).unwrap();
+        assert!(storage.is_import_in_progress().unwrap());
+        storage.set_import_in_progress(false).unwrap();
+        assert!(!storage.is_import_in_progress().unwrap());
     }
 
     #[test]

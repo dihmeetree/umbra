@@ -18,6 +18,10 @@ pub mod state;
 pub mod transaction;
 pub mod wallet;
 
+// Prevent fast-tests from being used in release builds.
+#[cfg(all(feature = "fast-tests", not(debug_assertions)))]
+compile_error!("fast-tests feature must not be used in release builds");
+
 /// Protocol constants
 pub mod constants {
     /// Maximum transaction message size in bytes (64 KiB)
@@ -41,7 +45,9 @@ pub mod constants {
     /// Vertices with timestamps more than this far ahead of the receiver's
     /// clock are rejected on insertion.
     pub const MAX_VERTEX_TIMESTAMP_DRIFT_SECS: u64 = 60;
-    /// BFT quorum threshold: 2f+1 where f = (COMMITTEE_SIZE-1)/3
+    /// BFT quorum threshold: 2f+1 where f = (COMMITTEE_SIZE-1)/3.
+    /// This is only used as a fallback; at runtime, `dynamic_quorum(committee_size)`
+    /// computes the quorum from the actual committee size.
     pub const BFT_QUORUM: usize = (COMMITTEE_SIZE * 2) / 3 + 1;
     /// Epoch length in vertices before committee rotation
     pub const EPOCH_LENGTH: u64 = 1000;
@@ -169,6 +175,26 @@ pub mod constants {
     pub const MAX_SNAPSHOT_CHUNKS: u32 = 256;
     /// Minimum interval between snapshot chunk requests from the same peer (ms).
     pub const SNAPSHOT_CHUNK_REQUEST_INTERVAL_MS: u64 = 100;
+
+    // ── Operational caps ──
+
+    /// Maximum tips returned in a single TipsResponse message.
+    pub const MAX_TIPS_RESPONSE: usize = 1_000;
+    /// Maximum entries in the sync_failed_peers set.
+    pub const MAX_SYNC_FAILED_PEERS: usize = 1_000;
+    /// Maximum observed-IP vote entries tracked for NAT detection.
+    pub const MAX_OBSERVED_IP_VOTES: usize = 100;
+    /// Number of past epochs of committee history retained for cross-epoch
+    /// equivocation verification.
+    pub const MAX_EQUIVOCATION_EVIDENCE_EPOCHS: usize = 10;
+    /// Maximum vertices a single proposer can insert per epoch.
+    pub const MAX_VERTICES_PER_PROPOSER_PER_EPOCH: usize = 100;
+    /// Maximum eviction iterations when inserting into a full mempool.
+    pub const MAX_MEMPOOL_EVICTIONS: usize = 10;
+    /// Number of peers whose snapshot state_root must agree before importing.
+    pub const SNAPSHOT_QUORUM: usize = 2;
+    /// Upper bound on snapshot blob size accepted by `deserialize_snapshot` (1 GiB).
+    pub const MAX_SNAPSHOT_DESERIALIZE_BYTES: usize = 1024 * 1024 * 1024;
 
     // ── NAT Traversal ──
 
@@ -371,6 +397,9 @@ pub fn deserialize<T: serde::de::DeserializeOwned>(
 pub fn deserialize_snapshot<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<T, bincode::error::DecodeError> {
+    if bytes.len() > constants::MAX_SNAPSHOT_DESERIALIZE_BYTES {
+        return Err(bincode::error::DecodeError::LimitExceeded);
+    }
     let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
     Ok(val)
 }

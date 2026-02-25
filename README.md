@@ -148,7 +148,7 @@ umbra/
     error.html              Error display
 ```
 
-**~28,500 lines of Rust** across 43 source files with **924 tests**.
+**~35,000 lines of Rust** across 45 source files with **924 tests**.
 
 ## Building
 

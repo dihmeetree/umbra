@@ -154,12 +154,31 @@ impl TransactionBuilder {
     pub fn build(self) -> Result<Transaction, TxBuildError> {
         let proof_opts = self.proof_options.unwrap_or_else(default_proof_options);
 
-        // Enforce MAX_TX_IO limits early to give clear errors
+        // Enforce structural limits early, before expensive STARK proof generation
+        if self.inputs.is_empty() {
+            return Err(TxBuildError::NoInputs);
+        }
+        if self.outputs.is_empty() {
+            return Err(TxBuildError::NoOutputs);
+        }
         if self.inputs.len() > crate::constants::MAX_TX_IO {
             return Err(TxBuildError::TooManyInputs);
         }
         if self.outputs.len() > crate::constants::MAX_TX_IO {
             return Err(TxBuildError::TooManyOutputs);
+        }
+        if self.messages.len() > crate::constants::MAX_MESSAGES_PER_TX {
+            return Err(TxBuildError::TooManyMessages);
+        }
+        for msg_spec in &self.messages {
+            if msg_spec.plaintext.len() > crate::constants::MAX_MESSAGE_SIZE {
+                return Err(TxBuildError::MessageTooLarge);
+            }
+        }
+        for spec in &self.outputs {
+            if spec.value == 0 {
+                return Err(TxBuildError::ZeroValueOutput);
+            }
         }
 
         // Build encrypted messages early — needed to compute deterministic fee
@@ -407,6 +426,16 @@ pub enum TxBuildError {
     TooManyOutputs,
     #[error("fee must be set explicitly for validator transactions")]
     FeeRequired,
+    #[error("transaction must have at least one input")]
+    NoInputs,
+    #[error("transaction must have at least one output")]
+    NoOutputs,
+    #[error("too many messages (max {})", crate::constants::MAX_MESSAGES_PER_TX)]
+    TooManyMessages,
+    #[error("message too large (max {} bytes)", crate::constants::MAX_MESSAGE_SIZE)]
+    MessageTooLarge,
+    #[error("zero-value outputs are not allowed")]
+    ZeroValueOutput,
 }
 
 #[cfg(test)]

@@ -253,7 +253,7 @@ impl EpochSeed {
     /// Derive the next epoch's seed from the current epoch's final state.
     pub fn next(&self, epoch_final_hash: &Hash) -> Self {
         EpochSeed {
-            epoch: self.epoch + 1,
+            epoch: self.epoch.checked_add(1).expect("epoch overflow"),
             seed: crate::hash_concat(&[
                 b"umbra.epoch.seed",
                 &self.epoch.to_le_bytes(),

@@ -37,6 +37,10 @@ pub struct StealthSpendInfo {
 
 /// Result of stealth address generation, including the shared secret
 /// so it can be reused for encrypting note data (avoiding a second KEM).
+///
+/// `shared_secret` is a [`SharedSecret`](super::keys::SharedSecret) which
+/// derives `ZeroizeOnDrop`, so the 32-byte secret is scrubbed when this
+/// value goes out of scope.
 pub struct StealthGenResult {
     pub address: StealthAddress,
     pub shared_secret: super::keys::SharedSecret,
@@ -102,6 +106,9 @@ impl StealthAddress {
     }
 
     /// Detect with a known output index (faster than scanning).
+    ///
+    /// Always constructs the result and performs the key comparison, then
+    /// conditionally returns it, so both code paths execute the same work.
     pub fn try_detect_at_index(
         &self,
         our_kem_kp: &KemKeypair,
@@ -118,11 +125,13 @@ impl StealthAddress {
             }
         };
         let derived = derive_one_time_key(&shared_secret.0, output_index);
-        if crate::constant_time_eq(&derived, &self.one_time_key) {
-            Some(StealthSpendInfo {
-                shared_secret: shared_secret.0,
-                one_time_key: derived,
-            })
+        // Always construct the result; conditionally return it
+        let info = StealthSpendInfo {
+            shared_secret: shared_secret.0,
+            one_time_key: derived,
+        };
+        if crate::constant_time_eq(&info.one_time_key, &self.one_time_key) {
+            Some(info)
         } else {
             None
         }

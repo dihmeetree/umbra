@@ -256,24 +256,32 @@ pub fn router(state: WalletWebState) -> Router {
         .route("/history", get(history_page))
         .route("/scan", post(scan_action))
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(tower_http::cors::CorsLayer::very_permissive())
         .with_state(state)
 }
 
 /// Start the wallet web server.
+///
+/// If `allow_remote` is false, binding to a non-loopback address is rejected
+/// to prevent accidental exposure of wallet operations to the network.
 pub async fn serve(
     addr: SocketAddr,
     data_dir: PathBuf,
     rpc_addr: SocketAddr,
     wallet_tls: Option<crate::config::WalletTlsConfig>,
+    allow_remote: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Warn when binding to a non-loopback address, since the wallet web
-    // UI has no authentication and exposes spending capabilities.
+    // Block non-loopback binding unless explicitly allowed
+    if !addr.ip().is_loopback() && !allow_remote {
+        return Err("Refusing to bind wallet web UI to a non-loopback address. \
+             Use --allow-remote to override, or bind to 127.0.0.1."
+            .into());
+    }
     if !addr.ip().is_loopback() {
         tracing::warn!(
             bind_addr = %addr,
             "Wallet web UI is binding to a non-loopback address. \
-             This exposes wallet operations to the network. \
-             Use 127.0.0.1 unless you understand the risks."
+             This exposes wallet operations to the network."
         );
     }
 

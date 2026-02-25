@@ -2,20 +2,21 @@
 
 ## Project Overview
 
-Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~28.5k lines across 43 source files with 901 tests. Single crate, no workspace.
+Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~35k lines across 45 source files with 924 tests. Single crate, no workspace.
 
 ## Build & Test
 
 ```bash
 cargo build --release        # Full build (requires C compiler for PQClean backends)
 cargo check                  # Fast type-check
-cargo test                   # Full suite (~901 tests, ~3 min debug mode)
-cargo test <module>::tests   # Run specific module tests (e.g., consensus::bft::tests)
-cargo clippy --all-targets   # Lint — must be warning-free
-cargo fmt                    # Format — must pass `cargo fmt -- --check`
+cargo test --features fast-tests # Fast suite (~924 tests, ~1.5 min)
+cargo test                       # Full suite (includes real SPHINCS+, ~3 hrs)
+cargo test <module>::tests       # Run specific module tests (e.g., consensus::bft::tests)
+cargo clippy --all-targets       # Lint — must be warning-free
+cargo fmt                        # Format — must pass `cargo fmt -- --check`
 ```
 
-Tests are slow in debug mode due to zk-STARK proof generation. Use `cargo test <filter>` to run targeted subsets during development.
+Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` even in dev/test profile (see `Cargo.toml`), so proof generation is fast. The `fast-tests` feature skips SPHINCS+ signing/verification for further speedup. Use `cargo test <filter>` to run targeted subsets during development.
 
 ## Architecture
 
@@ -66,6 +67,6 @@ Tests are slow in debug mode due to zk-STARK proof generation. Use `cargo test <
 - `bincode` v2 API uses `bincode::serde::encode_to_vec` / `decode_from_slice` (not v1 style).
 - `deserialize()` rejects inputs > 16 MiB (`MAX_NETWORK_MESSAGE_BYTES`). Use `deserialize_snapshot()` for assembled snapshot blobs.
 - `finalize_vertex_inner` takes `&self` (not `&mut self`) — cannot call `mark_seen` from within it.
-- STARK proof generation is expensive. Tests using `TransactionBuilder` are slow in debug mode.
+- STARK proof generation is expensive but mitigated by `[profile.dev.package]` optimizations in Cargo.toml.
 - The `Signature` type wraps `Vec<u8>` — Dilithium5 signatures are 4627 bytes each.
 - `VoteType` must be included when verifying vote signatures (`vote_sign_data` includes it).

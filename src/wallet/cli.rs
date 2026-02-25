@@ -571,9 +571,15 @@ pub async fn scan_chain(
             // vertices or data was lost.
             let expected_seq = current_after + 1;
             if entry.sequence != expected_seq {
+                let gap_size = entry.sequence.saturating_sub(expected_seq);
+                eprintln!(
+                    "WARNING: sequence gap detected (expected {}, got {}, {} vertices missing)",
+                    expected_seq, entry.sequence, gap_size
+                );
                 tracing::warn!(
                     expected = expected_seq,
                     actual = entry.sequence,
+                    gap = gap_size,
                     "sequence gap detected during wallet scan; \
                      some finalized vertices may have been skipped"
                 );

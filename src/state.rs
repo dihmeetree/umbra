@@ -59,6 +59,11 @@ pub fn import_snapshot_to_storage(
     storage: &dyn Storage,
     snapshot: &SnapshotData,
 ) -> Result<ChainStateMeta, StateError> {
+    // Mark import in progress so interrupted imports can be detected on restart
+    storage
+        .set_import_in_progress(true)
+        .map_err(|e| StateError::StorageError(e.to_string()))?;
+
     // 1. Clear existing state data
     storage
         .clear_for_snapshot_import()
@@ -93,6 +98,11 @@ pub fn import_snapshot_to_storage(
     // 6. Flush to disk
     storage
         .flush()
+        .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+    // Clear import flag after successful completion
+    storage
+        .set_import_in_progress(false)
         .map_err(|e| StateError::StorageError(e.to_string()))?;
 
     Ok(snapshot.meta.clone())
@@ -526,7 +536,10 @@ impl ChainState {
         match &tx.tx_type {
             TxType::Transfer => {
                 // Standard fee collection
-                self.epoch_fees = self.epoch_fees.saturating_add(tx.fee);
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(tx.fee)
+                    .ok_or(StateError::FeeOverflow)?;
             }
             TxType::ValidatorRegister {
                 signing_key,
@@ -545,7 +558,10 @@ impl ChainState {
                 // Escrow bond (scaled by current active validator count), remainder
                 // goes to epoch fees. Compute BEFORE updating active status.
                 let actual_fee = tx.fee.saturating_sub(bond);
-                self.epoch_fees = self.epoch_fees.saturating_add(actual_fee);
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(actual_fee)
+                    .ok_or(StateError::FeeOverflow)?;
 
                 if let Some(existing) = self.validators.get_mut(&vid) {
                     // Re-registration of a previously deregistered validator
@@ -577,7 +593,10 @@ impl ChainState {
                 self.validator_bonds.remove(validator_id);
 
                 // Collect fee
-                self.epoch_fees = self.epoch_fees.saturating_add(tx.fee);
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(tx.fee)
+                    .ok_or(StateError::FeeOverflow)?;
             }
         }
         Ok(())
@@ -828,6 +847,12 @@ impl ChainState {
     }
 
     /// Get the nullifier hash accumulator (for state snapshots).
+    ///
+    /// This is an incremental hash H(H(...H(0 || n0) || n1) ... || nk) over all
+    /// revealed nullifiers. It depends on insertion order, so two nodes that
+    /// process the same nullifiers in different order will produce different
+    /// hashes. This is acceptable because finalization order is deterministic
+    /// within a given DAG linearization.
     pub fn nullifier_hash(&self) -> &Hash {
         &self.nullifier_hash
     }
@@ -990,17 +1015,19 @@ impl ChainState {
             &note_data,
         )?;
 
+        // Check supply cap BEFORE adding commitment to avoid tree mutation on rejection
+        let new_total = self.total_minted.checked_add(amount)?;
+        if new_total > crate::constants::MAX_TOTAL_SUPPLY {
+            return None;
+        }
+
         // Add commitment to the Merkle tree
         if let Err(e) = self.add_commitment(commitment) {
             tracing::error!(error = %e, "Failed to add coinbase commitment to Merkle tree");
             return None;
         }
 
-        // Track total minted with supply cap enforcement
-        self.total_minted = self
-            .total_minted
-            .checked_add(amount)
-            .filter(|&total| total <= crate::constants::MAX_TOTAL_SUPPLY)?;
+        self.total_minted = new_total;
 
         let blake3_binding = crate::crypto::commitment::blake3_512_binding(amount, &blinding);
         Some(TxOutput {
@@ -1039,16 +1066,18 @@ impl ChainState {
             &note_data,
         )?;
 
+        // Check supply cap BEFORE adding commitment to avoid tree mutation on rejection
+        let new_total = self.total_minted.checked_add(amount)?;
+        if new_total > crate::constants::MAX_TOTAL_SUPPLY {
+            return None;
+        }
+
         // Add commitment to the Merkle tree
         if let Err(e) = self.add_commitment(commitment) {
             tracing::error!(error = %e, "Failed to add genesis coinbase commitment to Merkle tree");
             return None;
         }
-        // Track total minted with supply cap enforcement
-        self.total_minted = self
-            .total_minted
-            .checked_add(amount)
-            .filter(|&total| total <= crate::constants::MAX_TOTAL_SUPPLY)?;
+        self.total_minted = new_total;
 
         let blake3_binding = crate::crypto::commitment::blake3_512_binding(amount, &blinding);
         Some(TxOutput {
@@ -1250,10 +1279,15 @@ impl Ledger {
     ///
     /// Used during post-snapshot catch-up sync where the DAG does not have
     /// the vertex's parents (they were part of the snapshot, not replayed).
+    /// Validates vertex structure before applying to prevent malformed vertices
+    /// from corrupting state.
     pub fn apply_vertex_state_only(
         &mut self,
         vertex: &Vertex,
     ) -> Result<Option<TxOutput>, StateError> {
+        vertex
+            .validate_structure(false)
+            .map_err(StateError::InvalidVertex)?;
         self.state.apply_vertex(vertex)
     }
 
@@ -1262,10 +1296,26 @@ impl Ledger {
     /// Rebuilds the chain state from stored data and creates a fresh genesis-only
     /// DAG. Unfinalized vertices are lost on restart (acceptable since they were
     /// not BFT-certified).
+    ///
+    /// Detects interrupted snapshot imports and returns an error if one is found,
+    /// since the stored state may be incomplete.
     pub fn restore_from_storage(
         storage: &dyn Storage,
         meta: &ChainStateMeta,
     ) -> Result<Self, StateError> {
+        // Detect interrupted snapshot import
+        if storage
+            .is_import_in_progress()
+            .map_err(|e| StateError::StorageError(e.to_string()))?
+        {
+            // Clear the flag so next startup can proceed after a fresh sync
+            let _ = storage.set_import_in_progress(false);
+            return Err(StateError::StorageError(
+                "interrupted snapshot import detected; state may be incomplete. \
+                 A fresh sync is required."
+                    .into(),
+            ));
+        }
         let state = ChainState::restore_from_storage(storage, meta)?;
         let genesis = crate::consensus::dag::Dag::genesis_vertex();
         let dag = crate::consensus::dag::Dag::new(genesis);
@@ -2817,10 +2867,11 @@ mod tests {
 
         let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
 
-        // Build a vertex with a transaction
+        // Build a vertex with a transaction, properly signed for validate_structure
         let tx = build_valid_tx_for_state(&mut ledger.state, 500, 42);
         let tx_nullifier = tx.inputs[0].nullifier;
-        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx]);
+        let mut vertex = make_test_vertex(vec![genesis_id], 1, 0, &val_signing.public, vec![tx]);
+        vertex.signature = val_signing.sign(&vertex.id.0);
 
         let dag_len_before = ledger.dag.len();
         let nullifiers_before = ledger.state.nullifier_count();

@@ -214,19 +214,25 @@ impl Air for BalanceAir {
 
         // Constraint 87: Bit reconstruction equals state[4], skipped at chain_flag=1.
         //
-        // The constraint is: first_row × (1-chain_flag) × state[4] × (reconstructed - state[4]) = 0
+        // The constraint includes a state[4] factor:
+        //   first_row × (1-chain_flag) × state[4] × (reconstructed - state[4]) = 0
         //
-        // When state[4] = 0, this is trivially satisfied regardless of the bit columns.
-        // This is safe because:
-        // 1. For real commitment blocks: state[4] is the first word of the Rescue hash
-        //    digest. The Rescue round constraints enforce that the digest is correctly
-        //    computed from (value, blinding). A malicious prover cannot set state[4] = 0
-        //    for a non-zero committed value because the Rescue permutation is a bijection —
-        //    changing the hash output would violate the round constraints.
-        // 2. For padding blocks: state[4] = 0 is asserted directly (see get_assertions()),
-        //    and block_value is also 0, so no range bypass occurs.
-        // 3. The commitment digest is further verified via proof_link chaining and the
-        //    public assertion on the proof_link output, binding the entire computation.
+        // The state[4] factor is required for two reasons:
+        //
+        // 1. Prover correctness: padding blocks have all-zero state (state[4]=0) but
+        //    use non-zero bit columns to prevent polynomial degree collapse in the
+        //    FRI prover. Without the state[4] factor, the constraint would reject
+        //    valid padding blocks where bits != 0 but state[4] = 0.
+        //
+        // 2. Security: the state[4] factor does NOT weaken the range proof because:
+        //    a) For real commitment blocks, state[4] is a Rescue hash digest word.
+        //       The Rescue round constraints enforce correct computation from
+        //       (value, blinding), so a malicious prover cannot set state[4] = 0
+        //       for a non-zero committed value (Rescue is a bijection).
+        //    b) For padding blocks, state[4] = 0 is asserted directly (get_assertions()),
+        //       and block_value is also 0, so no range bypass occurs.
+        //    c) The commitment digest is further verified via proof_link chaining and
+        //       the public assertion on the proof_link output.
         let mut reconstructed = E::ZERO;
         for j in 0..RANGE_BITS {
             let power_of_two = E::from(Felt::new(1u64 << j));

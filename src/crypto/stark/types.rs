@@ -57,7 +57,6 @@ impl BalancePublicInputs {
 /// Debug is intentionally not derived to prevent accidental logging of secret values.
 /// Secret data is zeroed on drop via a manual `Drop` implementation using volatile
 /// writes to prevent compiler elision.
-#[derive(Clone)]
 pub struct BalanceWitness {
     /// Input amounts
     pub input_values: Vec<u64>,
@@ -115,7 +114,6 @@ pub struct SpendPublicInputs {
 /// Debug is intentionally not derived to prevent accidental logging of secret values.
 /// Secret data is zeroed on drop via a manual `Drop` implementation using volatile
 /// writes to prevent compiler elision.
-#[derive(Clone)]
 pub struct SpendWitness {
     /// The spend authorization key (secret)
     pub spend_auth: [Felt; 4],
@@ -246,6 +244,10 @@ impl BalancePublicInputs {
             }
             let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().ok()?);
             *pos += 8;
+            // Reject values >= Goldilocks prime to prevent silent reduction
+            if val >= 18_446_744_069_414_584_321 {
+                return None;
+            }
             Some(Felt::new(val))
         };
         let read_digest = |data: &[u8], pos: &mut usize| -> Option<[Felt; 4]> {
@@ -315,31 +317,35 @@ impl SpendPublicInputs {
             return None;
         }
         let mut pos = 0;
-        let read_felt = |pos: &mut usize| -> Felt {
-            // Safety: length pre-checked >= 96 bytes, we read exactly 12 × 8 = 96
+        let read_felt = |pos: &mut usize| -> Option<Felt> {
             let bytes: [u8; 8] = data[*pos..*pos + 8]
                 .try_into()
                 .expect("pre-checked 96-byte minimum");
             *pos += 8;
-            Felt::new(u64::from_le_bytes(bytes))
+            let val = u64::from_le_bytes(bytes);
+            // Reject values >= Goldilocks prime to prevent silent reduction
+            if val >= 18_446_744_069_414_584_321 {
+                return None;
+            }
+            Some(Felt::new(val))
         };
         let merkle_root = [
-            read_felt(&mut pos),
-            read_felt(&mut pos),
-            read_felt(&mut pos),
-            read_felt(&mut pos),
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
         ];
         let nullifier = [
-            read_felt(&mut pos),
-            read_felt(&mut pos),
-            read_felt(&mut pos),
-            read_felt(&mut pos),
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
         ];
         let proof_link = [
-            read_felt(&mut pos),
-            read_felt(&mut pos),
-            read_felt(&mut pos),
-            read_felt(&mut pos),
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
+            read_felt(&mut pos)?,
         ];
         Some(SpendPublicInputs {
             merkle_root,

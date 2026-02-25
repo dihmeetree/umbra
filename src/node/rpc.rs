@@ -37,6 +37,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tower_http::cors::CorsLayer;
 
 use super::storage::Storage;
 use super::NodeState;
@@ -89,6 +90,7 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/commitment-proof/{index}", get(get_commitment_proof))
         .route("/state-summary", get(get_state_summary))
         .with_state(rpc_state)
+        .layer(CorsLayer::very_permissive())
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB max body
 }
 

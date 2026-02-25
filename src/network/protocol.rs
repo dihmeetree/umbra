@@ -48,7 +48,8 @@ pub enum Message {
     /// Request all tip vertex IDs
     GetTips,
 
-    /// Response with current tip IDs
+    /// Response with current tip IDs.
+    /// The sender caps this at MAX_TIPS_RESPONSE to prevent oversized messages.
     TipsResponse(Vec<VertexId>),
 
     // ── Consensus ──
@@ -537,7 +538,7 @@ mod tests {
         let decoded = decode_message(&bytes).unwrap();
         match decoded {
             Message::AuthResponse { signature } => {
-                assert_eq!(signature.as_bytes(), sig.as_bytes());
+                assert_eq!(signature.dilithium_bytes(), sig.dilithium_bytes());
             }
             _ => panic!("wrong message type"),
         }
