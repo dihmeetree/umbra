@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~35k lines across 45 source files with 989 tests. Single crate, no workspace.
+Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~35k lines across 45 source files with 985 tests. Single crate, no workspace.
 
 ## Build & Test
 
 ```bash
 cargo build --release        # Full build (requires C compiler for PQClean backends)
 cargo check                  # Fast type-check
-cargo test --features fast-tests # Fast suite (~989 tests, ~1.5 min)
+cargo test --features fast-tests # Fast suite (~985 tests, ~1.5 min)
 cargo test                       # Full suite (includes real SPHINCS+, ~3 hrs)
 cargo test <module>::tests       # Run specific module tests (e.g., consensus::bft::tests)
 cargo clippy --all-targets       # Lint — must be warning-free

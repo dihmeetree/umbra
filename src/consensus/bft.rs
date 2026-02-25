@@ -715,28 +715,7 @@ pub fn select_committee(
     validators: &[(SigningKeypair, Validator)],
     committee_size: usize,
 ) -> Vec<(Validator, VrfOutput)> {
-    select_committee_weighted(epoch_seed, validators, committee_size, &HashMap::new())
-}
-
-/// Weighted committee selection: validators with higher bonds have proportionally
-/// higher probability of selection. Falls back to uniform selection when no bonds
-/// are provided.
-pub fn select_committee_weighted(
-    epoch_seed: &EpochSeed,
-    validators: &[(SigningKeypair, Validator)],
-    committee_size: usize,
-    bonds: &HashMap<Hash, u64>,
-) -> Vec<(Validator, VrfOutput)> {
     let total = validators.len();
-    let total_weight: u64 = if bonds.is_empty() {
-        total as u64
-    } else {
-        validators
-            .iter()
-            .filter(|(_, v)| v.active && v.activation_epoch <= epoch_seed.epoch)
-            .map(|(_, v)| bonds.get(&v.id).copied().unwrap_or(1))
-            .sum()
-    };
     let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
 
     let current_epoch = epoch_seed.epoch;
@@ -747,12 +726,7 @@ pub fn select_committee_weighted(
         let input = epoch_seed.vrf_input(&validator.id);
         let vrf_output = VrfOutput::evaluate(keypair, &input);
 
-        let weight = if bonds.is_empty() {
-            1u64
-        } else {
-            bonds.get(&validator.id).copied().unwrap_or(1)
-        };
-        if vrf_output.is_selected_weighted(committee_size, total_weight, weight) {
+        if vrf_output.is_selected(committee_size, total) {
             candidates.push((validator.clone(), vrf_output));
         }
     }
@@ -815,34 +789,7 @@ pub fn select_committee_from_proofs(
     committee_size: usize,
     total_validators: usize,
 ) -> Vec<(Validator, VrfOutput)> {
-    select_committee_from_proofs_weighted(
-        epoch_seed,
-        proofs,
-        committee_size,
-        total_validators,
-        &HashMap::new(),
-    )
-}
-
-/// Weighted production committee selection from verified VRF proofs.
-pub fn select_committee_from_proofs_weighted(
-    epoch_seed: &EpochSeed,
-    proofs: &[(Validator, VrfOutput)],
-    committee_size: usize,
-    total_validators: usize,
-    bonds: &HashMap<Hash, u64>,
-) -> Vec<(Validator, VrfOutput)> {
     let total = total_validators.max(proofs.len());
-    let total_weight: u64 = if bonds.is_empty() {
-        total as u64
-    } else {
-        proofs
-            .iter()
-            .filter(|(v, _)| v.active && v.activation_epoch <= epoch_seed.epoch)
-            .map(|(v, _)| bonds.get(&v.id).copied().unwrap_or(1))
-            .sum::<u64>()
-            .max(total as u64)
-    };
     let mut candidates: Vec<(Validator, VrfOutput)> = Vec::new();
 
     let current_epoch = epoch_seed.epoch;
@@ -850,12 +797,7 @@ pub fn select_committee_from_proofs_weighted(
         if !validator.active || validator.activation_epoch > current_epoch {
             continue;
         }
-        let weight = if bonds.is_empty() {
-            1u64
-        } else {
-            bonds.get(&validator.id).copied().unwrap_or(1)
-        };
-        if vrf_output.is_selected_weighted(committee_size, total_weight, weight) {
+        if vrf_output.is_selected(committee_size, total) {
             candidates.push((validator.clone(), vrf_output.clone()));
         }
     }
@@ -2731,43 +2673,5 @@ mod tests {
         bft2.register_vrf_commitment(validators[0].id, [20u8; 32]);
         let mix4 = bft2.vrf_mix_hash();
         assert_ne!(mix3, mix4);
-    }
-
-    #[test]
-    fn weighted_committee_selection_favors_higher_bonds() {
-        // Create 20 validators: half with high bond, half with low bond
-        let mut validators = Vec::new();
-        let mut bonds = HashMap::new();
-        for i in 0..20 {
-            let kp = SigningKeypair::generate();
-            let v = Validator::new(kp.public.clone());
-            let bond = if i < 10 { 100u64 } else { 10u64 };
-            bonds.insert(v.id, bond);
-            validators.push((kp, v));
-        }
-
-        // Run selection many times with different seeds
-        let mut high_selections = 0usize;
-        let mut low_selections = 0usize;
-        let genesis = crate::crypto::vrf::EpochSeed::genesis();
-
-        for trial in 0..50u32 {
-            let seed_hash = crate::hash_domain(b"test.trial", &trial.to_le_bytes());
-            let seed = genesis.next(&seed_hash, &[0u8; 32]);
-            let committee = select_committee_weighted(&seed, &validators, 10, &bonds);
-            for (v, _) in &committee {
-                if bonds.get(&v.id).copied().unwrap_or(0) == 100 {
-                    high_selections += 1;
-                } else {
-                    low_selections += 1;
-                }
-            }
-        }
-        assert!(
-            high_selections > low_selections,
-            "high-bond validators ({}) should be selected more than low-bond ({})",
-            high_selections,
-            low_selections
-        );
     }
 }
