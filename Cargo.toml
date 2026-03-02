@@ -96,6 +96,10 @@ http-body-util = "0.1"
 name = "simulator"
 path = "src/bin/simulator.rs"
 
+[[bin]]
+name = "faucet"
+path = "src/bin/faucet.rs"
+
 # Compile STARK/math-heavy dependencies with optimizations even in debug/test mode.
 # This gives ~10-20x speedup for proof generation without affecting test correctness.
 [profile.dev.package.winter-prover]

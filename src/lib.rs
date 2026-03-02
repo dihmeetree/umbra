@@ -161,7 +161,7 @@ pub mod constants {
     pub const PRUNING_RETAIN_EPOCHS: u64 = 100;
 
     /// Current protocol version for upgrade signaling (F16).
-    pub const PROTOCOL_VERSION_ID: u32 = 1;
+    pub const PROTOCOL_VERSION_ID: u32 = 2;
     /// Threshold fraction (numerator) for protocol upgrade activation (F16).
     /// Activation requires > UPGRADE_THRESHOLD_NUM / UPGRADE_THRESHOLD_DEN signals.
     pub const UPGRADE_THRESHOLD_NUM: u64 = 75;
@@ -302,12 +302,116 @@ pub mod constants {
     /// `message_bytes` is the total ciphertext byte length across all messages.
     pub fn compute_weight_fee(num_inputs: usize, message_bytes: usize) -> u64 {
         let message_kb = message_bytes.div_ceil(1024) as u64;
-        FEE_BASE + (num_inputs as u64) * FEE_PER_INPUT + message_kb * FEE_PER_MESSAGE_KB
+        FEE_BASE
+            .saturating_add((num_inputs as u64).saturating_mul(FEE_PER_INPUT))
+            .saturating_add(message_kb.saturating_mul(FEE_PER_MESSAGE_KB))
     }
 
-    /// Compute the chain ID for mainnet.
+    /// Compute the chain ID for mainnet (backward-compatible wrapper).
     pub fn chain_id() -> crate::Hash {
-        crate::hash_domain(b"umbra.chain_id", b"umbra-mainnet-v1")
+        chain_id_for_network(NetworkId::Mainnet)
+    }
+
+    /// Compute the chain ID for the given network.
+    pub fn chain_id_for_network(network: NetworkId) -> crate::Hash {
+        crate::hash_domain(b"umbra.chain_id", network.chain_id_domain())
+    }
+
+    /// Genesis domain string for the given network (used in genesis vertex ID).
+    pub fn genesis_domain(network: NetworkId) -> &'static [u8] {
+        match network {
+            NetworkId::Mainnet => b"umbra-mainnet",
+            NetworkId::Testnet => b"umbra-testnet",
+        }
+    }
+
+    /// Epoch length for the given network.
+    pub fn epoch_length_for_network(network: NetworkId) -> u64 {
+        match network {
+            NetworkId::Mainnet => EPOCH_LENGTH,
+            NetworkId::Testnet => 100,
+        }
+    }
+
+    /// Genesis mint amount for the given network.
+    pub fn genesis_mint_for_network(network: NetworkId) -> u64 {
+        match network {
+            NetworkId::Mainnet => GENESIS_MINT,
+            NetworkId::Testnet => 1_000_000_000,
+        }
+    }
+
+    /// Base validator bond for the given network.
+    pub fn validator_base_bond_for_network(network: NetworkId) -> u64 {
+        match network {
+            NetworkId::Mainnet => VALIDATOR_BASE_BOND,
+            NetworkId::Testnet => 100_000,
+        }
+    }
+
+    /// Network identifier for chain separation.
+    ///
+    /// Testnet and mainnet use different chain IDs, genesis vertices, default
+    /// ports, and tuned constants. This prevents cross-network replay attacks
+    /// and accidental peer connections between networks.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    pub enum NetworkId {
+        Mainnet,
+        Testnet,
+    }
+
+    impl NetworkId {
+        /// Human-readable name for logging and display.
+        pub fn name(&self) -> &'static str {
+            match self {
+                NetworkId::Mainnet => "mainnet",
+                NetworkId::Testnet => "testnet",
+            }
+        }
+
+        /// Domain string used for chain ID derivation.
+        pub fn chain_id_domain(&self) -> &'static [u8] {
+            match self {
+                NetworkId::Mainnet => b"umbra-mainnet-v1",
+                NetworkId::Testnet => b"umbra-testnet-v1",
+            }
+        }
+
+        /// Default P2P port for this network.
+        pub fn default_p2p_port(&self) -> u16 {
+            match self {
+                NetworkId::Mainnet => DEFAULT_P2P_PORT,
+                NetworkId::Testnet => DEFAULT_P2P_PORT + 10,
+            }
+        }
+
+        /// Default RPC port for this network.
+        pub fn default_rpc_port(&self) -> u16 {
+            match self {
+                NetworkId::Mainnet => DEFAULT_RPC_PORT,
+                NetworkId::Testnet => DEFAULT_RPC_PORT + 10,
+            }
+        }
+    }
+
+    impl std::fmt::Display for NetworkId {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.name())
+        }
+    }
+
+    impl std::str::FromStr for NetworkId {
+        type Err = String;
+
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            match s.to_lowercase().as_str() {
+                "mainnet" => Ok(NetworkId::Mainnet),
+                "testnet" => Ok(NetworkId::Testnet),
+                other => Err(format!(
+                    "unknown network: {other} (expected mainnet or testnet)"
+                )),
+            }
+        }
     }
 }
 
@@ -924,5 +1028,89 @@ mod tests {
         assert!(max_peers > 0);
         assert!(max_msg > 0);
         assert!(protocol_ver > 0);
+    }
+
+    // ── Network identity tests ──
+
+    #[test]
+    fn network_id_display() {
+        assert_eq!(constants::NetworkId::Mainnet.to_string(), "mainnet");
+        assert_eq!(constants::NetworkId::Testnet.to_string(), "testnet");
+    }
+
+    #[test]
+    fn network_id_from_str() {
+        assert_eq!(
+            "mainnet".parse::<constants::NetworkId>().unwrap(),
+            constants::NetworkId::Mainnet
+        );
+        assert_eq!(
+            "testnet".parse::<constants::NetworkId>().unwrap(),
+            constants::NetworkId::Testnet
+        );
+        assert_eq!(
+            "Testnet".parse::<constants::NetworkId>().unwrap(),
+            constants::NetworkId::Testnet
+        );
+        assert!("devnet".parse::<constants::NetworkId>().is_err());
+    }
+
+    #[test]
+    fn network_id_default_ports() {
+        let mainnet = constants::NetworkId::Mainnet;
+        let testnet = constants::NetworkId::Testnet;
+        assert_eq!(mainnet.default_p2p_port(), constants::DEFAULT_P2P_PORT);
+        assert_eq!(mainnet.default_rpc_port(), constants::DEFAULT_RPC_PORT);
+        assert_ne!(testnet.default_p2p_port(), mainnet.default_p2p_port());
+        assert_ne!(testnet.default_rpc_port(), mainnet.default_rpc_port());
+    }
+
+    #[test]
+    fn chain_id_differs_per_network() {
+        let mainnet_id = constants::chain_id_for_network(constants::NetworkId::Mainnet);
+        let testnet_id = constants::chain_id_for_network(constants::NetworkId::Testnet);
+        assert_ne!(mainnet_id, testnet_id);
+        assert_ne!(mainnet_id, [0u8; 32]);
+        assert_ne!(testnet_id, [0u8; 32]);
+    }
+
+    #[test]
+    fn chain_id_backward_compatible() {
+        assert_eq!(
+            constants::chain_id(),
+            constants::chain_id_for_network(constants::NetworkId::Mainnet)
+        );
+    }
+
+    #[test]
+    fn genesis_domain_differs_per_network() {
+        let m = constants::genesis_domain(constants::NetworkId::Mainnet);
+        let t = constants::genesis_domain(constants::NetworkId::Testnet);
+        assert_ne!(m, t);
+    }
+
+    #[test]
+    fn testnet_tuned_constants() {
+        use constants::NetworkId::*;
+        assert!(
+            constants::epoch_length_for_network(Testnet)
+                < constants::epoch_length_for_network(Mainnet)
+        );
+        assert!(
+            constants::genesis_mint_for_network(Testnet)
+                > constants::genesis_mint_for_network(Mainnet)
+        );
+        assert!(
+            constants::validator_base_bond_for_network(Testnet)
+                < constants::validator_base_bond_for_network(Mainnet)
+        );
+    }
+
+    #[test]
+    fn network_id_serde_roundtrip() {
+        let id = constants::NetworkId::Testnet;
+        let bytes = serialize(&id).unwrap();
+        let restored: constants::NetworkId = deserialize(&bytes).unwrap();
+        assert_eq!(restored, id);
     }
 }

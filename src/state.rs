@@ -174,10 +174,15 @@ pub struct Ledger {
 }
 
 impl ChainState {
-    /// Create a new chain state with genesis conditions.
+    /// Create a new chain state with genesis conditions for mainnet.
     pub fn new() -> Self {
+        Self::new_for_network(crate::constants::NetworkId::Mainnet)
+    }
+
+    /// Create a new chain state with genesis conditions for the given network.
+    pub fn new_for_network(network: crate::constants::NetworkId) -> Self {
         ChainState {
-            chain_id: crate::constants::chain_id(),
+            chain_id: crate::constants::chain_id_for_network(network),
             commitments: Vec::new(),
             commitment_tree: IncrementalMerkleTree::new(),
             nullifiers: NullifierSet::new(),
@@ -228,6 +233,18 @@ impl ChainState {
                 for input in &tx.inputs {
                     if !seen_nullifiers.insert(input.nullifier) {
                         return Err(StateError::DoubleSpend(input.nullifier));
+                    }
+                }
+            }
+        }
+
+        // Cross-transaction duplicate output commitment check
+        {
+            let mut seen_commitments = HashSet::new();
+            for tx in &vertex.transactions {
+                for output in &tx.outputs {
+                    if !seen_commitments.insert(output.commitment) {
+                        return Err(StateError::DuplicateCommitment);
                     }
                 }
             }
@@ -635,6 +652,15 @@ impl ChainState {
         // Persist to sled FIRST — if it fails, in-memory state is unchanged,
         // so on restart the nullifier won't be in memory either (consistent).
         if let Some(ref tree) = self.nullifier_storage {
+            // Check sled storage to prevent double-accumulation after migration.
+            // After restore_from_storage, nullifiers exist in sled but not in
+            // the in-memory set. Without this check, re-processing a nullifier
+            // that is already in sled would skip the sled insert (idempotent)
+            // but still append to the hash accumulator, producing a wrong hash.
+            if tree.contains_key(nullifier.0).unwrap_or(false) {
+                self.nullifiers.insert(nullifier);
+                return Ok(());
+            }
             if let Err(e) = tree.insert(nullifier.0, &[1u8]) {
                 return Err(StateError::StoragePersistenceFailed(format!(
                     "failed to persist nullifier to sled: {}",
@@ -942,6 +968,7 @@ impl ChainState {
             epoch_seed: self.epoch_seed.seed,
             finalized_count,
             total_minted: self.total_minted,
+            last_slash_epoch: self.last_slash_epoch,
         }
     }
 
@@ -1054,8 +1081,23 @@ impl ChainState {
         )?;
 
         // Check supply cap BEFORE adding commitment to avoid tree mutation on rejection
-        let new_total = self.total_minted.checked_add(amount)?;
+        let new_total = match self.total_minted.checked_add(amount) {
+            Some(t) => t,
+            None => {
+                tracing::warn!(
+                    total_minted = self.total_minted,
+                    amount,
+                    "coinbase rejected: total_minted + amount overflows u64"
+                );
+                return None;
+            }
+        };
         if new_total > crate::constants::MAX_TOTAL_SUPPLY {
+            tracing::warn!(
+                new_total,
+                max = crate::constants::MAX_TOTAL_SUPPLY,
+                "coinbase rejected: minting would exceed MAX_TOTAL_SUPPLY"
+            );
             return None;
         }
 
@@ -1134,6 +1176,7 @@ impl ChainState {
     pub fn restore_from_storage(
         storage: &dyn Storage,
         meta: &ChainStateMeta,
+        network: crate::constants::NetworkId,
     ) -> Result<Self, StateError> {
         // 1. Rebuild the commitment Merkle tree from stored level data
         let num_leaves = meta.commitment_count as usize;
@@ -1202,7 +1245,7 @@ impl ChainState {
         };
 
         Ok(ChainState {
-            chain_id: crate::constants::chain_id(),
+            chain_id: crate::constants::chain_id_for_network(network),
             commitments,
             commitment_tree,
             nullifiers,
@@ -1218,7 +1261,7 @@ impl ChainState {
             last_finalized: meta.last_finalized,
             total_minted: meta.total_minted,
             commitment_index,
-            last_slash_epoch: None,
+            last_slash_epoch: meta.last_slash_epoch,
         })
     }
 }
@@ -1230,13 +1273,18 @@ impl Default for ChainState {
 }
 
 impl Ledger {
-    /// Create a new ledger with genesis.
+    /// Create a new ledger with mainnet genesis (backward-compatible).
     pub fn new() -> Self {
-        let genesis = crate::consensus::dag::Dag::genesis_vertex();
+        Self::new_for_network(crate::constants::NetworkId::Mainnet)
+    }
+
+    /// Create a new ledger with genesis for the given network.
+    pub fn new_for_network(network: crate::constants::NetworkId) -> Self {
+        let genesis = crate::consensus::dag::Dag::genesis_vertex_for_network(network);
         let dag = crate::consensus::dag::Dag::new(genesis);
         Ledger {
             dag,
-            state: ChainState::new(),
+            state: ChainState::new_for_network(network),
         }
     }
 
@@ -1268,6 +1316,12 @@ impl Ledger {
         }
         if certificate.vertex_id != *vertex_id {
             return Err(StateError::InvalidCertificate);
+        }
+        // Cross-check certificate epoch matches vertex epoch
+        if let Some(v) = self.dag.get(vertex_id) {
+            if certificate.epoch != v.epoch {
+                return Err(StateError::InvalidCertificate);
+            }
         }
         self.dag.finalize(vertex_id);
         if let Some(v) = self.dag.get(vertex_id) {
@@ -1341,6 +1395,7 @@ impl Ledger {
     pub fn restore_from_storage(
         storage: &dyn Storage,
         meta: &ChainStateMeta,
+        network: crate::constants::NetworkId,
     ) -> Result<Self, StateError> {
         // Detect interrupted snapshot import
         if storage
@@ -1355,8 +1410,19 @@ impl Ledger {
                     .into(),
             ));
         }
-        let state = ChainState::restore_from_storage(storage, meta)?;
-        let genesis = crate::consensus::dag::Dag::genesis_vertex();
+        // Detect interrupted finalization batch (cross-tree non-atomic writes)
+        if storage
+            .is_finalization_interrupted()
+            .map_err(|e| StateError::StorageError(e.to_string()))?
+        {
+            return Err(StateError::StorageError(
+                "interrupted finalization batch detected; cross-tree state may be \
+                 inconsistent. A fresh sync is required."
+                    .into(),
+            ));
+        }
+        let state = ChainState::restore_from_storage(storage, meta, network)?;
+        let genesis = crate::consensus::dag::Dag::genesis_vertex_for_network(network);
         let dag = crate::consensus::dag::Dag::new(genesis);
         Ok(Ledger { dag, state })
     }
@@ -1411,6 +1477,8 @@ pub enum StateError {
     EpochMismatch { expected: u64, got: u64 },
     #[error("invalid or missing BFT certificate")]
     InvalidCertificate,
+    #[error("duplicate output commitment within vertex")]
+    DuplicateCommitment,
 }
 
 #[cfg(test)]
@@ -1687,7 +1755,9 @@ mod tests {
         storage.put_chain_state_meta(&meta).unwrap();
 
         // Restore
-        let restored = ChainState::restore_from_storage(&storage, &meta).unwrap();
+        let restored =
+            ChainState::restore_from_storage(&storage, &meta, crate::constants::NetworkId::Mainnet)
+                .unwrap();
 
         // Verify everything matches
         assert_eq!(restored.commitment_root(), original_commitment_root);
@@ -1844,7 +1914,9 @@ mod tests {
         storage.put_chain_state_meta(&meta).unwrap();
 
         // Restore as ledger
-        let ledger = Ledger::restore_from_storage(&storage, &meta).unwrap();
+        let ledger =
+            Ledger::restore_from_storage(&storage, &meta, crate::constants::NetworkId::Mainnet)
+                .unwrap();
         assert_eq!(ledger.state.commitment_root(), state.commitment_root());
         assert_eq!(ledger.state.commitment_count(), 1);
         // DAG should have genesis only
@@ -2657,7 +2729,12 @@ mod tests {
         assert_eq!(meta.commitment_root, original_commitment_root);
 
         // Restore from imported storage and verify
-        let restored = ChainState::restore_from_storage(&storage2, &meta).unwrap();
+        let restored = ChainState::restore_from_storage(
+            &storage2,
+            &meta,
+            crate::constants::NetworkId::Mainnet,
+        )
+        .unwrap();
         assert_eq!(restored.commitment_root(), original_commitment_root);
         assert_eq!(restored.state_root(), original_root);
         assert_eq!(restored.nullifier_count(), 2);

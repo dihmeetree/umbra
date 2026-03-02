@@ -1,0 +1,94 @@
+{
+  "dashboard": {
+    "title": "Umbra Testnet",
+    "uid": "umbra-testnet",
+    "timezone": "utc",
+    "refresh": "10s",
+    "panels": [
+      {
+        "title": "Finalized Vertices",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "umbra_finalized_vertices",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Peer Count",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "targets": [
+          {
+            "expr": "umbra_peer_count",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Current Epoch",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+        "targets": [
+          {
+            "expr": "umbra_epoch",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Validator Count",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
+        "targets": [
+          {
+            "expr": "umbra_validator_count",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Mempool Depth",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+        "targets": [
+          {
+            "expr": "umbra_mempool_txs",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Total Minted",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+        "targets": [
+          {
+            "expr": "umbra_total_minted",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Commitments",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+        "targets": [
+          {
+            "expr": "umbra_commitment_count",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      }
+    ],
+    "templating": {
+      "list": []
+    },
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    }
+  }
+}

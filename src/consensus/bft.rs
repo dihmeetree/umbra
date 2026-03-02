@@ -235,6 +235,7 @@ pub struct BftState {
     /// Recent committee history for cross-epoch equivocation verification.
     /// Capped at MAX_EQUIVOCATION_EVIDENCE_EPOCHS entries.
     historical_committees: VecDeque<(u64, Vec<Validator>)>,
+    pub next_round_votes: Vec<Vote>,
 }
 
 impl BftState {
@@ -256,6 +257,7 @@ impl BftState {
             total_validators: 0,
             vrf_commitments: HashMap::new(),
             historical_committees: VecDeque::new(),
+            next_round_votes: Vec::new(),
         }
     }
 
@@ -380,7 +382,11 @@ impl BftState {
             return None;
         }
 
-        // Reject votes from wrong round (prevents future-round vote injection)
+        if vote.round == self.round + 1 {
+            self.next_round_votes.push(vote);
+            return None;
+        }
+
         if vote.round != self.round {
             return None;
         }
@@ -561,6 +567,11 @@ impl BftState {
         self.votes.clear();
         self.round_votes.clear();
         self.round += 1;
+
+        let buffered = std::mem::take(&mut self.next_round_votes);
+        for vote in buffered {
+            self.receive_vote(vote);
+        }
     }
 
     /// Advance round for view-change: clears votes but preserves equivocations.
@@ -572,6 +583,11 @@ impl BftState {
         self.votes.clear();
         self.round_votes.clear();
         self.round += 1;
+
+        let buffered = std::mem::take(&mut self.next_round_votes);
+        for vote in buffered {
+            self.receive_vote(vote);
+        }
     }
 
     /// Clear processed equivocation evidence (call after slashing).
@@ -632,6 +648,10 @@ impl BftState {
 
     /// Advance to a new epoch, clearing all per-epoch state.
     pub fn advance_epoch(&mut self, epoch: u64, committee: Vec<Validator>) {
+        debug_assert!(
+            self.equivocations.is_empty(),
+            "equivocations should be processed before epoch advance"
+        );
         // Preserve current committee in history for cross-epoch equivocation checks
         if !self.committee.is_empty() {
             self.historical_committees
@@ -653,6 +673,7 @@ impl BftState {
         self.epoch_seed = None;
         self.total_validators = 0;
         self.vrf_commitments.clear();
+        self.next_round_votes.clear();
     }
 
     /// Clear per-epoch caches without resetting round (preserves monotonicity).
@@ -665,6 +686,7 @@ impl BftState {
         self.round_votes.clear();
         self.equivocations.clear();
         self.vrf_commitments.clear();
+        self.next_round_votes.clear();
     }
 
     /// Get a certificate for a vertex.
@@ -866,7 +888,9 @@ pub fn create_vote(
 
 /// Compute the dynamic BFT quorum for a given committee size: 2/3 + 1.
 pub fn dynamic_quorum(committee_size: usize) -> usize {
-    // Returns 1 for committee_size == 0 (vacuous quorum); callers ensure committee is non-empty.
+    if committee_size == 0 {
+        return usize::MAX; // Unreachable quorum for empty committee
+    }
     (committee_size * 2) / 3 + 1
 }
 
@@ -2598,7 +2622,7 @@ mod tests {
 
     #[test]
     fn dynamic_quorum_edge_cases() {
-        assert_eq!(dynamic_quorum(0), 1); // 0 * 2 / 3 + 1 = 1
+        assert_eq!(dynamic_quorum(0), usize::MAX); // unreachable quorum for empty committee
         assert_eq!(dynamic_quorum(1), 1); // 1 * 2 / 3 + 1 = 1
         assert_eq!(dynamic_quorum(3), 3); // 3 * 2 / 3 + 1 = 3
         assert_eq!(dynamic_quorum(4), 3); // 4 * 2 / 3 + 1 = 3

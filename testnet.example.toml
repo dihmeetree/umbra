@@ -1,0 +1,24 @@
+# Example testnet configuration for Umbra.
+#
+# Copy this file to your data directory as `umbra.toml`:
+#   cp testnet.example.toml ./umbra-testnet-data/umbra.toml
+#
+# CLI flags override these values.
+
+[node]
+network = "testnet"
+p2p_host = "0.0.0.0"
+p2p_port = 9742
+rpc_host = "127.0.0.1"
+rpc_port = 9743
+
+# Bootstrap peers are built-in for testnet. Override here if needed:
+# bootstrap_peers = ["testnet-1.umbra.network:9742"]
+
+# Set to true only when bootstrapping a new testnet:
+# genesis_validator = true
+
+[node.nat]
+# Uncomment if behind NAT:
+# external_addr = "203.0.113.5:9742"
+upnp = true

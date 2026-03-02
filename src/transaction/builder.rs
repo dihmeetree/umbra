@@ -123,6 +123,12 @@ impl TransactionBuilder {
         self
     }
 
+    /// Set the network (sets chain_id accordingly).
+    pub fn with_network(mut self, network: crate::constants::NetworkId) -> Self {
+        self.chain_id = crate::constants::chain_id_for_network(network);
+        self
+    }
+
     /// Set the expiry epoch (0 = no expiry).
     pub fn set_expiry_epoch(mut self, expiry_epoch: u64) -> Self {
         self.expiry_epoch = expiry_epoch;

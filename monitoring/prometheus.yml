@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "umbra-testnet"
+    static_configs:
+      - targets:
+          - "validator-1:9743"
+          - "validator-2:9743"
+          - "validator-3:9743"
+    metrics_path: /metrics

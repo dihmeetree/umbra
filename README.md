@@ -122,6 +122,7 @@ umbra/
       bip39_words.rs        BIP39 English wordlist (2048 words) for wallet recovery
     bin/
       simulator.rs          Network simulator: multi-node BFT consensus, traffic, attack scenarios
+      faucet.rs             Testnet faucet: rate-limited coin distribution via HTTP
   tests/
     e2e.rs                  End-to-end integration tests (25 tests across 3 groups)
     consensus_properties.rs Consensus property tests: BFT safety, liveness, consistency (12 tests)
@@ -148,7 +149,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **985 tests**.
+**~35,000 lines of Rust** across 45 source files with **1002 tests**.
 
 ## Building
 
@@ -524,13 +525,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (~985 tests)
+cargo test                       # Full suite (~1002 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 985 tests cover:
+All 1002 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -559,6 +560,8 @@ All 985 tests cover:
 - **Node** — persistent signing + KEM keypair load/save roundtrip, creates data directory, rejects too-short/truncated key files, legacy key file upgrade adds KEM, file permissions restricted (unix), NodeConfig struct fields, NodeError display
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage, snapshot export/import roundtrip with state root verification; genesis coinbase creation and deterministic blinding
 - **Wallet web** — WalletWebState construction and cache behavior, wallet_exists (present/absent), RPC client without TLS, invalidate_cache clears loaded wallet, load_wallet returns None when no file, load_wallet caches on first load, save_wallet updates cache, error_page sets message; CSRF token validation (constant-time comparison, init rejects invalid CSRF, scan rejects invalid CSRF); HTTP handler tests via axum oneshot: dashboard redirects to init, init page 200/redirect, init action creates wallet+address files, security headers (X-Frame-Options, X-Content-Type-Options, Cache-Control, CSP), send/messages/history/address pages redirect without wallet, 404 for nonexistent routes
+- **Network identity** — NetworkId display/FromStr, default port mapping per network, chain_id differs per network, chain_id backward compatibility, genesis domain separation, testnet-tuned constants (epoch length, genesis mint, validator bond), serde roundtrip; genesis vertex differs per network, genesis vertex backward compatibility; config TOML parsing with network field, default bootstrap peers per network
+- **Faucet** — rate limiter blocks repeated requests, hex address validation, status starts at zero
 
 ## Network Simulator
 
@@ -585,6 +588,42 @@ The simulator runs 6 phases with 41 automated checks:
 6. **Monitoring** — checks node health, epoch state, commitment tree, validator set, mempool, and validator health across all nodes
 
 All transactions use full-security `default_proof_options()` (not lightweight test proofs). The simulator prints a colored pass/fail summary and exits with code 0 on success.
+
+## Testnet
+
+Umbra supports a separate testnet with its own chain ID, preventing transaction replay between networks. Testnet uses faster parameters for rapid iteration (100-vertex epochs, 1B genesis mint, 100K validator bond).
+
+### Quick Start with Docker
+
+```bash
+# Start 3 validators + faucet
+docker compose -f docker-compose.testnet.yml up -d
+
+# Optional: add Prometheus + Grafana monitoring
+docker compose -f docker-compose.testnet.yml --profile monitoring up -d
+```
+
+### Quick Start without Docker
+
+```bash
+# Start a testnet genesis validator
+cargo run --release -- --network testnet node --genesis-validator
+
+# In another terminal, start a second node
+cargo run --release -- --network testnet node --peers 127.0.0.1:9742
+```
+
+### Faucet
+
+The testnet faucet distributes test coins (rate-limited to 1 request/IP/hour):
+
+```bash
+curl -X POST http://localhost:9744/faucet \
+  -H "Content-Type: application/json" \
+  -d '{"address": "<hex-encoded-address>"}'
+```
+
+See [docs/testnet.md](docs/testnet.md) for the full testnet guide including validator setup, wallet usage, monitoring, and troubleshooting.
 
 ## Demo
 
@@ -844,6 +883,7 @@ All transaction validity is verified via zk-STARKs:
 - **Per-peer rate limiting** — token-bucket rate limiter per connection (100 msgs/sec refill, 200 burst); peers exceeding limits are warned and disconnected after 5 strikes, preventing message-flooding DoS
 - **Sync timeout and peer cooldown** — sync requests that receive no response within `SYNC_REQUEST_TIMEOUT_MS` trigger a fallback to another peer; failed peers are placed on a 60-second cooldown to prevent retry storms
 - **Fork resolution / view change** — if no vertex is finalized for a configurable timeout or peers report rounds significantly ahead, the node proactively requests tips and missing vertices to rejoin consensus
+- **P2P network isolation** — the Hello handshake includes `chain_id`, validated with constant-time comparison; peers on different networks (testnet vs mainnet) are rejected immediately, preventing cross-network state pollution
 - **Epoch committee activation delay** — newly registered validators only become eligible for committee selection in the epoch after registration, preventing mid-epoch committee manipulation
 - **Mempool expiry eviction** — transactions past their `expiry_epoch` are periodically removed from the mempool, preventing stale transaction accumulation
 - **Liveness guarantee** — empty vertices (no transactions) are proposed when the mempool is empty, ensuring epochs advance and coinbase emission continues

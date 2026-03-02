@@ -20,6 +20,7 @@ pub struct UmbraConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct NodeConfig {
+    pub network: String,
     pub p2p_host: String,
     pub p2p_port: u16,
     pub rpc_host: String,
@@ -87,6 +88,7 @@ impl Default for NatConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         NodeConfig {
+            network: "mainnet".into(),
             p2p_host: "0.0.0.0".into(),
             p2p_port: crate::constants::DEFAULT_P2P_PORT,
             rpc_host: "127.0.0.1".into(),
@@ -98,6 +100,18 @@ impl Default for NodeConfig {
             tls: None,
             nat: NatConfig::default(),
         }
+    }
+}
+
+/// Return default bootstrap peers for the given network.
+pub fn default_bootstrap_peers(network: crate::constants::NetworkId) -> Vec<String> {
+    match network {
+        crate::constants::NetworkId::Mainnet => vec![],
+        crate::constants::NetworkId::Testnet => vec![
+            "testnet-1.umbra.network:9742".into(),
+            "testnet-2.umbra.network:9742".into(),
+            "testnet-3.umbra.network:9742".into(),
+        ],
     }
 }
 
@@ -433,5 +447,35 @@ web_port = 8080
         assert_eq!(config.max_peers, crate::constants::MAX_PEERS);
         assert!(config.tls.is_none());
         assert!(config.bootstrap_peers.is_empty());
+    }
+
+    #[test]
+    fn parse_toml_with_network() {
+        let toml_str = r#"
+[node]
+network = "testnet"
+p2p_port = 9742
+"#;
+        let config: UmbraConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.node.network, "testnet");
+        assert_eq!(config.node.p2p_port, 9742);
+    }
+
+    #[test]
+    fn default_config_network_is_mainnet() {
+        let config = NodeConfig::default();
+        assert_eq!(config.network, "mainnet");
+    }
+
+    #[test]
+    fn default_bootstrap_peers_testnet() {
+        let peers = super::default_bootstrap_peers(crate::constants::NetworkId::Testnet);
+        assert!(!peers.is_empty());
+    }
+
+    #[test]
+    fn default_bootstrap_peers_mainnet_empty() {
+        let peers = super::default_bootstrap_peers(crate::constants::NetworkId::Mainnet);
+        assert!(peers.is_empty());
     }
 }

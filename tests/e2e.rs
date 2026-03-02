@@ -362,7 +362,9 @@ fn test_snapshot_export_import() {
     assert_eq!(meta.nullifier_count, 2);
 
     // Restore state and verify
-    let restored = ChainState::restore_from_storage(&storage2, &meta).unwrap();
+    let restored =
+        ChainState::restore_from_storage(&storage2, &meta, umbra::constants::NetworkId::Mainnet)
+            .unwrap();
     assert_eq!(restored.commitment_root(), original_commitment_root);
     assert_eq!(restored.state_root(), original_root);
     assert_eq!(restored.nullifier_count(), 2);

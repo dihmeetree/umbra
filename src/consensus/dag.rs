@@ -233,9 +233,17 @@ impl Dag {
         }
     }
 
-    /// Create a genesis vertex.
+    /// Create a genesis vertex for mainnet (backward-compatible wrapper).
     pub fn genesis_vertex() -> Vertex {
-        let genesis_id = VertexId(crate::hash_domain(b"umbra.genesis", b"umbra-mainnet"));
+        Self::genesis_vertex_for_network(crate::constants::NetworkId::Mainnet)
+    }
+
+    /// Create a genesis vertex for the given network.
+    pub fn genesis_vertex_for_network(network: crate::constants::NetworkId) -> Vertex {
+        let genesis_id = VertexId(crate::hash_domain(
+            b"umbra.genesis",
+            crate::constants::genesis_domain(network),
+        ));
         Vertex {
             id: genesis_id,
             parents: vec![],
@@ -303,6 +311,20 @@ impl Dag {
                 if vertex.round <= parent.round {
                     return Err(VertexError::RoundNotMonotonic);
                 }
+            }
+        }
+
+        // Ensure timestamp does not regress below parents
+        if vertex.round != 0 {
+            let max_parent_ts = vertex
+                .parents
+                .iter()
+                .filter_map(|p| self.vertices.get(p))
+                .map(|v| v.timestamp)
+                .max()
+                .unwrap_or(0);
+            if vertex.timestamp < max_parent_ts {
+                return Err(VertexError::TimestampBeforeParent);
             }
         }
 
@@ -563,6 +585,8 @@ pub enum VertexError {
     DuplicateTransaction,
     #[error("proposer exceeded per-epoch vertex rate limit")]
     ProposerRateLimited,
+    #[error("vertex timestamp is before a parent timestamp")]
+    TimestampBeforeParent,
 }
 
 #[cfg(test)]
@@ -2123,5 +2147,20 @@ mod tests {
     fn vertex_tx_ids_empty() {
         let genesis = Dag::genesis_vertex();
         assert!(genesis.tx_ids().is_empty());
+    }
+
+    #[test]
+    fn genesis_vertex_differs_per_network() {
+        use crate::constants::NetworkId;
+        let mainnet = Dag::genesis_vertex_for_network(NetworkId::Mainnet);
+        let testnet = Dag::genesis_vertex_for_network(NetworkId::Testnet);
+        assert_ne!(mainnet.id, testnet.id);
+    }
+
+    #[test]
+    fn genesis_vertex_for_network_backward_compatible() {
+        let direct = Dag::genesis_vertex();
+        let via_network = Dag::genesis_vertex_for_network(crate::constants::NetworkId::Mainnet);
+        assert_eq!(direct.id, via_network.id);
     }
 }

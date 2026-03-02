@@ -568,6 +568,11 @@ async fn get_metrics(
     let mempool_txs = node.mempool.len();
     let mempool_bytes = node.mempool.total_bytes();
     let epoch = node.ledger.state.epoch();
+    let validator_count = node.ledger.state.total_validators();
+    let commitment_count = node.ledger.state.commitment_count();
+    let nullifier_count = node.ledger.state.nullifier_count();
+    let total_minted = node.ledger.state.total_minted();
+    let network_name = node.network.name();
 
     let body = format!(
         "# HELP umbra_uptime_seconds Node uptime in seconds\n\
@@ -587,7 +592,22 @@ async fn get_metrics(
          umbra_mempool_txs {mempool_txs}\n\
          # HELP umbra_mempool_bytes Current mempool size in bytes\n\
          # TYPE umbra_mempool_bytes gauge\n\
-         umbra_mempool_bytes {mempool_bytes}\n"
+         umbra_mempool_bytes {mempool_bytes}\n\
+         # HELP umbra_validator_count Number of registered validators\n\
+         # TYPE umbra_validator_count gauge\n\
+         umbra_validator_count {validator_count}\n\
+         # HELP umbra_commitment_count Total commitments in state\n\
+         # TYPE umbra_commitment_count counter\n\
+         umbra_commitment_count {commitment_count}\n\
+         # HELP umbra_nullifier_count Total spent nullifiers\n\
+         # TYPE umbra_nullifier_count counter\n\
+         umbra_nullifier_count {nullifier_count}\n\
+         # HELP umbra_total_minted Total coins minted\n\
+         # TYPE umbra_total_minted counter\n\
+         umbra_total_minted {total_minted}\n\
+         # HELP umbra_network_info Network identification\n\
+         # TYPE umbra_network_info gauge\n\
+         umbra_network_info{{network=\"{network_name}\"}} 1\n"
     );
     (
         StatusCode::OK,
@@ -813,6 +833,7 @@ mod tests {
             peer_highest_round: 0,
             node_start_time: std::time::Instant::now(),
             version_signals: std::collections::HashMap::new(),
+            network: crate::constants::NetworkId::Mainnet,
         }));
         // Create a P2pHandle from a channel (we won't use it in most tests)
         let (tx, _rx) = tokio::sync::mpsc::channel(1);

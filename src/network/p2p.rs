@@ -380,6 +380,8 @@ pub struct P2pConfig {
     pub external_addr: Option<SocketAddr>,
     /// Peer bans loaded from persistent storage (peer_id, banned_until_ms).
     pub initial_bans: Vec<(PeerId, u64)>,
+    /// Chain ID for network isolation (reject peers on a different network).
+    pub chain_id: crate::Hash,
 }
 
 /// Peer reputation tracking (F7).
@@ -1032,6 +1034,7 @@ async fn handle_inbound_inner(
     // 1. Hello exchange (plaintext)
     let hello = Message::Hello {
         version: PROTOCOL_VERSION,
+        chain_id: config.chain_id,
         peer_id: config.our_peer_id,
         public_key: config.our_public_key.clone(),
         listen_port: config.listen_port,
@@ -1043,6 +1046,7 @@ async fn handle_inbound_inner(
     let (peer_id, public_key, peer_kem_pk) = match their_hello {
         Message::Hello {
             version,
+            chain_id,
             peer_id,
             public_key,
             kem_public_key,
@@ -1050,6 +1054,10 @@ async fn handle_inbound_inner(
         } => {
             // Accept v2 (pre-NAT) and v3+ peers
             if !(2..=PROTOCOL_VERSION).contains(&version) {
+                return Err(P2pError::InvalidHandshake);
+            }
+            // Reject peers on a different network
+            if !crate::constant_time_eq(&chain_id, &config.chain_id) {
                 return Err(P2pError::InvalidHandshake);
             }
             // Verify peer_id matches the fingerprint of their public key
@@ -1134,6 +1142,7 @@ async fn handle_outbound(
             // 1. Hello exchange (plaintext)
             let hello = Message::Hello {
                 version: PROTOCOL_VERSION,
+                chain_id: config.chain_id,
                 peer_id: config.our_peer_id,
                 public_key: config.our_public_key.clone(),
                 listen_port: config.listen_port,
@@ -1145,6 +1154,7 @@ async fn handle_outbound(
             let (peer_id, public_key, peer_kem_pk) = match their_hello {
                 Message::Hello {
                     version,
+                    chain_id,
                     peer_id,
                     public_key,
                     kem_public_key,
@@ -1152,6 +1162,10 @@ async fn handle_outbound(
                 } => {
                     // Accept v2 (pre-NAT) and v3+ peers
                     if !(2..=PROTOCOL_VERSION).contains(&version) {
+                        return Err(P2pError::InvalidHandshake);
+                    }
+                    // Reject peers on a different network
+                    if !crate::constant_time_eq(&chain_id, &config.chain_id) {
                         return Err(P2pError::InvalidHandshake);
                     }
                     // Verify peer_id matches the fingerprint of their public key
@@ -1573,6 +1587,7 @@ mod tests {
             our_signing_keypair: kp,
             external_addr: None,
             initial_bans: vec![],
+            chain_id: crate::constants::chain_id(),
         }
     }
 

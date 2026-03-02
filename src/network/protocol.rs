@@ -66,6 +66,7 @@ pub enum Message {
     /// Announce ourselves to a peer (includes KEM public key for encrypted transport)
     Hello {
         version: u32,
+        chain_id: crate::Hash,
         peer_id: PeerId,
         public_key: SigningPublicKey,
         listen_port: u16,
@@ -239,6 +240,7 @@ mod tests {
         let kem_kp = KemKeypair::generate();
         let msg = Message::Hello {
             version: PROTOCOL_VERSION,
+            chain_id: crate::constants::chain_id(),
             peer_id: kp.public.fingerprint(),
             public_key: kp.public,
             listen_port: 9000,
@@ -250,10 +252,12 @@ mod tests {
         match decoded {
             Message::Hello {
                 version,
+                chain_id,
                 listen_port,
                 ..
             } => {
                 assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(chain_id, crate::constants::chain_id());
                 assert_eq!(listen_port, 9000);
             }
             _ => panic!("wrong message type"),
@@ -367,6 +371,7 @@ mod tests {
             epoch_seed: [4u8; 32],
             finalized_count: 42,
             total_minted: 500_000,
+            last_slash_epoch: None,
         };
         let msg = Message::SnapshotManifest {
             meta,

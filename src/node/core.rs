@@ -50,6 +50,8 @@ pub struct NodeState {
     /// Protocol version signals per epoch (F16).
     /// Maps version -> set of proposer fingerprints that signaled it.
     pub version_signals: HashMap<u32, HashSet<Hash>>,
+    /// Network this node is running on.
+    pub network: crate::constants::NetworkId,
 }
 
 impl NodeState {
@@ -234,6 +236,8 @@ pub struct NodeConfig {
     pub genesis_validator: bool,
     /// NAT traversal configuration.
     pub nat_config: crate::config::NatConfig,
+    /// Network to join (mainnet or testnet).
+    pub network: crate::constants::NetworkId,
 }
 
 /// Node errors.
@@ -358,9 +362,12 @@ impl Node {
         // Open storage
         let storage = SledStorage::open(&config.data_dir)?;
 
+        let network = config.network;
+        tracing::info!(network = %network, "Starting node");
+
         // Restore ledger from storage if a snapshot exists, otherwise start fresh
         let mut ledger = match storage.get_chain_state_meta() {
-            Ok(Some(meta)) => match Ledger::restore_from_storage(&storage, &meta) {
+            Ok(Some(meta)) => match Ledger::restore_from_storage(&storage, &meta, network) {
                 Ok(l) => {
                     tracing::info!(
                         epoch = meta.epoch,
@@ -373,10 +380,10 @@ impl Node {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to restore state, starting fresh");
-                    Ledger::new()
+                    Ledger::new_for_network(network)
                 }
             },
-            _ => Ledger::new(),
+            _ => Ledger::new_for_network(network),
         };
 
         // Create mempool and set epoch for expiry validation
@@ -431,7 +438,7 @@ impl Node {
 
             // Store genesis vertex in finalized index (sequence 0)
             // so that subsequent finalized vertices start at index 1.
-            let genesis_vid = crate::consensus::dag::Dag::genesis_vertex().id;
+            let genesis_vid = crate::consensus::dag::Dag::genesis_vertex_for_network(network).id;
             storage
                 .put_finalized_vertex_index(0, &genesis_vid)
                 .unwrap_or_else(
@@ -529,6 +536,7 @@ impl Node {
             our_signing_keypair: config.keypair.clone(),
             external_addr: resolved_external,
             initial_bans,
+            chain_id: *ledger.state.chain_id(),
         };
         let p2p_result = crate::network::p2p::start(p2p_config).await?;
         let p2p = p2p_result.handle;
@@ -548,6 +556,7 @@ impl Node {
             peer_highest_round: 0,
             node_start_time: Instant::now(),
             version_signals: HashMap::new(),
+            network,
         }));
 
         let sync_state = SyncState::NeedSync { our_finalized };
@@ -1844,7 +1853,7 @@ impl Node {
         // Restore ledger from imported snapshot
         {
             let mut state = self.state.write().await;
-            match Ledger::restore_from_storage(&state.storage, &meta) {
+            match Ledger::restore_from_storage(&state.storage, &meta, state.network) {
                 Ok(ledger) => {
                     state.ledger = ledger;
 
@@ -2090,12 +2099,14 @@ impl Node {
                     state.bft.set_epoch_context(new_seed, total_validators);
                     state.bft.clear_epoch_caches();
 
-                    // Update committee from current active validators
+                    // Update committee from eligible validators (respects activation_epoch)
+                    let new_epoch = dag_epoch;
                     state.bft.committee = state
                         .ledger
                         .state
                         .active_validators()
                         .into_iter()
+                        .filter(|v| v.activation_epoch <= new_epoch)
                         .cloned()
                         .collect();
 
@@ -2563,6 +2574,7 @@ mod tests {
             peer_highest_round: 0,
             node_start_time: Instant::now(),
             version_signals: HashMap::new(),
+            network: crate::constants::NetworkId::Mainnet,
         }
     }
 
@@ -2690,6 +2702,7 @@ mod tests {
             kem_keypair: kem,
             genesis_validator: true,
             nat_config: crate::config::NatConfig::default(),
+            network: crate::constants::NetworkId::Mainnet,
         };
         assert!(config.genesis_validator);
         assert_eq!(config.bootstrap_peers.len(), 1);
@@ -3066,6 +3079,7 @@ mod tests {
                 epoch_seed: [0u8; 32],
                 epoch_fees: 0,
                 validator_count: 0,
+                last_slash_epoch: None,
             }),
             last_activity: Instant::now(),
         };

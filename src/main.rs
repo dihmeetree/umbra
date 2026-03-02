@@ -39,6 +39,10 @@ struct Cli {
     #[arg(long, default_value = "9733", global = true)]
     rpc_port: u16,
 
+    /// Network to join (mainnet or testnet).
+    #[arg(long, default_value = "mainnet", global = true)]
+    network: String,
+
     /// Run the demo walkthrough instead of starting a node.
     #[arg(long)]
     demo: bool,
@@ -185,6 +189,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Parse network identifier
+    let network: umbra::constants::NetworkId = cli
+        .network
+        .parse()
+        .map_err(|e: String| -> Box<dyn std::error::Error> { e.into() })?;
+
     // Load config file (umbra.toml) — CLI flags override config values
     let config = umbra::config::UmbraConfig::load(&cli.data_dir);
 
@@ -245,7 +255,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let listen_addr: SocketAddr =
                 format!("{}:{}", config.node.p2p_host, config.node.p2p_port).parse()?;
             let peers = if config.node.bootstrap_peers.is_empty() {
-                vec![]
+                umbra::config::default_bootstrap_peers(network)
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect()
             } else {
                 config.parse_bootstrap_peers()
             };
@@ -257,6 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.node.genesis_validator,
                 server_tls,
                 nat_config,
+                network,
             )
             .await
         }
@@ -270,7 +284,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // CLI flags override config file
             let listen_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             let all_peers = if peers.is_empty() {
-                config.parse_bootstrap_peers()
+                let config_peers = config.parse_bootstrap_peers();
+                if config_peers.is_empty() {
+                    umbra::config::default_bootstrap_peers(network)
+                        .iter()
+                        .filter_map(|s| s.parse().ok())
+                        .collect()
+                } else {
+                    config_peers
+                }
             } else {
                 peers
             };
@@ -282,6 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 genesis_validator,
                 server_tls,
                 nat_config,
+                network,
             )
             .await
         }
@@ -292,6 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_node(
     data_dir: PathBuf,
     rpc_addr: SocketAddr,
@@ -300,6 +324,7 @@ async fn run_node(
     genesis_validator: bool,
     tls_config: Option<TlsConfig>,
     nat_config: NatConfig,
+    network: umbra::constants::NetworkId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(p2p = %listen_addr, rpc = %rpc_addr, data = %data_dir.display(), "Starting Umbra node...");
 
@@ -341,6 +366,7 @@ async fn run_node(
         kem_keypair,
         genesis_validator,
         nat_config,
+        network,
     };
 
     let rpc_addr = config.rpc_addr;

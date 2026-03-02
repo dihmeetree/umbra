@@ -1,0 +1,118 @@
+services:
+  validator-1:
+    build: .
+    command:
+      - node
+      - --network
+      - testnet
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "9742"
+      - --rpc-host
+      - "0.0.0.0"
+      - --rpc-port
+      - "9743"
+      - --data-dir
+      - /data
+      - --genesis-validator
+    ports:
+      - "9742:9742"
+      - "9743:9743"
+    volumes:
+      - validator1-data:/data
+
+  validator-2:
+    build: .
+    command:
+      - node
+      - --network
+      - testnet
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "9742"
+      - --rpc-host
+      - "0.0.0.0"
+      - --rpc-port
+      - "9743"
+      - --data-dir
+      - /data
+      - --genesis-validator
+      - --peers
+      - "validator-1:9742"
+    volumes:
+      - validator2-data:/data
+    depends_on:
+      - validator-1
+
+  validator-3:
+    build: .
+    command:
+      - node
+      - --network
+      - testnet
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "9742"
+      - --rpc-host
+      - "0.0.0.0"
+      - --rpc-port
+      - "9743"
+      - --data-dir
+      - /data
+      - --genesis-validator
+      - --peers
+      - "validator-1:9742"
+    volumes:
+      - validator3-data:/data
+    depends_on:
+      - validator-1
+
+  faucet:
+    build: .
+    entrypoint: ["/usr/local/bin/faucet"]
+    command:
+      - --rpc-addr
+      - "validator-1:9743"
+      - --listen
+      - "0.0.0.0:9744"
+    ports:
+      - "9744:9744"
+    depends_on:
+      - validator-1
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    profiles:
+      - monitoring
+    depends_on:
+      - validator-1
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=umbra
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    profiles:
+      - monitoring
+    depends_on:
+      - prometheus
+
+volumes:
+  validator1-data:
+  validator2-data:
+  validator3-data:
+  prometheus-data:
+  grafana-data:

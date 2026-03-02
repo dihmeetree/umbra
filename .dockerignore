@@ -1,0 +1,6 @@
+target/
+.git/
+umbra-data/
+umbra-testnet-data/
+*.key
+.claude/

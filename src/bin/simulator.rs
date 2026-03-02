@@ -292,6 +292,7 @@ async fn bootstrap_network(
                 upnp: false,
                 ..umbra::config::NatConfig::default()
             },
+            network: umbra::constants::NetworkId::Mainnet,
         };
 
         let mut node = Node::new(config)

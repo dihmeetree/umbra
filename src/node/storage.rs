@@ -39,6 +39,8 @@ pub struct ChainStateMeta {
     pub finalized_count: u64,
     #[serde(default)]
     pub total_minted: u64,
+    #[serde(default)]
+    pub last_slash_epoch: Option<u64>,
 }
 
 /// Stored validator with bond information.
@@ -117,11 +119,17 @@ pub trait Storage {
 
     fn flush(&self) -> Result<(), StorageError>;
 
-    /// Apply a batch of finalization writes atomically.
+    /// Apply a batch of finalization writes during vertex finalization.
     ///
     /// Groups all writes (vertex, transactions, nullifiers, commitment levels,
     /// finalized index, validators, coinbase output, chain meta) into per-tree
     /// sled batches and applies them together, reducing fsync overhead.
+    ///
+    /// Note: sled batches are atomic per-tree, NOT cross-tree. A crash mid-way
+    /// through may leave some trees updated and others stale.  A
+    /// `finalization_in_progress` marker is set before applying and cleared
+    /// after all trees are flushed; `is_finalization_interrupted()` detects
+    /// this on startup.
     fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError>;
 
     /// Mark that a snapshot import is in progress (crash-recovery flag).
@@ -130,6 +138,9 @@ pub trait Storage {
     /// Check whether a snapshot import was interrupted.
     fn is_import_in_progress(&self) -> Result<bool, StorageError>;
 
+    /// Check whether a finalization batch was interrupted (crash-recovery flag).
+    fn is_finalization_interrupted(&self) -> Result<bool, StorageError>;
+
     /// Clear all state-related trees for snapshot import.
     ///
     /// Clears: nullifiers, commitment_levels, validators, chain_meta, finalized_index.
@@ -137,7 +148,7 @@ pub trait Storage {
     fn clear_for_snapshot_import(&self) -> Result<(), StorageError>;
 }
 
-/// A batch of writes to apply atomically during vertex finalization.
+/// A batch of writes to apply during vertex finalization.
 #[derive(Default)]
 pub struct FinalizationBatch {
     pub vertices: Vec<Vertex>,
@@ -562,6 +573,14 @@ impl Storage for SledStorage {
     }
 
     fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError> {
+        // Set crash-recovery marker before applying cross-tree writes
+        self.chain_meta
+            .insert(b"finalization_in_progress", &[1u8])
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.chain_meta
+            .flush()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+
         let mut vert_batch = sled::Batch::default();
         for v in &batch.vertices {
             let value =
@@ -653,6 +672,11 @@ impl Storage for SledStorage {
             std::sync::atomic::Ordering::Release,
         );
 
+        // Clear crash-recovery marker after all trees applied successfully
+        self.chain_meta
+            .remove(b"finalization_in_progress")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+
         self.db
             .flush()
             .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -678,6 +702,12 @@ impl Storage for SledStorage {
     fn is_import_in_progress(&self) -> Result<bool, StorageError> {
         self.chain_meta
             .contains_key(b"import_in_progress")
+            .map_err(|e| StorageError::Io(e.to_string()))
+    }
+
+    fn is_finalization_interrupted(&self) -> Result<bool, StorageError> {
+        self.chain_meta
+            .contains_key(b"finalization_in_progress")
             .map_err(|e| StorageError::Io(e.to_string()))
     }
 
@@ -799,6 +829,7 @@ mod tests {
             epoch_seed: [5u8; 32],
             finalized_count: 42,
             total_minted: 500_000,
+            last_slash_epoch: None,
         };
 
         assert!(storage.get_chain_state_meta().unwrap().is_none());
@@ -1140,6 +1171,7 @@ mod tests {
             epoch_seed: [0u8; 32],
             finalized_count: 0,
             total_minted: 0,
+            last_slash_epoch: None,
         };
         storage.put_chain_state_meta(&meta).unwrap();
         let vid = VertexId([3u8; 32]);
@@ -1181,6 +1213,7 @@ mod tests {
             epoch_seed: [12u8; 32],
             finalized_count: 1,
             total_minted: 50_000,
+            last_slash_epoch: None,
         };
 
         let batch = super::FinalizationBatch {
