@@ -1475,4 +1475,235 @@ mod tests {
         assert_eq!(status, HttpStatus::OK);
         assert!(!json["active_validators"].as_array().unwrap().is_empty());
     }
+
+    // ---------------------------------------------------------------
+    // Phase 3: Additional RPC endpoint tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_validator_invalid_hex() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/validator/not_valid_hex_zzz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_vertex_invalid_hex() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/vertex/not_valid_hex_zzz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_health_returns_all_fields() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/health").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["status"], "ok");
+        assert!(json["version"].is_string());
+        assert!(json["uptime_seconds"].is_number());
+        assert!(json["peer_count"].is_number());
+        assert!(json["epoch"].is_number());
+        assert!(json["finalized_count"].is_number());
+        assert!(json["mempool_txs"].is_number());
+    }
+
+    #[tokio::test]
+    async fn get_metrics_returns_prometheus_format() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::OK);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("umbra_epoch"));
+        assert!(body.contains("umbra_peer_count"));
+        assert!(body.contains("umbra_mempool_txs"));
+        assert!(body.contains("umbra_finalized_vertices"));
+        assert!(body.contains("umbra_commitment_count"));
+        assert!(body.contains("umbra_nullifier_count"));
+    }
+
+    #[tokio::test]
+    async fn get_finalized_vertices_pagination() {
+        let state = test_rpc_state();
+        {
+            let node = state.node.write().await;
+            let genesis = crate::consensus::dag::Dag::genesis_vertex();
+            node.storage.put_vertex(&genesis).unwrap();
+            // Store at sequences 0, 1, 2
+            for seq in 0..3u64 {
+                node.storage
+                    .put_finalized_vertex_index(seq, &genesis.id)
+                    .unwrap();
+            }
+        }
+        let app = router(state);
+        // after=1 should skip sequences 0 and 1, returning only sequence 2
+        let (status, json) = get_json(&app, "/vertices/finalized?after=1&limit=10").await;
+        assert_eq!(status, HttpStatus::OK);
+        let vertices = json["vertices"].as_array().unwrap();
+        assert_eq!(vertices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_finalized_vertices_has_more() {
+        let state = test_rpc_state();
+        {
+            let node = state.node.write().await;
+            let genesis = crate::consensus::dag::Dag::genesis_vertex();
+            node.storage.put_vertex(&genesis).unwrap();
+            for seq in 0..5u64 {
+                node.storage
+                    .put_finalized_vertex_index(seq, &genesis.id)
+                    .unwrap();
+            }
+        }
+        let app = router(state);
+        // limit=2, after=0 returns sequences 1,2 => has_more=true (3,4 remain)
+        let (status, json) = get_json(&app, "/vertices/finalized?after=0&limit=2").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["has_more"], true);
+        assert_eq!(json["vertices"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn submit_tx_returns_tx_id() {
+        let state = test_rpc_state();
+        let tx = make_valid_tx(99);
+        let tx_id_expected = hex::encode(tx.tx_id().0);
+        let tx_hex = hex::encode(crate::serialize(&tx).unwrap());
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"tx_hex": tx_hex}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), HttpStatus::OK);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["tx_id"], tx_id_expected);
+    }
+
+    #[tokio::test]
+    async fn get_metrics_values_match_state() {
+        let state = test_rpc_state();
+        {
+            let mut node = state.node.write().await;
+            // Register a validator to change counts
+            let kp = crate::crypto::keys::SigningKeypair::generate();
+            let kem = crate::crypto::keys::KemKeypair::generate();
+            let validator = Validator::with_kem(kp.public.clone(), kem.public.clone());
+            node.ledger
+                .state
+                .register_genesis_validator(validator)
+                .unwrap();
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        // epoch should be 0 for fresh state
+        assert!(body.contains("umbra_epoch 0"));
+        // validator_count should be 1
+        assert!(body.contains("umbra_validator_count 1"));
+    }
+
+    #[tokio::test]
+    async fn get_state_returns_all_fields() {
+        let state = test_rpc_state();
+        let app = router(state);
+        let (status, json) = get_json(&app, "/state").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert!(json["epoch"].is_number());
+        assert!(json["commitment_count"].is_number());
+        assert!(json["nullifier_count"].is_number());
+        assert!(json["state_root"].is_string());
+        assert!(json["commitment_root"].is_string());
+        assert!(json["total_minted"].is_number());
+    }
+
+    #[tokio::test]
+    async fn get_mempool_returns_count_and_fees() {
+        let state = test_rpc_state();
+        {
+            let mut node = state.node.write().await;
+            let tx = make_valid_tx(77);
+            node.mempool.insert(tx).unwrap();
+        }
+        let app = router(state);
+        let (status, json) = get_json(&app, "/mempool").await;
+        assert_eq!(status, HttpStatus::OK);
+        assert_eq!(json["transaction_count"], 1);
+        assert!(json["total_bytes"].as_u64().unwrap() > 0);
+    }
 }

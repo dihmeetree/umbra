@@ -1419,4 +1419,85 @@ mod tests {
         assert_eq!(bans.len(), 1);
         assert_eq!(bans[0].1, 2000);
     }
+
+    #[test]
+    fn remove_peer_ban_nonexistent_is_noop() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let fake_id = [99u8; 32];
+        // Should not error when removing a non-existent ban
+        let result = storage.remove_peer_ban(&fake_id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn finalization_interrupted_lifecycle() {
+        let storage = SledStorage::open_temporary().unwrap();
+        assert!(!storage.is_finalization_interrupted().unwrap());
+
+        // Apply an empty batch (sets and clears the flag)
+        let batch = FinalizationBatch::default();
+        storage.apply_finalization_batch(&batch).unwrap();
+        // After successful batch, flag should be cleared
+        assert!(!storage.is_finalization_interrupted().unwrap());
+    }
+
+    #[test]
+    fn get_finalized_vertices_after_pagination() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let vertex = test_vertex();
+        storage.put_vertex(&vertex).unwrap();
+
+        // Store 5 finalized indices
+        for seq in 0..5u64 {
+            storage.put_finalized_vertex_index(seq, &vertex.id).unwrap();
+        }
+
+        // after=2 should return sequences 3 and 4
+        let results = storage.get_finalized_vertices_after(2, 100).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, 3);
+        assert_eq!(results[1].0, 4);
+    }
+
+    #[test]
+    fn get_commitment_level_missing_returns_none() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let result = storage.get_commitment_level(0, 999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn apply_finalization_batch_empty_is_noop() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let count_before = storage.finalized_vertex_count().unwrap();
+        let batch = FinalizationBatch::default();
+        storage.apply_finalization_batch(&batch).unwrap();
+        let count_after = storage.finalized_vertex_count().unwrap();
+        assert_eq!(count_before, count_after);
+    }
+
+    #[test]
+    fn multiple_peer_bans_roundtrip() {
+        let storage = SledStorage::open_temporary().unwrap();
+        for i in 0..3u8 {
+            let peer_id = [i; 32];
+            storage
+                .put_peer_ban(&peer_id, (i as u64 + 1) * 1000)
+                .unwrap();
+        }
+        let bans = storage.get_peer_bans().unwrap();
+        assert_eq!(bans.len(), 3);
+    }
+
+    #[test]
+    fn finalized_count_updates_on_put() {
+        let storage = SledStorage::open_temporary().unwrap();
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 0);
+        let vertex = test_vertex();
+        storage.put_vertex(&vertex).unwrap();
+        storage.put_finalized_vertex_index(0, &vertex.id).unwrap();
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 1);
+        storage.put_finalized_vertex_index(1, &vertex.id).unwrap();
+        assert_eq!(storage.finalized_vertex_count().unwrap(), 2);
+    }
 }

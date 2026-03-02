@@ -2698,4 +2698,47 @@ mod tests {
         let mix4 = bft2.vrf_mix_hash();
         assert_ne!(mix3, mix4);
     }
+
+    #[test]
+    fn get_certificate_returns_none_without_quorum() {
+        let (_keypairs, validators) = make_committee(4);
+        let bft = BftState::new(0, validators, test_chain_id());
+        let vid = VertexId([1u8; 32]);
+        assert!(bft.get_certificate(&vid).is_none());
+    }
+
+    #[test]
+    fn vote_sign_data_with_reject_type() {
+        let vid = VertexId([1u8; 32]);
+        let chain_id = test_chain_id();
+        let accept_data = vote_sign_data(&vid, 0, 1, &VoteType::Accept, &chain_id);
+        let reject_data = vote_sign_data(&vid, 0, 1, &VoteType::Reject, &chain_id);
+        assert_ne!(accept_data, reject_data);
+    }
+
+    #[test]
+    fn clear_epoch_caches_clears_votes() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+
+        // Add a vote
+        let vid = VertexId([1u8; 32]);
+        let sign_data = vote_sign_data(&vid, 0, 0, &VoteType::Accept, &chain_id);
+        let sig = keypairs[0].sign(&sign_data);
+        let vote = Vote {
+            vertex_id: vid,
+            voter_id: validators[0].id,
+            epoch: 0,
+            round: 0,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+        bft.receive_vote(vote);
+
+        // Clear caches
+        bft.clear_epoch_caches();
+        assert!(bft.get_certificate(&vid).is_none());
+    }
 }

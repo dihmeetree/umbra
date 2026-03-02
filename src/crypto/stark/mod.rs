@@ -73,3 +73,31 @@ pub fn default_proof_options() -> ProofOptions {
         BatchingMethod::Linear,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_proof_options_parameters() {
+        let opts = light_proof_options();
+        assert_eq!(opts.num_queries(), 42);
+        assert_eq!(opts.blowup_factor(), 8);
+        assert_eq!(opts.grinding_factor(), 10);
+    }
+
+    #[test]
+    fn default_proof_options_parameters() {
+        let opts = default_proof_options();
+        assert_eq!(opts.num_queries(), 42);
+        assert_eq!(opts.blowup_factor(), 8);
+        assert_eq!(opts.grinding_factor(), 16);
+    }
+
+    #[test]
+    fn default_proof_options_stronger_than_light() {
+        let light = light_proof_options();
+        let default = default_proof_options();
+        assert!(default.grinding_factor() > light.grinding_factor());
+    }
+}

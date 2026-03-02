@@ -384,3 +384,78 @@ pub fn prove_balance(
         public_inputs_bytes,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winterfell::math::fields::f64::BaseElement as Felt;
+
+    #[test]
+    fn build_balance_trace_count_mismatch_error() {
+        let witness = BalanceWitness {
+            input_values: vec![100],
+            input_blindings: vec![[Felt::ZERO; 4]],
+            input_link_nonces: vec![[Felt::ZERO; 4]],
+            output_values: vec![100],
+            output_blindings: vec![[Felt::ZERO; 4]],
+        };
+        // Mismatch: 1 input but 2 proof_links
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::ZERO; 4], [Felt::ZERO; 4]],
+            output_commitments: vec![[Felt::ZERO; 4]],
+            fee: Felt::ZERO,
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let result = build_balance_trace(&witness, &pub_inputs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("count mismatch"));
+    }
+
+    #[test]
+    fn build_balance_trace_empty_inputs() {
+        let witness = BalanceWitness {
+            input_values: vec![],
+            input_blindings: vec![],
+            input_link_nonces: vec![],
+            output_values: vec![],
+            output_blindings: vec![],
+        };
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![],
+            output_commitments: vec![],
+            fee: Felt::ZERO,
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        // 0 inputs/outputs is a valid edge case for trace building
+        let result = build_balance_trace(&witness, &pub_inputs);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn prove_balance_rejects_range_overflow() {
+        let over_limit = (1u64 << RANGE_BITS) + 1;
+        let witness = BalanceWitness {
+            input_values: vec![over_limit],
+            input_blindings: vec![[Felt::ZERO; 4]],
+            input_link_nonces: vec![[Felt::ZERO; 4]],
+            output_values: vec![],
+            output_blindings: vec![],
+        };
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::ZERO; 4]],
+            output_commitments: vec![],
+            fee: Felt::new(over_limit),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let result = prove_balance(
+            &witness,
+            &pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds range limit"));
+    }
+}

@@ -478,4 +478,73 @@ p2p_port = 9742
         let peers = super::default_bootstrap_peers(crate::constants::NetworkId::Mainnet);
         assert!(peers.is_empty());
     }
+
+    #[test]
+    fn tls_validate_cert_exists_key_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&cert_path, "fake cert").unwrap();
+        let tls = super::TlsConfig {
+            cert_file: cert_path,
+            key_file: dir.path().join("missing_key.pem"),
+            ca_cert_file: dir.path().join("ca.pem"),
+        };
+        let result = tls.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("key"));
+    }
+
+    #[test]
+    fn tls_validate_cert_key_exist_ca_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, "fake cert").unwrap();
+        std::fs::write(&key_path, "fake key").unwrap();
+        let tls = super::TlsConfig {
+            cert_file: cert_path,
+            key_file: key_path,
+            ca_cert_file: dir.path().join("missing_ca.pem"),
+        };
+        let result = tls.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("CA"));
+    }
+
+    #[test]
+    fn parse_bootstrap_peers_all_valid() {
+        let config = super::UmbraConfig {
+            node: super::NodeConfig {
+                bootstrap_peers: vec!["127.0.0.1:9742".to_string(), "192.168.1.1:9742".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let peers = config.parse_bootstrap_peers();
+        assert_eq!(peers.len(), 2);
+    }
+
+    #[test]
+    fn parse_bootstrap_peers_empty_list() {
+        let config = super::UmbraConfig {
+            node: super::NodeConfig {
+                bootstrap_peers: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let peers = config.parse_bootstrap_peers();
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn nat_config_partial_toml() {
+        let toml_str = r#"
+            [node.nat]
+            upnp = true
+        "#;
+        let config: super::UmbraConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.node.nat.upnp);
+        assert!(config.node.nat.external_addr.is_none());
+    }
 }

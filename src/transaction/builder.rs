@@ -936,4 +936,26 @@ mod tests {
         assert_eq!(value, 0);
         assert_eq!(blinding.0, [0u8; 32]);
     }
+
+    #[test]
+    fn with_network_testnet_sets_chain_id() {
+        use crate::constants::NetworkId;
+        let builder = TransactionBuilder::new().with_network(NetworkId::Testnet);
+        let expected = crate::constants::chain_id_for_network(NetworkId::Testnet);
+        assert_eq!(builder.chain_id, expected);
+    }
+
+    #[test]
+    fn set_expiry_epoch_stored() {
+        let builder = TransactionBuilder::new().set_expiry_epoch(42);
+        assert_eq!(builder.expiry_epoch, 42);
+    }
+
+    #[test]
+    fn with_network_mainnet_differs_from_testnet() {
+        use crate::constants::NetworkId;
+        let mainnet = TransactionBuilder::new().with_network(NetworkId::Mainnet);
+        let testnet = TransactionBuilder::new().with_network(NetworkId::Testnet);
+        assert_ne!(mainnet.chain_id, testnet.chain_id);
+    }
 }

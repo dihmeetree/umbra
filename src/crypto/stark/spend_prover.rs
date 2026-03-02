@@ -318,3 +318,93 @@ pub fn prove_spend(
         public_inputs_bytes,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winterfell::math::fields::f64::BaseElement as Felt;
+
+    fn dummy_spend_witness(depth: usize) -> SpendWitness {
+        SpendWitness {
+            spend_auth: [Felt::new(1); 4],
+            commitment: [Felt::new(2); 4],
+            link_nonce: [Felt::new(3); 4],
+            merkle_path: vec![([Felt::ZERO; 4], false); depth],
+        }
+    }
+
+    fn dummy_spend_pub_inputs() -> SpendPublicInputs {
+        SpendPublicInputs {
+            merkle_root: [Felt::ZERO; 4],
+            nullifier: [Felt::ZERO; 4],
+            proof_link: [Felt::ZERO; 4],
+        }
+    }
+
+    #[test]
+    fn build_spend_trace_wrong_merkle_depth() {
+        let witness = dummy_spend_witness(10); // wrong, need 20
+        let pub_inputs = dummy_spend_pub_inputs();
+        let result = build_spend_trace(&witness, &pub_inputs);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected Merkle path of depth 20"));
+    }
+
+    #[test]
+    fn build_spend_trace_correct_depth_passes_depth_check() {
+        // With correct depth, the error should NOT be about depth
+        let witness = dummy_spend_witness(MERKLE_DEPTH);
+        let pub_inputs = dummy_spend_pub_inputs();
+        let result = build_spend_trace(&witness, &pub_inputs);
+        // May still fail on other checks, but not the depth check
+        if let Err(e) = &result {
+            assert!(
+                !e.to_string().contains("depth"),
+                "should not fail on depth check with correct depth, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn prove_spend_rejects_wrong_nullifier() {
+        let witness = dummy_spend_witness(MERKLE_DEPTH);
+        let mut pub_inputs = dummy_spend_pub_inputs();
+        // Set a nullifier that doesn't match the witness
+        pub_inputs.nullifier = [Felt::new(999); 4];
+        let result = prove_spend(
+            &witness,
+            &pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("nullifier does not match"));
+    }
+
+    #[test]
+    fn prove_spend_rejects_wrong_proof_link() {
+        use crate::crypto::stark::rescue;
+
+        let witness = dummy_spend_witness(MERKLE_DEPTH);
+        let mut pub_inputs = dummy_spend_pub_inputs();
+        // Compute the correct nullifier so that check passes
+        pub_inputs.nullifier = rescue::hash_nullifier(&witness.spend_auth, &witness.commitment);
+        // But set wrong proof_link
+        pub_inputs.proof_link = [Felt::new(888); 4];
+        let result = prove_spend(
+            &witness,
+            &pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("proof_link does not match"));
+    }
+}

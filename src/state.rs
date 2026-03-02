@@ -3321,4 +3321,264 @@ mod tests {
         assert!(path.is_some());
         assert!(state.commitment_path(1).is_none());
     }
+
+    // ---------------------------------------------------------------
+    // Phase 2: Additional ChainState / Ledger / Restore tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn advance_epoch_with_vrf_mix_changes_seed() {
+        let mut state = ChainState::new();
+        let seed_before = state.epoch_seed().seed;
+
+        let zero_mix = [0u8; 32];
+        state.advance_epoch_with_vrf_mix(&zero_mix);
+        let seed_zero = state.epoch_seed().seed;
+
+        // Reset
+        let mut state2 = ChainState::new();
+        let non_zero_mix = [42u8; 32];
+        state2.advance_epoch_with_vrf_mix(&non_zero_mix);
+        let seed_nonzero = state2.epoch_seed().seed;
+
+        // Both should differ from the initial seed
+        assert_ne!(seed_before, seed_zero);
+        assert_ne!(seed_before, seed_nonzero);
+        // And from each other (different VRF mixes)
+        assert_ne!(seed_zero, seed_nonzero);
+    }
+
+    #[test]
+    fn chain_id_accessor_returns_expected() {
+        use crate::constants::NetworkId;
+        let state = ChainState::new_for_network(NetworkId::Mainnet);
+        assert_eq!(
+            *state.chain_id(),
+            crate::constants::chain_id_for_network(NetworkId::Mainnet)
+        );
+        let state_t = ChainState::new_for_network(NetworkId::Testnet);
+        assert_eq!(
+            *state_t.chain_id(),
+            crate::constants::chain_id_for_network(NetworkId::Testnet)
+        );
+        assert_ne!(state.chain_id(), state_t.chain_id());
+    }
+
+    #[test]
+    fn epoch_seed_changes_on_advance() {
+        let mut state = ChainState::new();
+        let seed0 = state.epoch_seed().seed;
+        state.advance_epoch();
+        let seed1 = state.epoch_seed().seed;
+        assert_ne!(seed0, seed1);
+        assert_eq!(state.epoch(), 1);
+    }
+
+    #[test]
+    fn nullifier_hash_changes_on_insert() {
+        let mut state = ChainState::new();
+        let hash_before = *state.nullifier_hash();
+        let n = crate::crypto::nullifier::Nullifier::derive(&[1u8; 32], &[2u8; 32]);
+        state.mark_nullifier(n).unwrap();
+        let hash_after = *state.nullifier_hash();
+        assert_ne!(hash_before, hash_after);
+    }
+
+    #[test]
+    fn commitment_tree_last_path_returns_valid_path() {
+        let mut state = ChainState::new();
+        let c = Commitment::commit(500, &BlindingFactor::random());
+        state.add_commitment(c).unwrap();
+        let last_path = state.commitment_tree_last_path();
+        assert!(!last_path.is_empty());
+    }
+
+    #[test]
+    fn commitment_tree_level_len_matches_count() {
+        let mut state = ChainState::new();
+        assert_eq!(state.commitment_tree_level_len(0), 0);
+        for i in 0..5 {
+            let c = Commitment::commit(100 + i, &BlindingFactor::from_bytes([i as u8; 32]));
+            state.add_commitment(c).unwrap();
+        }
+        assert_eq!(state.commitment_tree_level_len(0), 5);
+        assert_eq!(state.commitment_count(), 5);
+    }
+
+    #[test]
+    fn create_coinbase_overflow_guard() {
+        let mut state = ChainState::new();
+        // Set total_minted very close to MAX_TOTAL_SUPPLY
+        state.total_minted = crate::constants::MAX_TOTAL_SUPPLY;
+        let kem_kp = KemKeypair::generate();
+        // Should return None, not panic
+        let result = state.create_genesis_coinbase(&kem_kp.public);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn slash_nonexistent_validator_returns_error() {
+        let mut state = ChainState::new();
+        let fake_id = crate::hash_domain(b"test", b"nonexistent");
+        let result = state.slash_validator(&fake_id);
+        assert!(
+            matches!(result, Err(StateError::ValidatorNotFound)),
+            "expected ValidatorNotFound, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn ledger_insert_duplicate_vertex() {
+        let mut ledger = Ledger::new();
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &kp.public, vec![]);
+        ledger.dag.insert_unchecked(vertex.clone()).unwrap();
+
+        // Second insert of same vertex should fail
+        let result = ledger.insert_vertex(vertex);
+        assert!(
+            matches!(result, Err(StateError::InvalidVertex(_))),
+            "expected InvalidVertex, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn apply_vertex_state_only_produces_coinbase() {
+        let mut ledger = Ledger::new();
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+
+        // Register proposer as a validator with KEM key so coinbase can be created
+        let kp = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
+        let validator = Validator::with_kem(kp.public.clone(), kem_kp.public.clone());
+        ledger.state.register_genesis_validator(validator).unwrap();
+
+        let fp = kp.public.fingerprint();
+        let tx_root = [0u8; 32];
+        let id = crate::consensus::dag::Vertex::compute_id(
+            &[genesis_id],
+            0,
+            1,
+            &fp,
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
+        let sig = kp.sign(&id.0);
+        let vertex = crate::consensus::dag::Vertex {
+            id,
+            parents: vec![genesis_id],
+            epoch: 0,
+            round: 1,
+            proposer: kp.public.clone(),
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: sig,
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        let result = ledger.apply_vertex_state_only(&vertex);
+        assert!(result.is_ok());
+        let coinbase = result.unwrap();
+        assert!(coinbase.is_some(), "Empty vertex should produce a coinbase");
+    }
+
+    #[test]
+    fn restore_from_storage_fresh_returns_default() {
+        use crate::node::storage::SledStorage;
+        let storage = SledStorage::open_temporary().unwrap();
+        let meta = ChainState::new().to_chain_state_meta(0);
+        let result =
+            ChainState::restore_from_storage(&storage, &meta, crate::constants::NetworkId::Mainnet);
+        assert!(result.is_ok());
+        let restored = result.unwrap();
+        assert_eq!(restored.epoch(), 0);
+        assert_eq!(restored.commitment_count(), 0);
+        assert_eq!(restored.nullifier_count(), 0);
+    }
+
+    #[test]
+    fn restore_from_storage_with_slashed_validator() {
+        use crate::node::storage::{SledStorage, Storage};
+        let storage = SledStorage::open_temporary().unwrap();
+
+        let mut state = ChainState::new();
+        let kp = SigningKeypair::generate();
+        let kem_kp = KemKeypair::generate();
+        let validator = Validator::with_kem(kp.public.clone(), kem_kp.public.clone());
+        let vid = validator.id;
+        state.register_genesis_validator(validator).unwrap();
+        state.slash_validator(&vid).unwrap();
+
+        // Persist validator and meta
+        let bond = state.validator_bond(&vid).unwrap_or(0);
+        storage
+            .put_validator(
+                state.get_validator(&vid).unwrap(),
+                bond,
+                true, // slashed
+            )
+            .unwrap();
+        let meta = state.to_chain_state_meta(0);
+
+        let restored =
+            ChainState::restore_from_storage(&storage, &meta, crate::constants::NetworkId::Mainnet)
+                .unwrap();
+        assert!(restored.slashed_validators.contains(&vid));
+        assert!(!restored.is_active_validator(&vid));
+    }
+
+    #[test]
+    fn set_nullifier_storage_enables_sled_lookup() {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        let tree = db.open_tree("test_nullifiers").unwrap();
+
+        let mut state = ChainState::new();
+        state.set_nullifier_storage(tree);
+
+        let n = crate::crypto::nullifier::Nullifier::derive(&[10u8; 32], &[20u8; 32]);
+        assert!(!state.is_spent(&n));
+        state.mark_nullifier(n).unwrap();
+        assert!(state.is_spent(&n));
+    }
+
+    #[test]
+    fn ledger_restore_from_storage_replays_finalized() {
+        use crate::node::storage::{SledStorage, Storage};
+        let storage = SledStorage::open_temporary().unwrap();
+
+        let mut ledger = Ledger::new();
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+
+        // Create, insert, and finalize one vertex
+        let kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &kp.public, vec![]);
+        let vid = vertex.id;
+        storage.put_vertex(&vertex).unwrap();
+        storage.put_finalized_vertex_index(0, &vid).unwrap();
+        ledger.dag.insert_unchecked(vertex).unwrap();
+        ledger.finalize_vertex_unchecked(&vid).unwrap();
+
+        // Persist commitment tree levels
+        let commitment_count = ledger.state.commitment_count();
+        for level in 0..21 {
+            let len = ledger.state.commitment_tree_level_len(level);
+            for idx in 0..len {
+                let node = ledger.state.commitment_tree_node(level, idx);
+                storage.put_commitment_level(level, idx, &node).unwrap();
+            }
+        }
+        let meta = ledger.state.to_chain_state_meta(1);
+
+        let restored =
+            Ledger::restore_from_storage(&storage, &meta, crate::constants::NetworkId::Mainnet)
+                .unwrap();
+        assert_eq!(restored.state.commitment_count(), commitment_count);
+        assert_eq!(restored.state.epoch(), ledger.state.epoch());
+    }
 }

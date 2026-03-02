@@ -332,4 +332,45 @@ mod tests {
         // The IP already exists in the map, so the new vote is added
         let _ = result; // just verify no panic; behavior depends on quorum
     }
+
+    #[test]
+    fn record_observed_at_quorum_minus_one() {
+        let mut nat = NatState::new(9742, None);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        // 2 peers is below quorum of 3
+        nat.record_observed_addr(make_peer_id(1), ip);
+        nat.record_observed_addr(make_peer_id(2), ip);
+        assert!(nat.external_addr().is_none());
+    }
+
+    #[test]
+    fn external_addr_priority_upnp_then_observed() {
+        let mut nat = NatState::new(9742, None);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        // Reach quorum via observed
+        for i in 1..=3u8 {
+            nat.record_observed_addr(make_peer_id(i), ip);
+        }
+        let observed_addr = nat.external_addr();
+        assert!(observed_addr.is_some());
+
+        // Set UPnP — should take priority
+        let upnp_addr: SocketAddr = "5.6.7.8:9742".parse().unwrap();
+        nat.set_upnp_addr(upnp_addr);
+        assert_eq!(nat.external_addr(), Some(upnp_addr));
+    }
+
+    #[test]
+    fn upnp_addr_fallback_to_observed() {
+        let mut nat = NatState::new(9742, None);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        // Reach quorum via observed
+        for i in 1..=3u8 {
+            nat.record_observed_addr(make_peer_id(i), ip);
+        }
+        // No UPnP set, should use observed
+        let addr = nat.external_addr().unwrap();
+        assert_eq!(addr.ip(), ip);
+        assert_eq!(addr.port(), 9742);
+    }
 }

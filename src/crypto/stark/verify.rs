@@ -641,4 +641,29 @@ mod tests {
             e => panic!("expected DeserializationFailed, got: {e}"),
         }
     }
+
+    #[test]
+    fn spend_proof_truncated_bytes_rejected() {
+        let mut proof = make_valid_spend_proof();
+        // Truncate proof bytes to half
+        let half = proof.proof_bytes.len() / 2;
+        proof.proof_bytes.truncate(half);
+        let result = verify_spend_proof(&proof);
+        assert!(result.is_err(), "truncated spend proof should fail");
+    }
+
+    #[test]
+    fn spend_proof_wrong_merkle_root_rejected() {
+        let mut proof = make_valid_spend_proof();
+        // Tamper with the public inputs (merkle root is the first 4 felt elements)
+        // Flip a byte in the public inputs to corrupt the merkle root
+        if !proof.public_inputs_bytes.is_empty() {
+            proof.public_inputs_bytes[0] ^= 0xFF;
+        }
+        let result = verify_spend_proof(&proof);
+        assert!(
+            result.is_err(),
+            "tampered merkle root should fail verification"
+        );
+    }
 }

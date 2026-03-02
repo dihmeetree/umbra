@@ -3168,4 +3168,758 @@ mod tests {
             assert!(matches!(msg, Message::PeersResponse(_)));
         }
     }
+
+    // ---------------------------------------------------------------
+    // Helper: build a minimal round-0 vertex that the DAG will accept
+    // ---------------------------------------------------------------
+    fn test_chain_state_meta(epoch: u64) -> crate::node::storage::ChainStateMeta {
+        crate::node::storage::ChainStateMeta {
+            epoch,
+            last_finalized: None,
+            state_root: [0u8; 32],
+            commitment_root: [0u8; 32],
+            commitment_count: 100,
+            nullifier_count: 0,
+            nullifier_hash: [0u8; 32],
+            epoch_fees: 0,
+            validator_count: 0,
+            epoch_seed: [0u8; 32],
+            finalized_count: 100,
+            total_minted: 1_000_000,
+            last_slash_epoch: None,
+        }
+    }
+
+    fn make_test_vertex(
+        parents: Vec<crate::consensus::dag::VertexId>,
+        round: u64,
+        epoch: u64,
+        kp: &crate::crypto::keys::SigningKeypair,
+        transactions: Vec<crate::transaction::Transaction>,
+    ) -> crate::consensus::dag::Vertex {
+        use crate::consensus::dag::Vertex;
+
+        let proposer_fp = kp.public.fingerprint();
+        let tx_root = if transactions.is_empty() {
+            [0u8; 32]
+        } else {
+            let tx_hashes: Vec<crate::Hash> = transactions.iter().map(|tx| tx.tx_id().0).collect();
+            let (root, _) = crate::crypto::proof::build_merkle_tree(&tx_hashes);
+            root
+        };
+        // Generate VRF proof for non-genesis rounds
+        let vrf_proof = if round > 0 {
+            let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
+            let vrf_input = epoch_seed.vrf_input(&proposer_fp);
+            Some(crate::crypto::vrf::VrfOutput::evaluate(kp, &vrf_input))
+        } else {
+            None
+        };
+        let vrf_value = vrf_proof.as_ref().map(|v| &v.value);
+        let id = Vertex::compute_id(
+            &parents,
+            epoch,
+            round,
+            &proposer_fp,
+            &tx_root,
+            vrf_value,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
+        let signature = kp.sign(&id.0);
+        Vertex {
+            id,
+            parents,
+            epoch,
+            round,
+            proposer: kp.public.clone(),
+            transactions,
+            timestamp: round * 1000,
+            state_root: [0u8; 32],
+            signature,
+            vrf_proof,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Message handler tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_new_vertex_inserts_to_dag() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let vid = vertex.id;
+        let from = Hash::default();
+
+        node.handle_message(from, Message::NewVertex(Box::new(vertex)))
+            .await;
+
+        let s = state.read().await;
+        assert!(s.ledger.dag.get(&vid).is_some());
+        drop(s);
+        // Should broadcast the vertex
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            crate::network::p2p::P2pCommand::Broadcast { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_new_vertex_rejects_duplicate() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let from = Hash::default();
+
+        // First insertion
+        node.handle_message(from, Message::NewVertex(Box::new(vertex.clone())))
+            .await;
+        // Drain all commands from first insertion
+        while cmd_rx.try_recv().is_ok() {}
+
+        // Second insertion — duplicate, deduped by is_seen
+        node.handle_message(from, Message::NewVertex(Box::new(vertex)))
+            .await;
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_get_vertex_found() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let vid = vertex.id;
+        state.write().await.ledger.insert_vertex(vertex).unwrap();
+
+        let from = Hash::default();
+        node.handle_message(from, Message::GetVertex(vid)).await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => match msg {
+                Message::VertexResponse(Some(v)) => assert_eq!(v.id, vid),
+                _ => panic!("Expected VertexResponse(Some)"),
+            },
+            _ => panic!("Expected SendTo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_vertex_not_found() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let unknown = crate::consensus::dag::VertexId([42u8; 32]);
+        let from = Hash::default();
+        node.handle_message(from, Message::GetVertex(unknown)).await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => {
+                assert!(matches!(msg, Message::VertexResponse(None)));
+            }
+            _ => panic!("Expected SendTo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_finalized_vertices_returns_batch() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Store a finalized vertex in storage
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        {
+            let s = state.write().await;
+            s.storage.put_vertex(&vertex).unwrap();
+            s.storage.put_finalized_vertex_index(0, &vertex.id).unwrap();
+        }
+
+        let from = Hash::default();
+        node.handle_message(
+            from,
+            Message::GetFinalizedVertices {
+                after_sequence: u64::MAX,
+                limit: 10,
+            },
+        )
+        .await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => match msg {
+                Message::FinalizedVerticesResponse {
+                    vertices,
+                    total_finalized,
+                    ..
+                } => {
+                    assert!(!vertices.is_empty());
+                    assert!(total_finalized >= 1);
+                }
+                _ => panic!("Expected FinalizedVerticesResponse"),
+            },
+            _ => panic!("Expected SendTo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_finalized_vertices_caps_limit() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let from = Hash::default();
+        // Request a huge limit — the handler caps it to SYNC_BATCH_SIZE
+        node.handle_message(
+            from,
+            Message::GetFinalizedVertices {
+                after_sequence: 0,
+                limit: 999_999,
+            },
+        )
+        .await;
+
+        // The handler still responds (with 0 vertices since storage is empty)
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => {
+                assert!(matches!(msg, Message::FinalizedVerticesResponse { .. }));
+            }
+            _ => panic!("Expected SendTo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_epoch_state_response_triggers_sync() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Put node in NeedSync
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let from = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_message(
+            from,
+            Message::EpochStateResponse {
+                epoch: 5,
+                committee: vec![],
+                commitment_root: [0u8; 32],
+                nullifier_count: 100,
+            },
+        )
+        .await;
+
+        // Should have sent either GetSnapshot or GetFinalizedVertices
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => {
+                assert!(
+                    matches!(msg, Message::GetSnapshot)
+                        || matches!(msg, Message::GetFinalizedVertices { .. })
+                );
+            }
+            _ => panic!("Expected SendTo"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_epoch_state_response_already_synced() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Node is already Synced (default from new_test)
+        let from = Hash::default();
+        node.handle_message(
+            from,
+            Message::EpochStateResponse {
+                epoch: 0,
+                committee: vec![],
+                commitment_root: [0u8; 32],
+                nullifier_count: 0,
+            },
+        )
+        .await;
+
+        // Nothing sent — we're not in NeedSync
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_tips_response_requests_missing() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let unknown_tips = vec![
+            crate::consensus::dag::VertexId([1u8; 32]),
+            crate::consensus::dag::VertexId([2u8; 32]),
+        ];
+        let from = Hash::default();
+        node.handle_message(from, Message::TipsResponse(unknown_tips))
+            .await;
+
+        // Should request each missing vertex via GetVertex
+        let mut get_vertex_count = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let crate::network::p2p::P2pCommand::SendTo(_, Message::GetVertex(_)) = cmd {
+                get_vertex_count += 1;
+            }
+        }
+        assert_eq!(get_vertex_count, 2);
+    }
+
+    #[tokio::test]
+    async fn handle_vertex_response_inserts_to_dag() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let vid = vertex.id;
+        let from = Hash::default();
+
+        node.handle_message(from, Message::VertexResponse(Some(Box::new(vertex))))
+            .await;
+
+        let s = state.read().await;
+        assert!(s.ledger.dag.get(&vid).is_some());
+    }
+
+    // ---------------------------------------------------------------
+    // Snapshot sync handler tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_snapshot_manifest_rejects_oversized() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let from = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_message(
+            from,
+            Message::SnapshotManifest {
+                meta: test_chain_state_meta(5),
+                total_chunks: 300,
+                snapshot_size: 2_000_000_000, // > 1 GiB
+            },
+        )
+        .await;
+
+        // Should stay in NeedSync
+        assert!(matches!(node.sync_state, SyncState::NeedSync { .. }));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_snapshot_manifest_rejects_zero_chunks() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let from = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_message(
+            from,
+            Message::SnapshotManifest {
+                meta: test_chain_state_meta(5),
+                total_chunks: 0,
+                snapshot_size: 0,
+            },
+        )
+        .await;
+
+        assert!(matches!(node.sync_state, SyncState::NeedSync { .. }));
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_snapshot_manifest_starts_snapshot_sync() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let chunk_size = crate::constants::SNAPSHOT_CHUNK_SIZE as u64;
+        let snapshot_size = chunk_size * 2; // 2 chunks
+        let total_chunks = 2u32;
+
+        let from = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_message(
+            from,
+            Message::SnapshotManifest {
+                meta: test_chain_state_meta(5),
+                total_chunks,
+                snapshot_size,
+            },
+        )
+        .await;
+
+        // Should transition to SyncingSnapshot
+        assert!(matches!(node.sync_state, SyncState::SyncingSnapshot { .. }));
+        // Should request chunk 0
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => {
+                assert!(matches!(msg, Message::GetSnapshotChunk { chunk_index: 0 }));
+            }
+            _ => panic!("Expected SendTo with GetSnapshotChunk"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_get_snapshot_chunk_rejects_out_of_bounds() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Set up a small snapshot cache with 1 chunk
+        let meta = test_chain_state_meta(1);
+        node.snapshot_cache = Some((vec![0u8; 100], 1, meta, Instant::now()));
+
+        let from = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_message(
+            from,
+            Message::GetSnapshotChunk { chunk_index: 5 }, // out of bounds
+        )
+        .await;
+
+        // No response sent
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_get_snapshot_chunk_returns_data() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let data = vec![42u8; 100];
+        let meta = test_chain_state_meta(1);
+        node.snapshot_cache = Some((data, 1, meta, Instant::now()));
+
+        let from = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_message(from, Message::GetSnapshotChunk { chunk_index: 0 })
+            .await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(_, msg) => match msg {
+                Message::SnapshotChunk {
+                    chunk_index, data, ..
+                } => {
+                    assert_eq!(chunk_index, 0);
+                    assert_eq!(data.len(), 100);
+                }
+                _ => panic!("Expected SnapshotChunk"),
+            },
+            _ => panic!("Expected SendTo"),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // finalize_vertex_inner tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn finalize_vertex_inner_marks_finalized() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state_data = test_node_state();
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let state = Arc::new(RwLock::new(state_data));
+        let node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Insert a vertex as child of genesis
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let vid = vertex.id;
+        {
+            let mut s = state.write().await;
+            s.ledger.insert_vertex(vertex).unwrap();
+        }
+
+        // Finalize it
+        {
+            let mut s = state.write().await;
+            node.finalize_vertex_inner(&mut s, &vid).await;
+        }
+
+        let s = state.read().await;
+        assert!(s.ledger.dag.is_finalized(&vid));
+        assert!(s.last_finalized_time.is_some());
+    }
+
+    #[tokio::test]
+    async fn finalize_vertex_inner_already_finalized_is_noop() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state_data = test_node_state();
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let state = Arc::new(RwLock::new(state_data));
+        let node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let vid = vertex.id;
+        {
+            let mut s = state.write().await;
+            s.ledger.insert_vertex(vertex).unwrap();
+        }
+
+        // Finalize twice
+        {
+            let mut s = state.write().await;
+            node.finalize_vertex_inner(&mut s, &vid).await;
+        }
+        // Second call should be a no-op (no panic)
+        {
+            let mut s = state.write().await;
+            node.finalize_vertex_inner(&mut s, &vid).await;
+        }
+
+        let s = state.read().await;
+        assert!(s.ledger.dag.is_finalized(&vid));
+    }
+
+    #[tokio::test]
+    async fn finalize_vertex_inner_creates_coinbase() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state_data = test_node_state();
+        let genesis_id = crate::consensus::dag::Dag::genesis_vertex().id;
+        let state = Arc::new(RwLock::new(state_data));
+        let node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Insert an empty vertex (will produce a coinbase on finalization)
+        let proposer_kp = SigningKeypair::generate();
+        let vertex = make_test_vertex(vec![genesis_id], 1, 0, &proposer_kp, vec![]);
+        let vid = vertex.id;
+        {
+            let mut s = state.write().await;
+            s.ledger.insert_vertex(vertex).unwrap();
+        }
+
+        // Finalize — should succeed and update finalized_count in storage
+        let count_before = {
+            let s = state.read().await;
+            s.storage.finalized_vertex_count().unwrap_or(0)
+        };
+        {
+            let mut s = state.write().await;
+            node.finalize_vertex_inner(&mut s, &vid).await;
+        }
+
+        let s = state.read().await;
+        assert!(s.ledger.dag.is_finalized(&vid));
+        let count_after = s.storage.finalized_vertex_count().unwrap_or(0);
+        assert_eq!(count_after, count_before + 1);
+    }
+
+    // ---------------------------------------------------------------
+    // try_propose_vertex tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn try_propose_vertex_does_nothing_without_vrf() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        // our_vrf_output is None by default
+
+        node.try_propose_vertex().await;
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // check_sync_and_view_change tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_sync_reverts_on_timeout() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let peer = crate::hash_domain(b"test-peer", &[1]);
+        node.sync_state = SyncState::Syncing {
+            peer,
+            next_seq: 42,
+            target: 100,
+            target_epoch: 1,
+            last_activity: Instant::now() - std::time::Duration::from_secs(120),
+            post_snapshot: false,
+        };
+
+        node.check_sync_and_view_change().await;
+
+        assert!(matches!(
+            node.sync_state,
+            SyncState::NeedSync { our_finalized: 42 }
+        ));
+        assert!(node.sync_failed_peers.contains_key(&peer));
+        // Should broadcast GetEpochState
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            crate::network::p2p::P2pCommand::Broadcast { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_sync_snapshot_reverts_on_timeout() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let peer = crate::hash_domain(b"test-peer", &[1]);
+        node.sync_state = SyncState::SyncingSnapshot {
+            peer,
+            total_chunks: 10,
+            received_chunks: vec![None; 10],
+            snapshot_size: 40_000_000,
+            meta: Box::new(test_chain_state_meta(5)),
+            last_activity: Instant::now() - std::time::Duration::from_secs(120),
+        };
+
+        node.check_sync_and_view_change().await;
+
+        assert!(matches!(
+            node.sync_state,
+            SyncState::NeedSync { our_finalized: 0 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_sync_cleans_expired_cooldowns() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        // already Synced by default
+
+        let peer = crate::hash_domain(b"test-peer", &[1]);
+        node.sync_failed_peers
+            .insert(peer, Instant::now() - std::time::Duration::from_secs(300));
+
+        node.check_sync_and_view_change().await;
+
+        // Expired entry should be cleaned
+        assert!(node.sync_failed_peers.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // Dandelion++ tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stem_forward_with_zero_hops_broadcasts() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(60);
+        node.stem_forward(tx, 0).await;
+
+        // With 0 hops remaining, should broadcast (fluff)
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            crate::network::p2p::P2pCommand::Broadcast { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn flush_dandelion_stems_flushes_old_entries() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Add an old stem entry
+        let tx = make_test_tx(61);
+        let tx_id = tx.tx_id().0;
+        state.write().await.mempool.insert(tx).unwrap();
+        node.stem_txs.insert(
+            tx_id,
+            (3, Instant::now() - std::time::Duration::from_secs(60)),
+        );
+
+        node.flush_dandelion_stems().await;
+
+        // Old entry should be flushed
+        assert!(node.stem_txs.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // P2P event tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn peer_connected_triggers_get_epoch_state() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        // Put node in NeedSync
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let peer_id = crate::hash_domain(b"test-peer", &[1]);
+        node.handle_p2p_event(P2pEvent::PeerConnected(peer_id))
+            .await;
+
+        let cmd = cmd_rx.try_recv().unwrap();
+        match cmd {
+            crate::network::p2p::P2pCommand::SendTo(to, msg) => {
+                assert_eq!(to, peer_id);
+                assert!(matches!(msg, Message::GetEpochState));
+            }
+            _ => panic!("Expected SendTo GetEpochState"),
+        }
+    }
 }
