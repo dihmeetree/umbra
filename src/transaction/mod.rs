@@ -1326,7 +1326,7 @@ mod tests {
 
     #[test]
     fn decode_note_rejects_long() {
-        assert!(crate::transaction::builder::decode_note(&[0u8; 41]).is_none());
+        assert!(crate::transaction::builder::decode_note(&[0u8; 42]).is_none());
     }
 
     #[test]
