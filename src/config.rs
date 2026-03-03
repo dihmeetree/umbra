@@ -200,12 +200,6 @@ impl UmbraConfig {
             Err(_) => Self::default(),
         }
     }
-
-    /// Parse bootstrap peers into socket addresses.
-    /// Supports both IP:port and hostname:port (DNS resolution).
-    pub fn parse_bootstrap_peers(&self) -> Vec<SocketAddr> {
-        resolve_peers(&self.node.bootstrap_peers)
-    }
 }
 
 /// Resolve peer strings (host:port or ip:port) to socket addresses.
@@ -262,10 +256,10 @@ web_port = 8080
     }
 
     #[test]
-    fn parse_bootstrap_peers() {
+    fn resolve_bootstrap_peers() {
         let mut config = UmbraConfig::default();
         config.node.bootstrap_peers = vec!["1.2.3.4:9732".into(), "bad-addr".into()];
-        let peers = config.parse_bootstrap_peers();
+        let peers = resolve_peers(&config.node.bootstrap_peers);
         assert_eq!(peers.len(), 1);
     }
 
@@ -410,7 +404,7 @@ p2p_port = 9732
     fn ipv6_bootstrap_peer() {
         let mut config = UmbraConfig::default();
         config.node.bootstrap_peers = vec!["[::1]:9732".into()];
-        let peers = config.parse_bootstrap_peers();
+        let peers = resolve_peers(&config.node.bootstrap_peers);
         assert_eq!(peers.len(), 1);
     }
 
@@ -519,7 +513,7 @@ p2p_port = 9742
     }
 
     #[test]
-    fn parse_bootstrap_peers_all_valid() {
+    fn resolve_bootstrap_peers_all_valid() {
         let config = super::UmbraConfig {
             node: super::NodeConfig {
                 bootstrap_peers: vec!["127.0.0.1:9742".to_string(), "192.168.1.1:9742".to_string()],
@@ -527,12 +521,12 @@ p2p_port = 9742
             },
             ..Default::default()
         };
-        let peers = config.parse_bootstrap_peers();
+        let peers = resolve_peers(&config.node.bootstrap_peers);
         assert_eq!(peers.len(), 2);
     }
 
     #[test]
-    fn parse_bootstrap_peers_empty_list() {
+    fn resolve_bootstrap_peers_empty_list() {
         let config = super::UmbraConfig {
             node: super::NodeConfig {
                 bootstrap_peers: vec![],
@@ -540,7 +534,7 @@ p2p_port = 9742
             },
             ..Default::default()
         };
-        let peers = config.parse_bootstrap_peers();
+        let peers = resolve_peers(&config.node.bootstrap_peers);
         assert!(peers.is_empty());
     }
 
