@@ -47,6 +47,16 @@ pub mod constants {
     pub const SLASH_REGISTRATION_COOLDOWN_EPOCHS: u64 = 10;
     /// Bond multiplier applied to new registrations during slashing cooldown.
     pub const SLASH_BOND_MULTIPLIER: u64 = 3;
+    /// Minimum number of epochs a validator must be registered before becoming
+    /// committee-eligible. A validator registered in epoch N is eligible starting
+    /// epoch N + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS.
+    ///
+    /// This prevents registration-timing attacks: without a delay, an attacker
+    /// could register validators immediately before a target epoch, temporarily
+    /// spike their fraction of the validator set, participate once, then deregister.
+    /// A 2-epoch delay forces the attacker to sustain their validator count for
+    /// multiple epochs, substantially increasing the cost of a transient spike.
+    pub const COMMITTEE_ELIGIBILITY_DELAY_EPOCHS: u64 = 2;
     /// Maximum transactions per DAG vertex
     pub const MAX_TXS_PER_VERTEX: usize = 10_000;
     /// Target vertex interval in milliseconds
