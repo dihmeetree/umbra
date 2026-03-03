@@ -32,6 +32,9 @@ pub mod constants {
     pub const MIN_COMMITTEE_SIZE: usize = 7;
     /// Maximum number of registered validators (prevents DoS on committee selection).
     pub const MAX_VALIDATORS: usize = 10_000;
+    /// Minimum number of active validators for BFT safety.
+    /// With 4 validators, BFT tolerates 1 Byzantine fault (f < n/3).
+    pub const MIN_VALIDATORS: usize = 4;
     /// Base bond for validator registration (in base units).
     /// The actual required bond scales with the number of active validators
     /// via [`required_validator_bond`].

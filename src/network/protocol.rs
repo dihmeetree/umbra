@@ -171,6 +171,17 @@ impl Message {
             Message::PeersResponse(peers) => {
                 peers.truncate(1000);
             }
+            Message::BftCertificate(cert) => {
+                // A valid certificate has at most COMMITTEE_SIZE signatures
+                cert.signatures.truncate(crate::constants::COMMITTEE_SIZE);
+            }
+            Message::FinalizedVerticesResponse { vertices, .. } => {
+                // Cap at a reasonable batch size to limit memory allocation
+                vertices.truncate(1000);
+            }
+            Message::EpochStateResponse { committee, .. } => {
+                committee.truncate(crate::constants::COMMITTEE_SIZE);
+            }
             _ => {}
         }
     }

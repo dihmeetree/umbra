@@ -872,33 +872,41 @@ impl Node {
                         {
                             state.peer_highest_round = vertex.round;
                         }
-                        // If we're on committee, vote Accept
-                        if let Some(vrf) = &self.our_vrf_output {
-                            let vote = bft::create_vote(
-                                vertex.id,
-                                &self.keypair,
-                                vertex.epoch,
-                                vertex.round,
-                                true,
-                                state.ledger.state.chain_id(),
-                                Some(vrf.clone()),
-                            );
-                            // Process vote locally
-                            if let Some(cert) = state.bft.receive_vote(vote.clone()) {
-                                // Quorum reached -- finalize
-                                self.finalize_vertex_inner(&mut state, &cert.vertex_id)
-                                    .await;
-                                let _ = self
-                                    .p2p
-                                    .broadcast(Message::BftCertificate(cert), None)
-                                    .await;
-                                // Broadcast the vote that completed the certificate
-                                let _ =
-                                    self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
-                            } else if state.bft.is_vote_accepted(&vote) {
-                                // Only broadcast if the vote was accepted (correct epoch/round)
-                                let _ =
-                                    self.p2p.broadcast(Message::BftVote(vote), Some(from)).await;
+                        // If we're on committee and synced, vote Accept.
+                        // Nodes that are still syncing should not vote since their
+                        // state may be stale, producing votes at wrong rounds.
+                        if matches!(self.sync_state, SyncState::Synced) {
+                            if let Some(vrf) = &self.our_vrf_output {
+                                let vote = bft::create_vote(
+                                    vertex.id,
+                                    &self.keypair,
+                                    vertex.epoch,
+                                    vertex.round,
+                                    true,
+                                    state.ledger.state.chain_id(),
+                                    Some(vrf.clone()),
+                                );
+                                // Process vote locally
+                                if let Some(cert) = state.bft.receive_vote(vote.clone()) {
+                                    // Quorum reached -- finalize
+                                    self.finalize_vertex_inner(&mut state, &cert.vertex_id)
+                                        .await;
+                                    let _ = self
+                                        .p2p
+                                        .broadcast(Message::BftCertificate(cert), None)
+                                        .await;
+                                    // Broadcast the vote that completed the certificate
+                                    let _ = self
+                                        .p2p
+                                        .broadcast(Message::BftVote(vote), Some(from))
+                                        .await;
+                                } else if state.bft.is_vote_accepted(&vote) {
+                                    // Only broadcast if the vote was accepted (correct epoch/round)
+                                    let _ = self
+                                        .p2p
+                                        .broadcast(Message::BftVote(vote), Some(from))
+                                        .await;
+                                }
                             }
                         }
 
@@ -1750,10 +1758,11 @@ impl Node {
                         last_activity: Instant::now(),
                     };
 
-                    // Request first chunk
+                    // Request first chunk from quorum_peer (not `from`, which may
+                    // be a different peer that merely triggered the quorum threshold)
                     let _ = self
                         .p2p
-                        .send_to(from, Message::GetSnapshotChunk { chunk_index: 0 })
+                        .send_to(quorum_peer, Message::GetSnapshotChunk { chunk_index: 0 })
                         .await;
                 }
             }
@@ -1976,6 +1985,13 @@ impl Node {
             return; // Already finalized
         }
 
+        // Ensure vertex exists in DAG before finalizing to prevent phantom
+        // finalization (advancing rounds for vertices we haven't received yet)
+        if state.ledger.dag.get(vertex_id).is_none() {
+            tracing::debug!("Cannot finalize vertex not yet in DAG");
+            return;
+        }
+
         // Get vertex transactions for mempool cleanup before finalization
         let nullifiers: Vec<_> = state
             .ledger
@@ -1997,6 +2013,20 @@ impl Node {
                 state.last_finalized_time = Some(Instant::now());
                 // Remove conflicting mempool txs
                 state.mempool.remove_conflicting(&nullifiers);
+
+                // Process equivocation evidence and slash BEFORE building the
+                // persistence batch so slashed validator state is included atomically.
+                let evidence_to_broadcast: Vec<_> = state.bft.equivocations().to_vec();
+                for evidence in &evidence_to_broadcast {
+                    if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
+                        tracing::warn!(
+                            validator = "<redacted>",
+                            round = evidence.round,
+                            "Slashed validator for equivocation"
+                        );
+                    }
+                }
+                state.bft.clear_equivocations();
 
                 // -- Persist finalized vertex and state atomically via batch --
                 let finalized_count = state.storage.finalized_vertex_count().unwrap_or(0);
@@ -2057,40 +2087,7 @@ impl Node {
                     tracing::error!(error = %e, "Failed to flush storage to disk");
                 }
 
-                // Check for equivocation evidence, slash, and broadcast to network
-                let evidence_to_broadcast: Vec<_> = state.bft.equivocations().to_vec();
-                let mut slashed_any = false;
-                for evidence in &evidence_to_broadcast {
-                    if let Ok(()) = state.ledger.state.slash_validator(&evidence.voter_id) {
-                        tracing::warn!(
-                            validator = "<redacted>",
-                            round = evidence.round,
-                            "Slashed validator for equivocation"
-                        );
-                        slashed_any = true;
-                    }
-                }
-                // Immediately persist slashed validator state
-                if slashed_any {
-                    for validator in state.ledger.state.all_validators() {
-                        let bond = state
-                            .ledger
-                            .state
-                            .validator_bond(&validator.id)
-                            .unwrap_or(0);
-                        let slashed = state.ledger.state.is_slashed(&validator.id);
-                        if let Err(e) = state.storage.put_validator(validator, bond, slashed) {
-                            tracing::error!(error = %e, "Failed to persist validator state after slashing");
-                        }
-                    }
-                    if let Err(e) = state.storage.flush() {
-                        tracing::error!(error = %e, "Failed to flush after slashing");
-                    }
-                }
-                // Clear processed evidence to avoid re-processing
-                state.bft.clear_equivocations();
-
-                // Broadcast evidence to all peers so they can slash independently
+                // Broadcast equivocation evidence to all peers so they can slash independently
                 for evidence in evidence_to_broadcast {
                     let _ = self
                         .p2p
@@ -2138,12 +2135,12 @@ impl Node {
                     let vrf_input = new_seed.vrf_input(&self.our_validator_id);
                     let vrf = VrfOutput::evaluate(&self.keypair, &vrf_input);
 
-                    // Update BFT for the new epoch
-                    state.bft.epoch = dag_epoch;
-                    state.bft.set_epoch_context(new_seed, total_validators);
-                    state.bft.clear_epoch_caches();
+                    // Preserve current committee for cross-epoch equivocation verification
+                    state.bft.preserve_committee_history();
 
-                    // Update committee from eligible validators (respects activation_epoch)
+                    // Compute new committee BEFORE clearing VRF commitments.
+                    // clear_epoch_caches() wipes vrf_commitments, so we must
+                    // filter by VRF commitment while they still exist.
                     let new_epoch = dag_epoch;
                     let all_active: Vec<_> = state
                         .ledger
@@ -2154,18 +2151,22 @@ impl Node {
                         .cloned()
                         .collect();
 
-                    if total_validators > crate::constants::COMMITTEE_SIZE {
-                        // Seed committee with validators that have VRF commitments.
-                        // VRF verification remains mandatory since total_validators > committee.len().
-                        state.bft.committee = all_active
+                    let new_committee = if total_validators > crate::constants::COMMITTEE_SIZE {
+                        all_active
                             .into_iter()
                             .filter(|v| state.bft.vrf_commitment(&v.id).is_some())
                             .take(crate::constants::COMMITTEE_SIZE)
-                            .collect();
+                            .collect()
                     } else {
                         // Small network: all validators form the committee.
-                        state.bft.committee = all_active;
-                    }
+                        all_active
+                    };
+
+                    // Now update BFT for the new epoch
+                    state.bft.epoch = dag_epoch;
+                    state.bft.set_epoch_context(new_seed, total_validators);
+                    state.bft.clear_epoch_caches();
+                    state.bft.committee = new_committee;
 
                     if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
                         tracing::info!(epoch = dag_epoch, "Selected for committee via VRF");
@@ -2332,6 +2333,20 @@ impl Node {
                 );
                 let _ = self.p2p.broadcast(Message::GetTips, None).await;
                 let _ = self.p2p.broadcast(Message::GetEpochState, None).await;
+
+                // On staleness, advance the BFT round so a new leader is selected.
+                // This implements a basic view-change: if the current round's leader
+                // is offline and no certificate arrives, we skip to the next round
+                // rather than waiting indefinitely.
+                if stale {
+                    let mut state = self.state.write().await;
+                    state.bft.advance_round();
+                    state.ledger.dag.advance_round();
+                    tracing::info!(
+                        new_round = state.bft.round,
+                        "View-change: advanced to next round"
+                    );
+                }
             }
         }
     }
@@ -2475,6 +2490,10 @@ impl Node {
 
     /// Try to propose a new vertex if we're on the committee.
     async fn try_propose_vertex(&self) {
+        // Only propose when fully synced to avoid proposing based on stale state
+        if !matches!(self.sync_state, SyncState::Synced) {
+            return;
+        }
         let vrf = match &self.our_vrf_output {
             Some(vrf) => vrf.clone(),
             None => return, // Not on committee

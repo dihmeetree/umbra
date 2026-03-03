@@ -337,7 +337,7 @@ impl BftState {
         if self.committee.is_empty() {
             return None;
         }
-        let idx = self.round as usize % self.committee.len();
+        let idx = (self.round % self.committee.len() as u64) as usize;
         Some(&self.committee[idx])
     }
 
@@ -388,9 +388,19 @@ impl BftState {
             if self.next_round_votes.len() >= max_buffered {
                 return None;
             }
-            // Validate committee membership before buffering.
-            if self.committee.iter().any(|v| v.id == vote.voter_id) {
-                self.next_round_votes.push(vote);
+            // Verify signature before buffering to prevent an attacker from
+            // filling the buffer with fake votes that displace legitimate ones.
+            if let Some(voter) = self.committee.iter().find(|v| v.id == vote.voter_id) {
+                let msg = vote_sign_data(
+                    &vote.vertex_id,
+                    vote.epoch,
+                    vote.round,
+                    &vote.vote_type,
+                    &self.chain_id,
+                );
+                if voter.public_key.verify(&msg, &vote.signature) {
+                    self.next_round_votes.push(vote);
+                }
             }
             return None;
         }
@@ -582,22 +592,6 @@ impl BftState {
         }
     }
 
-    /// Advance round for view-change: clears votes but preserves equivocations.
-    ///
-    /// Use this instead of `advance_round()` when the round change is triggered
-    /// by a timeout (view-change), since equivocation evidence from the timed-out
-    /// round should still be processed.
-    pub fn try_advance_round(&mut self) {
-        self.votes.clear();
-        self.round_votes.clear();
-        self.round += 1;
-
-        let buffered = std::mem::take(&mut self.next_round_votes);
-        for vote in buffered {
-            self.receive_vote(vote);
-        }
-    }
-
     /// Clear processed equivocation evidence (call after slashing).
     pub fn clear_equivocations(&mut self) {
         self.equivocations.clear();
@@ -695,6 +689,22 @@ impl BftState {
         self.equivocations.clear();
         self.vrf_commitments.clear();
         self.next_round_votes.clear();
+    }
+
+    /// Preserve the current committee in history for cross-epoch equivocation verification.
+    ///
+    /// Must be called before epoch transitions to retain the ability to verify
+    /// equivocation evidence from the previous epoch after advancing.
+    pub fn preserve_committee_history(&mut self) {
+        if !self.committee.is_empty() {
+            self.historical_committees
+                .push_back((self.epoch, self.committee.clone()));
+            while self.historical_committees.len()
+                > crate::constants::MAX_EQUIVOCATION_EVIDENCE_EPOCHS
+            {
+                self.historical_committees.pop_front();
+            }
+        }
     }
 
     /// Get a certificate for a vertex.
@@ -2797,6 +2807,148 @@ mod tests {
             vrf_proof: None,
         };
         bft.receive_vote(vote);
+        assert!(bft.next_round_votes.is_empty());
+    }
+
+    #[test]
+    fn next_round_votes_replayed_on_advance_produce_certificate() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        bft.set_our_keypair(keypairs[0].clone());
+
+        let vertex_id = VertexId([42u8; 32]);
+        let quorum = dynamic_quorum(4);
+
+        // Buffer votes for round 1 while BFT is at round 0
+        for kp in keypairs.iter().take(quorum) {
+            let voter_id = kp.public.fingerprint();
+            let msg = vote_sign_data(&vertex_id, 0, 1, &VoteType::Accept, &chain_id);
+            let sig = kp.sign(&msg);
+            let vote = Vote {
+                vertex_id,
+                voter_id,
+                epoch: 0,
+                round: 1,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            };
+            bft.receive_vote(vote);
+        }
+
+        assert_eq!(bft.next_round_votes.len(), quorum);
+        assert!(bft.get_certificate(&vertex_id).is_none());
+
+        // Advancing should replay buffered votes and produce a certificate
+        bft.advance_round();
+        assert_eq!(bft.round, 1);
+        assert!(bft.get_certificate(&vertex_id).is_some());
+    }
+
+    #[test]
+    fn cross_epoch_equivocation_verification() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        bft.set_our_keypair(keypairs[0].clone());
+
+        // Create equivocation evidence in epoch 0
+        let vertex1 = VertexId([1u8; 32]);
+        let vertex2 = VertexId([2u8; 32]);
+        let equivocator = &keypairs[1];
+        let voter_id = equivocator.public.fingerprint();
+
+        let msg1 = vote_sign_data(&vertex1, 0, 0, &VoteType::Accept, &chain_id);
+        let sig1 = equivocator.sign(&msg1);
+        let msg2 = vote_sign_data(&vertex2, 0, 0, &VoteType::Accept, &chain_id);
+        let sig2 = equivocator.sign(&msg2);
+
+        let evidence = EquivocationEvidence {
+            voter_id,
+            epoch: 0,
+            round: 0,
+            first_vertex: vertex1,
+            second_vertex: vertex2,
+            first_signature: sig1,
+            second_signature: sig2,
+            first_vote_type: VoteType::Accept,
+            second_vote_type: VoteType::Accept,
+        };
+
+        // Verify in current epoch (epoch 0)
+        assert!(bft.verify_equivocation_evidence(&evidence));
+
+        // Advance to epoch 1, preserving history
+        bft.preserve_committee_history();
+        bft.advance_epoch(1, validators.clone());
+
+        // Should still verify via historical committees
+        assert!(bft.verify_equivocation_evidence(&evidence));
+    }
+
+    #[test]
+    fn preserve_committee_history_caps_at_max() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        bft.set_our_keypair(keypairs[0].clone());
+
+        // Advance through many epochs, preserving history each time
+        for epoch in 1..=(crate::constants::MAX_EQUIVOCATION_EVIDENCE_EPOCHS + 5) {
+            bft.preserve_committee_history();
+            bft.advance_epoch(epoch as u64, validators.clone());
+        }
+
+        // Evidence from epoch 0 (oldest) should no longer be verifiable
+        let vertex1 = VertexId([1u8; 32]);
+        let vertex2 = VertexId([2u8; 32]);
+        let msg1 = vote_sign_data(&vertex1, 0, 0, &VoteType::Accept, &chain_id);
+        let sig1 = keypairs[1].sign(&msg1);
+        let msg2 = vote_sign_data(&vertex2, 0, 0, &VoteType::Accept, &chain_id);
+        let sig2 = keypairs[1].sign(&msg2);
+
+        let old_evidence = EquivocationEvidence {
+            voter_id: keypairs[1].public.fingerprint(),
+            epoch: 0,
+            round: 0,
+            first_vertex: vertex1,
+            second_vertex: vertex2,
+            first_signature: sig1,
+            second_signature: sig2,
+            first_vote_type: VoteType::Accept,
+            second_vote_type: VoteType::Accept,
+        };
+        assert!(!bft.verify_equivocation_evidence(&old_evidence));
+    }
+
+    #[test]
+    fn next_round_votes_rejects_invalid_signature() {
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = test_chain_id();
+        let mut bft = BftState::new(0, validators.clone(), chain_id);
+        bft.set_our_keypair(keypairs[0].clone());
+
+        let vertex_id = VertexId([42u8; 32]);
+
+        // Create a vote with a valid voter_id but signed by a different key
+        let voter_id = keypairs[1].public.fingerprint();
+        let wrong_key = &keypairs[2]; // Sign with wrong key
+        let msg = vote_sign_data(&vertex_id, 0, 1, &VoteType::Accept, &chain_id);
+        let bad_sig = wrong_key.sign(&msg);
+
+        let vote = Vote {
+            vertex_id,
+            voter_id,
+            epoch: 0,
+            round: 1,
+            vote_type: VoteType::Accept,
+            signature: bad_sig,
+            vrf_proof: None,
+        };
+        bft.receive_vote(vote);
+
+        // Should not be buffered because signature verification fails
         assert!(bft.next_round_votes.is_empty());
     }
 }

@@ -514,6 +514,11 @@ impl ChainState {
                 if !validator.active {
                     return Err(StateError::ValidatorNotActive);
                 }
+                // Prevent deregistration from dropping below the minimum validator
+                // count needed for BFT safety.
+                if self.total_validators() <= crate::constants::MIN_VALIDATORS {
+                    return Err(StateError::TooFewValidators);
+                }
                 if self.slashed_validators.contains(validator_id) {
                     return Err(StateError::ValidatorSlashed);
                 }
@@ -799,6 +804,9 @@ impl ChainState {
 
     /// Slash a validator: forfeit bond and mark as permanently slashed.
     pub fn slash_validator(&mut self, validator_id: &Hash) -> Result<(), StateError> {
+        if self.slashed_validators.contains(validator_id) {
+            return Ok(()); // Already slashed, nothing to do
+        }
         let validator = self
             .validators
             .get_mut(validator_id)
@@ -1246,7 +1254,7 @@ impl ChainState {
             seed: meta.epoch_seed,
         };
 
-        Ok(ChainState {
+        let restored = ChainState {
             chain_id: crate::constants::chain_id_for_network(network),
             commitments,
             commitment_tree,
@@ -1266,7 +1274,18 @@ impl ChainState {
             total_minted: meta.total_minted,
             commitment_index,
             last_slash_epoch: meta.last_slash_epoch,
-        })
+        };
+
+        // Verify the computed state root matches the stored snapshot to detect
+        // corrupt or tampered snapshot data (e.g., inconsistent validator state).
+        let computed_root = restored.state_root();
+        if computed_root != meta.state_root {
+            return Err(StateError::StorageError(
+                "restored state root does not match stored snapshot".into(),
+            ));
+        }
+
+        Ok(restored)
     }
 }
 
@@ -1351,7 +1370,12 @@ impl Ledger {
         if self.dag.is_finalized(vertex_id) {
             return Ok(None);
         }
-        self.dag.finalize(vertex_id);
+        if !self.dag.finalize(vertex_id) {
+            return Err(StateError::StorageError(format!(
+                "cannot finalize vertex {:?}: not present in DAG",
+                vertex_id
+            )));
+        }
         if let Some(v) = self.dag.get(vertex_id) {
             let v = v.clone();
             return self.state.apply_vertex(&v);
@@ -1411,13 +1435,14 @@ impl Ledger {
         meta: &ChainStateMeta,
         network: crate::constants::NetworkId,
     ) -> Result<Self, StateError> {
-        // Detect interrupted snapshot import
+        // Detect interrupted snapshot import.
+        // The flag is intentionally NOT cleared here so the corruption is
+        // detected on future restarts too. It should only be cleared when
+        // a clean import completes successfully.
         if storage
             .is_import_in_progress()
             .map_err(|e| StateError::StorageError(e.to_string()))?
         {
-            // Clear the flag so next startup can proceed after a fresh sync
-            let _ = storage.set_import_in_progress(false);
             return Err(StateError::StorageError(
                 "interrupted snapshot import detected; state may be incomplete. \
                  A fresh sync is required."
@@ -1497,6 +1522,8 @@ pub enum StateError {
     InvalidCertificate,
     #[error("duplicate output commitment within vertex")]
     DuplicateCommitment,
+    #[error("deregistration would leave fewer than MIN_VALIDATORS active validators")]
+    TooFewValidators,
 }
 
 #[cfg(test)]

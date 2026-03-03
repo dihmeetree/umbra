@@ -80,8 +80,14 @@ impl Vertex {
         hasher.update(&round.to_le_bytes());
         hasher.update(proposer_fingerprint);
         hasher.update(tx_root);
-        if let Some(vrf_val) = vrf_value {
-            hasher.update(vrf_val);
+        match vrf_value {
+            Some(vrf_val) => {
+                hasher.update(&[1u8]);
+                hasher.update(vrf_val);
+            }
+            None => {
+                hasher.update(&[0u8]);
+            }
         }
         hasher.update(state_root);
         hasher.update(&protocol_version.to_le_bytes());
@@ -270,7 +276,9 @@ impl Dag {
         self.insert_impl(vertex, false)
     }
 
-    /// Insert a vertex, optionally skipping signature verification (for testing/genesis).
+    /// Insert a vertex, skipping signature verification.
+    ///
+    /// Only for tests and genesis initialization — production code must use `insert()`.
     #[doc(hidden)]
     pub fn insert_unchecked(&mut self, vertex: Vertex) -> Result<(), VertexError> {
         self.insert_impl(vertex, true)
@@ -330,6 +338,14 @@ impl Dag {
             }
         }
 
+        // Validate epoch consistency: the vertex's epoch must match the
+        // epoch derived from its round to prevent epoch-spoofing attacks
+        // (e.g., claiming a very high epoch to avoid pruning).
+        let expected_epoch = vertex.round / crate::constants::EPOCH_LENGTH;
+        if vertex.epoch != expected_epoch {
+            return Err(VertexError::EpochMismatch);
+        }
+
         // Check for duplicate vertex
         if self.vertices.contains_key(&vertex.id) {
             return Err(VertexError::DuplicateVertex);
@@ -368,10 +384,12 @@ impl Dag {
     }
 
     /// Mark a vertex as finalized (achieved BFT quorum).
+    ///
+    /// Returns true only if the vertex was newly finalized. Returns false if
+    /// the vertex is not in the DAG or was already finalized.
     pub fn finalize(&mut self, vertex_id: &VertexId) -> bool {
         if self.vertices.contains_key(vertex_id) {
-            self.finalized.insert(*vertex_id);
-            true
+            self.finalized.insert(*vertex_id)
         } else {
             false
         }
@@ -486,7 +504,12 @@ impl Dag {
         }
     }
 
-    /// Remove finalized vertices older than the given epoch from in-memory maps.
+    /// Remove old vertices from in-memory maps.
+    ///
+    /// Prunes both finalized and unfinalized vertices older than the given
+    /// epoch. Unfinalized vertices from old epochs are pruned to prevent
+    /// memory exhaustion from minority forks or spam that never achieves
+    /// BFT quorum.
     ///
     /// Vertices remain in sled storage for historical sync. Returns the number
     /// of vertices pruned.
@@ -494,16 +517,12 @@ impl Dag {
     /// Known limitation: `proposer_vertex_count` is not adjusted when pruning
     /// old epochs, so per-proposer caps are only accurate within the current epoch.
     pub fn prune_finalized(&mut self, before_epoch: u64) -> usize {
+        // Collect all vertices (finalized and unfinalized) from old epochs
         let to_prune: Vec<VertexId> = self
-            .finalized
+            .vertices
             .iter()
-            .filter(|vid| {
-                self.vertices
-                    .get(vid)
-                    .map(|v| v.epoch < before_epoch)
-                    .unwrap_or(false)
-            })
-            .copied()
+            .filter(|(_, v)| v.epoch < before_epoch)
+            .map(|(vid, _)| *vid)
             .collect();
 
         let count = to_prune.len();
@@ -514,10 +533,11 @@ impl Dag {
             self.tips.remove(vid);
         }
 
-        // Clean up stale child references
-        for children_list in self.children.values_mut() {
+        // Clean up stale child references and remove empty entries
+        self.children.retain(|_, children_list| {
             children_list.retain(|c| self.vertices.contains_key(c));
-        }
+            !children_list.is_empty()
+        });
 
         count
     }
@@ -592,6 +612,8 @@ pub enum VertexError {
     ProposerRateLimited,
     #[error("vertex timestamp is before a parent timestamp")]
     TimestampBeforeParent,
+    #[error("vertex epoch does not match round")]
+    EpochMismatch,
 }
 
 #[cfg(test)]
@@ -599,9 +621,10 @@ mod tests {
     use super::*;
 
     fn make_vertex_with_nonce(parents: Vec<VertexId>, round: u64, nonce: u8) -> Vertex {
+        let epoch = round / crate::constants::EPOCH_LENGTH;
         let id = Vertex::compute_id(
             &parents,
-            0,
+            epoch,
             round,
             &[nonce; 32],
             &[round as u8; 32],
@@ -612,7 +635,7 @@ mod tests {
         Vertex {
             id,
             parents,
-            epoch: 0,
+            epoch,
             round,
             proposer: SigningPublicKey {
                 dilithium: vec![nonce; 32],
@@ -844,11 +867,12 @@ mod tests {
         let gid = genesis.id;
         let mut dag = Dag::new(genesis);
 
-        // Create vertex at epoch 5
+        // Create vertex at epoch 5 (round 5000)
+        let round1 = 5 * crate::constants::EPOCH_LENGTH;
         let id5 = Vertex::compute_id(
             &[gid],
             5,
-            1,
+            round1,
             &[1; 32],
             &[1; 32],
             None,
@@ -859,7 +883,7 @@ mod tests {
             id: id5,
             parents: vec![gid],
             epoch: 5,
-            round: 1,
+            round: round1,
             proposer: SigningPublicKey {
                 dilithium: vec![1; 32],
                 sphincs: vec![0; 64],
@@ -874,11 +898,12 @@ mod tests {
         dag.insert_unchecked(v1.clone()).unwrap();
         dag.finalize(&v1.id);
 
-        // Create vertex at epoch 200
+        // Create vertex at epoch 200 (round 200000)
+        let round2 = 200 * crate::constants::EPOCH_LENGTH;
         let id200 = Vertex::compute_id(
             &[v1.id],
             200,
-            2,
+            round2,
             &[2; 32],
             &[2; 32],
             None,
@@ -889,7 +914,7 @@ mod tests {
             id: id200,
             parents: vec![v1.id],
             epoch: 200,
-            round: 2,
+            round: round2,
             proposer: SigningPublicKey {
                 dilithium: vec![2; 32],
                 sphincs: vec![0; 64],
@@ -1164,10 +1189,11 @@ mod tests {
         dag.insert_unchecked(v1.clone()).unwrap();
         dag.finalize(&v1.id);
 
+        let round2 = 100 * crate::constants::EPOCH_LENGTH;
         let id2 = Vertex::compute_id(
             &[v1.id],
             100,
-            2,
+            round2,
             &[2; 32],
             &[2; 32],
             None,
@@ -1178,7 +1204,7 @@ mod tests {
             id: id2,
             parents: vec![v1.id],
             epoch: 100,
-            round: 2,
+            round: round2,
             proposer: SigningPublicKey {
                 dilithium: vec![2; 32],
                 sphincs: vec![0; 64],
@@ -2067,8 +2093,8 @@ mod tests {
         dag.insert_unchecked(v).unwrap();
 
         assert!(dag.finalize(&vid));
-        // Second finalize should still return true (already finalized)
-        assert!(dag.finalize(&vid));
+        // Second finalize returns false (already in finalized set)
+        assert!(!dag.finalize(&vid));
         assert!(dag.is_finalized(&vid));
         // Should appear only once in finalized order
         assert_eq!(
@@ -2201,5 +2227,225 @@ mod tests {
         );
         // They should have different IDs because parent count differs
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn reject_timestamp_before_parent() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let v1 = make_vertex(vec![gid], 1);
+        dag.insert_unchecked(v1.clone()).unwrap();
+
+        // Create v2 with timestamp before v1's timestamp
+        let bad_ts = v1.timestamp.saturating_sub(1);
+        let id2 = Vertex::compute_id(
+            &[v1.id],
+            0,
+            2,
+            &[0; 32],
+            &[2; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
+        let v2 = Vertex {
+            id: id2,
+            parents: vec![v1.id],
+            epoch: 0,
+            round: 2,
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
+            transactions: vec![],
+            timestamp: bad_ts,
+            state_root: [0u8; 32],
+            signature: Signature::empty(),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        assert!(matches!(
+            dag.insert_unchecked(v2),
+            Err(VertexError::TimestampBeforeParent)
+        ));
+    }
+
+    #[test]
+    fn reject_duplicate_transaction_in_vertex() {
+        use crate::transaction::Transaction;
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Build a minimal transfer transaction with all required fields
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            fee: 0,
+            chain_id: [0u8; 32],
+            expiry_epoch: 0,
+            balance_proof: crate::crypto::stark::types::BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+            tx_type: crate::transaction::TxType::Transfer,
+        };
+
+        // Insert the same tx twice in one vertex
+        let txs = vec![tx.clone(), tx];
+        let tx_hashes: Vec<crate::Hash> = txs.iter().map(|t| t.tx_id().0).collect();
+        let (tx_root, _) = crate::crypto::proof::build_merkle_tree(&tx_hashes);
+
+        let id = Vertex::compute_id(
+            &[gid],
+            0,
+            1,
+            &[0; 32],
+            &tx_root,
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 0,
+            round: 1,
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
+            transactions: txs,
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature::empty(),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        assert!(matches!(
+            dag.insert_unchecked(v),
+            Err(VertexError::DuplicateTransaction)
+        ));
+    }
+
+    #[test]
+    fn reject_proposer_rate_limited() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let limit = crate::constants::MAX_VERTICES_PER_PROPOSER_PER_EPOCH;
+        let mut parent = gid;
+        // Insert exactly `limit` vertices from the same proposer (nonce=0)
+        for i in 0..limit {
+            let v = make_vertex(vec![parent], (i + 1) as u64);
+            parent = v.id;
+            dag.insert_unchecked(v).unwrap();
+        }
+
+        // The next one from the same proposer should be rejected
+        let v = make_vertex(vec![parent], (limit + 1) as u64);
+        assert!(matches!(
+            dag.insert_unchecked(v),
+            Err(VertexError::ProposerRateLimited)
+        ));
+    }
+
+    #[test]
+    fn proposer_rate_limit_resets_on_epoch_advance() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let limit = crate::constants::MAX_VERTICES_PER_PROPOSER_PER_EPOCH;
+        let mut parent = gid;
+        for i in 0..limit {
+            let v = make_vertex(vec![parent], (i + 1) as u64);
+            parent = v.id;
+            dag.insert_unchecked(v).unwrap();
+        }
+
+        // Rate limited now
+        let v = make_vertex(vec![parent], (limit + 1) as u64);
+        assert!(matches!(
+            dag.insert_unchecked(v),
+            Err(VertexError::ProposerRateLimited)
+        ));
+
+        // Advance through epoch boundary to reset counters
+        for _ in 0..crate::constants::EPOCH_LENGTH {
+            dag.advance_round();
+        }
+
+        // Same proposer can insert again after epoch advance
+        let v = make_vertex(vec![parent], crate::constants::EPOCH_LENGTH + 1);
+        dag.insert_unchecked(v).unwrap();
+    }
+
+    #[test]
+    fn reject_epoch_mismatch() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Create a vertex that claims epoch 5 but has round 1 (should be epoch 0)
+        let id = Vertex::compute_id(
+            &[gid],
+            5,
+            1,
+            &[0; 32],
+            &[1; 32],
+            None,
+            &[0u8; 32],
+            crate::constants::PROTOCOL_VERSION_ID,
+        );
+        let v = Vertex {
+            id,
+            parents: vec![gid],
+            epoch: 5,
+            round: 1,
+            proposer: SigningPublicKey {
+                dilithium: vec![0; 32],
+                sphincs: vec![0; 64],
+            },
+            transactions: vec![],
+            timestamp: 1000,
+            state_root: [0u8; 32],
+            signature: Signature::empty(),
+            vrf_proof: None,
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        };
+        assert!(matches!(
+            dag.insert_unchecked(v),
+            Err(VertexError::EpochMismatch)
+        ));
+    }
+
+    #[test]
+    fn prune_also_removes_unfinalized_old_vertices() {
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        // Insert a vertex at epoch 0 but do NOT finalize it
+        let v1 = make_vertex(vec![gid], 1);
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+        assert!(!dag.is_finalized(&v1_id));
+
+        // Advance the DAG epoch past pruning threshold
+        for _ in 0..(crate::constants::EPOCH_LENGTH * 2) {
+            dag.advance_round();
+        }
+
+        // Prune before epoch 1 should remove both genesis (finalized) and v1 (unfinalized)
+        let pruned = dag.prune_finalized(1);
+        assert!(pruned >= 2);
+        assert!(dag.get(&v1_id).is_none());
     }
 }

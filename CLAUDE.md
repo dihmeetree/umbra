@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~35k lines across 45 source files with 1099 tests. Single crate, no workspace.
+Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~35k lines across 45 source files with 1109 tests. Single crate, no workspace.
 
 ## Build & Test
 
 ```bash
 cargo build --release        # Full build (requires C compiler for PQClean backends)
 cargo check                  # Fast type-check
-cargo test --features fast-tests # Fast suite (~1099 tests, ~1.5 min)
+cargo test --features fast-tests # Fast suite (~1109 tests, ~1.5 min)
 cargo test                       # Full suite (includes real SPHINCS+, ~3 hrs)
 cargo test <module>::tests       # Run specific module tests (e.g., consensus::bft::tests)
 cargo clippy --all-targets       # Lint — must be warning-free
@@ -70,3 +70,5 @@ Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` eve
 - STARK proof generation is expensive but mitigated by `[profile.dev.package]` optimizations in Cargo.toml.
 - The `Signature` type wraps `Vec<u8>` — Dilithium5 signatures are 4627 bytes each.
 - `VoteType` must be included when verifying vote signatures (`vote_sign_data` includes it).
+- `finalize()` on `Dag` returns `bool` — `true` if newly finalized, `false` if already finalized. Callers must handle duplicates.
+- Epoch transition order matters: compute the new committee BEFORE calling `clear_epoch_caches()`, and call `preserve_committee_history()` to retain old committees for cross-epoch equivocation verification.

@@ -149,7 +149,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **1099 tests**.
+**~35,000 lines of Rust** across 45 source files with **1109 tests**.
 
 ## Building
 
@@ -525,13 +525,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (~1099 tests)
+cargo test                       # Full suite (~1109 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1099 tests cover:
+All 1109 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -943,6 +943,18 @@ All transaction validity is verified via zk-STARKs:
 - **DAG safe indexing** — `finalized_order()` uses fallible `.get()` lookups instead of panicking `[]` indexing, gracefully handling edge cases where finalized vertices may be missing from the in-memory map after pruning
 - **P2P frame padding** — encrypted P2P frames are padded to 1024-byte bucket boundaries, preventing traffic analysis from distinguishing message types by size
 - **Dandelion++ timing jitter** — stem-phase forwarding adds exponentially-distributed random delays before relaying to the next hop, preventing timing decomposition attacks for sender deanonymization
+- **Minimum validator count** — deregistration is rejected when active validators would drop to `MIN_VALIDATORS` (4), preserving BFT quorum guarantees
+- **Epoch validation on vertices** — DAG insertion verifies `epoch == round / EPOCH_LENGTH`, preventing epoch-spoofing attacks that could bypass committee checks
+- **Consensus message sanitization** — `sanitize()` truncates `BftCertificate.signatures`, `FinalizedVerticesResponse.vertices`, and `EpochStateResponse.committee` to protocol limits, preventing oversized consensus payloads from consuming unbounded memory
+- **Next-round vote signature verification** — votes buffered for future rounds are signature-verified before storage, preventing memory exhaustion from forged votes
+- **State root verification on restore** — `restore_from_storage()` recomputes the state root after reconstruction and rejects mismatches, detecting storage corruption or tampering
+- **Cross-epoch equivocation detection** — BFT state preserves historical committee lists (capped at `MAX_COMMITTEE_HISTORY`), allowing equivocation evidence to be verified even after epoch transitions
+- **Sync-state guards on consensus participation** — voting and vertex proposal are suppressed while the node is syncing, preventing partially-synced nodes from casting invalid votes
+- **View-change round advancement** — when staleness is detected (no finalization within timeout), the BFT round is advanced to enable view changes and prevent permanent liveness stalls
+- **VRF domain separation** — `compute_id` includes a presence flag byte (0/1) before optional VRF data, preventing collisions between vertices with and without VRF proofs
+- **Idempotent slashing** — `slash_validator()` short-circuits if the validator is already slashed, preventing double-penalization from replayed equivocation evidence
+- **Atomic slashing before flush** — equivocation processing runs before the storage batch is flushed, ensuring slashing state is persisted atomically with vertex finalization
+- **Snapshot peer consistency** — snapshot chunk requests are sent to the quorum-selected peer rather than the vertex sender, preventing chunk fetches from unrelated peers
 - **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation and constant-time comparison on KEM decapsulation failure, equalizing timing with the success path
 - **Deterministic weight-based fees** — transfer fees are computed deterministically from transaction shape (`fee = FEE_BASE + inputs * FEE_PER_INPUT + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB`), eliminating fee-based fingerprinting entirely since every transaction of the same shape pays the exact same fee with no user choice involved
 - **RPC rate limiting** — commitment-proof queries are rate-limited per IP (60 requests per 60-second window) to prevent Merkle tree enumeration attacks that could map wallet activity to commitment indices
@@ -985,7 +997,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 1099 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (four internal audits have been completed, addressing 55+ findings across all severity levels and expanding test coverage from 226 to 1109 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 
