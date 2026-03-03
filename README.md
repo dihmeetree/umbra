@@ -795,6 +795,7 @@ Proves in zero knowledge:
 | `chacha20poly1305`               | Standard AEAD (XChaCha20-Poly1305 / ChaCha20-Poly1305)   |
 | `winterfell`                     | zk-STARK prover/verifier (Rescue Prime, Goldilocks field) |
 | `argon2`                         | Memory-hard password hashing for wallet file encryption   |
+| `rpassword`                      | Secure hidden password input for wallet CLI                |
 | `zeroize`                        | Secure memory clearing for secret key material            |
 | `serde` + `bincode`              | Serialization                                             |
 | `rand`                           | Cryptographic randomness                                  |
