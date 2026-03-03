@@ -25,6 +25,29 @@ use crate::crypto::vrf::EpochSeed;
 use crate::node::storage::{ChainStateMeta, Storage, ValidatorRecord};
 use crate::transaction::{deregister_sign_data, Transaction, TxOutput, TxType};
 use crate::Hash;
+use winterfell::math::FieldElement;
+
+type Felt = winterfell::math::fields::f64::BaseElement;
+
+/// Convert 4 Felt values to a 32-byte array (little-endian u64 per felt).
+fn felt_state_to_bytes(hash: &[Felt; 4]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        out[i * 8..(i + 1) * 8].copy_from_slice(&hash[i].as_int().to_le_bytes());
+    }
+    out
+}
+
+/// Convert a 32-byte array to 4 Felt values (little-endian u64 per felt).
+#[allow(dead_code)]
+fn bytes_to_felt_state(bytes: &[u8; 32]) -> [Felt; 4] {
+    let mut result = [Felt::ZERO; 4];
+    for i in 0..4 {
+        let val = u64::from_le_bytes(bytes[i * 8..(i + 1) * 8].try_into().unwrap());
+        result[i] = Felt::new(val);
+    }
+    result
+}
 
 /// Complete state snapshot for fast node bootstrap.
 ///
@@ -41,6 +64,12 @@ pub struct SnapshotData {
     pub commitment_levels: Vec<(usize, usize, Hash)>,
     /// All revealed nullifier hashes.
     pub nullifiers: Vec<Hash>,
+    /// All deployed contracts.
+    #[serde(default)]
+    pub contracts: Vec<crate::vm::ContractCode>,
+    /// Per-contract state hashes.
+    #[serde(default)]
+    pub contract_states: Vec<(Hash, [u8; 32])>,
 }
 
 /// Import a `SnapshotData` into local storage for `Ledger::restore_from_storage()`.
@@ -90,12 +119,26 @@ pub fn import_snapshot_to_storage(
             .map_err(|e| StateError::StorageError(e.to_string()))?;
     }
 
-    // 5. Write chain state meta
+    // 5. Write contracts
+    for contract in &snapshot.contracts {
+        storage
+            .put_contract(contract)
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+    }
+
+    // 6. Write contract states
+    for (contract_id, state_hash) in &snapshot.contract_states {
+        storage
+            .put_contract_state(contract_id, state_hash)
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+    }
+
+    // 7. Write chain state meta
     storage
         .put_chain_state_meta(&snapshot.meta)
         .map_err(|e| StateError::StorageError(e.to_string()))?;
 
-    // 6. Flush to disk
+    // 8. Flush to disk
     storage
         .flush()
         .map_err(|e| StateError::StorageError(e.to_string()))?;
@@ -163,6 +206,10 @@ pub struct ChainState {
     /// Epoch of the most recent slashing event. Used to enforce elevated bond
     /// requirements for new validator registrations during the cooldown period.
     last_slash_epoch: Option<u64>,
+    /// Deployed smart contracts (contract_id -> ContractCode).
+    contract_registry: HashMap<Hash, crate::vm::ContractCode>,
+    /// Per-contract state hashes (contract_id -> [u8; 32] encoding [Felt; 4]).
+    contract_states: HashMap<Hash, [u8; 32]>,
 }
 
 /// The full ledger coordinating DAG, BFT, and chain state.
@@ -201,6 +248,8 @@ impl ChainState {
             total_minted: 0,
             commitment_index: HashMap::new(),
             last_slash_epoch: None,
+            contract_registry: HashMap::new(),
+            contract_states: HashMap::new(),
         }
     }
 
@@ -300,6 +349,7 @@ impl ChainState {
         // errors or commitment tree overflow) but we must not leave state
         // partially modified.
         let nullifier_hash_before = self.nullifier_hash;
+        let contract_states_before = self.contract_states.clone();
         let commitment_count_before = self.commitments.len();
         let tree_leaves_before = self.commitment_tree.num_leaves();
         let mut applied_nullifiers: Vec<Nullifier> = Vec::new();
@@ -340,6 +390,7 @@ impl ChainState {
                     // Rollback: restore state to pre-Pass-2 condition
                     self.epoch_fees = fees_before;
                     self.nullifier_hash = nullifier_hash_before;
+                    self.contract_states = contract_states_before;
                     // Complete the full rollback loop before returning, but
                     // track sled failures. If any sled removal fails, the nullifier
                     // remains as "spent" in persistent storage (fail-closed: safe
@@ -501,6 +552,26 @@ impl ChainState {
                     return Err(StateError::InsufficientBond);
                 }
             }
+            TxType::ContractDeploy { bytecode } => {
+                let contract = crate::vm::ContractCode::new(bytecode.clone()).map_err(|e| {
+                    StateError::InvalidTransaction(
+                        crate::transaction::TxValidationError::InvalidContractBytecode(
+                            e.to_string(),
+                        ),
+                    )
+                })?;
+                if self.contract_registry.contains_key(&contract.id) {
+                    return Err(StateError::ContractAlreadyDeployed);
+                }
+                if self.contract_registry.len() >= crate::constants::MAX_CONTRACTS {
+                    return Err(StateError::TooManyContracts);
+                }
+            }
+            TxType::ContractCall { contract_id, .. } => {
+                if !self.contract_registry.contains_key(contract_id) {
+                    return Err(StateError::ContractNotFound);
+                }
+            }
             TxType::ValidatorDeregister {
                 validator_id,
                 auth_signature,
@@ -624,6 +695,61 @@ impl ChainState {
                 }
 
                 self.validator_bonds.insert(vid, bond);
+            }
+            TxType::ContractDeploy { bytecode } => {
+                let contract = crate::vm::ContractCode::new(bytecode.clone()).map_err(|e| {
+                    StateError::InvalidTransaction(
+                        crate::transaction::TxValidationError::InvalidContractBytecode(
+                            e.to_string(),
+                        ),
+                    )
+                })?;
+                self.register_contract(contract)?;
+
+                // Collect fee
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(tx.fee)
+                    .ok_or(StateError::FeeOverflow)?;
+            }
+            TxType::ContractCall {
+                contract_id,
+                execution_proof,
+                ..
+            } => {
+                // Execution proof was verified in validate_structure().
+                // Verify initial_state_hash matches stored state (must be in Pass 2
+                // for correct chaining of multiple calls in the same block).
+                let pub_inputs = crate::crypto::stark::types::ExecutionPublicInputs::from_bytes(
+                    &execution_proof.public_inputs_bytes,
+                )
+                .ok_or_else(|| {
+                    StateError::InvalidTransaction(
+                        crate::transaction::TxValidationError::InvalidExecutionProof(
+                            "failed to deserialize public inputs".into(),
+                        ),
+                    )
+                })?;
+
+                let expected_state = self
+                    .contract_states
+                    .get(contract_id)
+                    .copied()
+                    .unwrap_or([0u8; 32]);
+                let proof_initial = felt_state_to_bytes(&pub_inputs.initial_state_hash);
+                if !crate::constant_time_eq(&proof_initial, &expected_state) {
+                    return Err(StateError::ContractStateMismatch);
+                }
+
+                // Update stored state to final_state_hash
+                let final_state = felt_state_to_bytes(&pub_inputs.final_state_hash);
+                self.contract_states.insert(*contract_id, final_state);
+
+                // Collect fee
+                self.epoch_fees = self
+                    .epoch_fees
+                    .checked_add(tx.fee)
+                    .ok_or(StateError::FeeOverflow)?;
             }
             TxType::ValidatorDeregister {
                 validator_id,
@@ -872,6 +998,8 @@ impl ChainState {
     pub fn state_root(&self) -> Hash {
         let root = self.commitment_tree.root();
         let validator_hash = self.validator_set_hash();
+        let contract_hash = self.contract_registry_hash();
+        let contract_state_hash = self.contract_states_hash();
         crate::hash_concat(&[
             b"umbra.state_root",
             &root,
@@ -880,6 +1008,8 @@ impl ChainState {
             &self.epoch_fees.to_le_bytes(),
             &validator_hash,
             &self.total_minted.to_le_bytes(),
+            &contract_hash,
+            &contract_state_hash,
         ])
     }
 
@@ -905,6 +1035,77 @@ impl ChainState {
             hasher.update(&[slashed]);
         }
         *hasher.finalize().as_bytes()
+    }
+
+    /// Compute a deterministic hash over the contract registry.
+    ///
+    /// Contract IDs are sorted to ensure deterministic ordering regardless of
+    /// HashMap iteration order.
+    fn contract_registry_hash(&self) -> Hash {
+        let mut sorted_ids: Vec<&Hash> = self.contract_registry.keys().collect();
+        sorted_ids.sort();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"umbra.contract_registry");
+        hasher.update(&(sorted_ids.len() as u64).to_le_bytes());
+        for cid in sorted_ids {
+            hasher.update(cid);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Compute a deterministic hash over all contract state hashes.
+    fn contract_states_hash(&self) -> Hash {
+        let mut sorted_ids: Vec<&Hash> = self.contract_states.keys().collect();
+        sorted_ids.sort();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"umbra.contract_states");
+        hasher.update(&(sorted_ids.len() as u64).to_le_bytes());
+        for cid in sorted_ids {
+            hasher.update(cid);
+            if let Some(state) = self.contract_states.get(cid) {
+                hasher.update(state);
+            }
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Register a new contract in the registry.
+    pub fn register_contract(
+        &mut self,
+        contract: crate::vm::ContractCode,
+    ) -> Result<(), StateError> {
+        if self.contract_registry.contains_key(&contract.id) {
+            return Err(StateError::ContractAlreadyDeployed);
+        }
+        if self.contract_registry.len() >= crate::constants::MAX_CONTRACTS {
+            return Err(StateError::TooManyContracts);
+        }
+        let id = contract.id;
+        self.contract_registry.insert(id, contract);
+        self.contract_states.insert(id, [0u8; 32]);
+        Ok(())
+    }
+
+    /// Get the stored state hash for a contract.
+    pub fn get_contract_state_hash(&self, id: &Hash) -> Option<&[u8; 32]> {
+        self.contract_states.get(id)
+    }
+
+    /// Check whether a contract with the given ID is deployed.
+    pub fn has_contract(&self, id: &Hash) -> bool {
+        self.contract_registry.contains_key(id)
+    }
+
+    /// Get a deployed contract by its ID.
+    pub fn get_contract(&self, id: &Hash) -> Option<&crate::vm::ContractCode> {
+        self.contract_registry.get(id)
+    }
+
+    /// Get the number of deployed contracts.
+    pub fn contract_count(&self) -> usize {
+        self.contract_registry.len()
     }
 
     /// Get the last finalized vertex ID.
@@ -981,6 +1182,7 @@ impl ChainState {
             finalized_count,
             total_minted: self.total_minted,
             last_slash_epoch: self.last_slash_epoch,
+            contract_count: self.contract_registry.len() as u64,
         }
     }
 
@@ -1010,11 +1212,21 @@ impl ChainState {
             .map(|n| n.0)
             .collect();
 
+        let contracts = storage
+            .get_all_contracts()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+
+        let contract_states = storage
+            .get_all_contract_states()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+
         Ok(SnapshotData {
             meta,
             validators,
             commitment_levels,
             nullifiers,
+            contracts,
+            contract_states,
         })
     }
 
@@ -1252,7 +1464,29 @@ impl ChainState {
             validators.insert(vid, record.validator);
         }
 
-        // 4. Restore epoch state from meta
+        // 4. Load all contracts from storage
+        let stored_contracts = storage
+            .get_all_contracts()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+        let mut contract_registry = HashMap::new();
+        for contract in stored_contracts {
+            contract_registry.insert(contract.id, contract);
+        }
+
+        // 4b. Load all contract state hashes from storage
+        let stored_states = storage
+            .get_all_contract_states()
+            .map_err(|e| StateError::StorageError(e.to_string()))?;
+        let mut contract_states: HashMap<Hash, [u8; 32]> = HashMap::new();
+        for (cid, state_hash) in stored_states {
+            contract_states.insert(cid, state_hash);
+        }
+        // Ensure every registered contract has a state entry (default to zero)
+        for cid in contract_registry.keys() {
+            contract_states.entry(*cid).or_insert([0u8; 32]);
+        }
+
+        // 5. Restore epoch state from meta
         let epoch_seed = EpochSeed {
             epoch: meta.epoch,
             seed: meta.epoch_seed,
@@ -1278,6 +1512,8 @@ impl ChainState {
             total_minted: meta.total_minted,
             commitment_index,
             last_slash_epoch: meta.last_slash_epoch,
+            contract_registry,
+            contract_states,
         };
 
         // Verify the computed state root matches the stored snapshot to detect
@@ -1528,6 +1764,14 @@ pub enum StateError {
     DuplicateCommitment,
     #[error("deregistration would leave fewer than MIN_VALIDATORS active validators")]
     TooFewValidators,
+    #[error("contract already deployed")]
+    ContractAlreadyDeployed,
+    #[error("contract not found")]
+    ContractNotFound,
+    #[error("maximum contract count reached")]
+    TooManyContracts,
+    #[error("contract call initial_state_hash does not match stored state")]
+    ContractStateMismatch,
 }
 
 #[cfg(test)]
@@ -3726,5 +3970,592 @@ mod tests {
         let _first = ledger.apply_vertex_state_only(&genesis);
         let second = ledger.apply_vertex_state_only(&genesis);
         assert!(second.unwrap().is_none());
+    }
+
+    // ---- Contract deploy/call state validation tests ----
+
+    fn make_deploy_tx_for_state(
+        state: &mut ChainState,
+        bytecode: Vec<crate::vm::Opcode>,
+        seed: u8,
+    ) -> Transaction {
+        let serialized_len = crate::serialize(&bytecode).unwrap().len();
+        let deploy_fee = crate::constants::MIN_TX_FEE
+            + (serialized_len as u64) * crate::constants::CONTRACT_DEPLOY_FEE_PER_BYTE;
+        let total_value = deploy_fee + 1000;
+
+        let blinding = BlindingFactor::from_bytes([seed; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[seed]);
+        let commitment = Commitment::commit(total_value, &blinding);
+
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_value,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 1000)
+            .set_tx_type(crate::transaction::TxType::ContractDeploy { bytecode })
+            .set_fee(deploy_fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn state_validate_deploy_accepts_new_contract() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let tx = make_deploy_tx_for_state(
+            &mut state,
+            vec![Opcode::Const { dst: 0, value: 1 }, Opcode::Halt],
+            42,
+        );
+        let result = state.validate_transaction(&tx);
+        assert!(result.is_ok(), "deploy should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn state_validate_deploy_rejects_duplicate_contract() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let bytecode = vec![Opcode::Const { dst: 0, value: 1 }, Opcode::Halt];
+
+        // Deploy first
+        let tx1 = make_deploy_tx_for_state(&mut state, bytecode.clone(), 42);
+        state.validate_transaction(&tx1).unwrap();
+        state.apply_transaction_unchecked(&tx1).unwrap();
+
+        // Try to deploy same bytecode again
+        let tx2 = make_deploy_tx_for_state(&mut state, bytecode, 43);
+        let result = state.validate_transaction(&tx2);
+        assert!(
+            matches!(result, Err(StateError::ContractAlreadyDeployed)),
+            "duplicate deploy should fail: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn state_apply_deploy_registers_contract() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let bytecode = vec![Opcode::Const { dst: 0, value: 99 }, Opcode::Halt];
+        let contract_id = crate::vm::ContractCode::new(bytecode.clone()).unwrap().id;
+
+        let tx = make_deploy_tx_for_state(&mut state, bytecode, 42);
+        state.apply_transaction_unchecked(&tx).unwrap();
+
+        assert!(state.has_contract(&contract_id));
+        assert_eq!(state.contract_count(), 1);
+    }
+
+    #[test]
+    fn state_apply_deploy_collects_fee() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let bytecode = vec![Opcode::Halt];
+        let tx = make_deploy_tx_for_state(&mut state, bytecode, 42);
+        let fee = tx.fee;
+
+        state.apply_transaction_unchecked(&tx).unwrap();
+        assert_eq!(state.epoch_fees, fee);
+    }
+
+    #[test]
+    fn state_rejects_call_to_nonexistent_contract() {
+        // Verify that `has_contract` returns false for unregistered contracts
+        // and that the state-level check would reject it.
+        // (Full validate_transaction rejects invalid execution proofs at the
+        // structure level before reaching the state check, which is correct
+        // defense-in-depth.)
+        let state = ChainState::new();
+        assert!(!state.has_contract(&[0xAB; 32]));
+        assert!(state.get_contract(&[0xAB; 32]).is_none());
+    }
+
+    #[test]
+    fn state_apply_call_collects_fee() {
+        use crate::crypto::stark::convert::hash_to_felts;
+        use crate::crypto::stark::types::{ExecutionPublicInputs, ExecutionStarkProof};
+        use crate::vm::Opcode;
+        use winterfell::math::fields::f64::BaseElement as TestFelt;
+        use winterfell::math::FieldElement;
+
+        let mut state = ChainState::new();
+
+        // Deploy a contract first
+        let bytecode = vec![Opcode::Halt];
+        let contract = crate::vm::ContractCode::new(bytecode).unwrap();
+        let contract_id = contract.id;
+        state.register_contract(contract).unwrap();
+
+        // Build valid public inputs with matching contract_id and zero state hash
+        let function_hash = crate::hash_domain(b"test.fn", b"main");
+        let pub_inputs = ExecutionPublicInputs {
+            contract_id: hash_to_felts(&contract_id),
+            function_hash: hash_to_felts(&function_hash),
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: [TestFelt::ZERO; 4],
+            final_state_hash: [TestFelt::ZERO; 4],
+            steps_used: TestFelt::new(1),
+        };
+
+        // Build a call transaction
+        let value = 1000u64;
+        let blinding = BlindingFactor::from_bytes([60; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[60]);
+        let commitment = Commitment::commit(value, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let call_fee = 500u64;
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), value - call_fee)
+            .set_tx_type(crate::transaction::TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof: ExecutionStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: pub_inputs.to_bytes(),
+                },
+            })
+            .set_fee(call_fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        state.apply_transaction_unchecked(&tx).unwrap();
+        assert_eq!(state.epoch_fees, call_fee);
+    }
+
+    #[test]
+    fn state_root_changes_after_contract_deploy() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let root_before = state.state_root();
+
+        let bytecode = vec![Opcode::Halt];
+        let contract = crate::vm::ContractCode::new(bytecode).unwrap();
+        state.register_contract(contract).unwrap();
+
+        let root_after = state.state_root();
+        assert_ne!(root_before, root_after);
+    }
+
+    #[test]
+    fn contract_registry_hash_deterministic() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let c1 = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let c2 =
+            crate::vm::ContractCode::new(vec![Opcode::Const { dst: 0, value: 1 }, Opcode::Halt])
+                .unwrap();
+        state.register_contract(c1).unwrap();
+        state.register_contract(c2).unwrap();
+
+        let hash1 = state.contract_registry_hash();
+        let hash2 = state.contract_registry_hash();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn contract_state_zero_on_deploy() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let contract = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let id = contract.id;
+        state.register_contract(contract).unwrap();
+        assert_eq!(state.get_contract_state_hash(&id), Some(&[0u8; 32]));
+    }
+
+    #[test]
+    fn contract_state_updates_after_apply() {
+        use crate::crypto::stark::convert::hash_to_felts;
+        use crate::crypto::stark::types::{ExecutionPublicInputs, ExecutionStarkProof};
+        use crate::vm::Opcode;
+        use winterfell::math::fields::f64::BaseElement as TestFelt;
+        use winterfell::math::FieldElement;
+
+        let mut state = ChainState::new();
+        let contract = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let contract_id = contract.id;
+        state.register_contract(contract).unwrap();
+
+        let function_hash = crate::hash_domain(b"test.fn", b"main");
+        let final_hash = [
+            TestFelt::new(1),
+            TestFelt::new(2),
+            TestFelt::new(3),
+            TestFelt::new(4),
+        ];
+        let pub_inputs = ExecutionPublicInputs {
+            contract_id: hash_to_felts(&contract_id),
+            function_hash: hash_to_felts(&function_hash),
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: [TestFelt::ZERO; 4],
+            final_state_hash: final_hash,
+            steps_used: TestFelt::new(1),
+        };
+
+        let value = 1000u64;
+        let blinding = BlindingFactor::from_bytes([70; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[70]);
+        let commitment = Commitment::commit(value, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+        let recipient = FullKeypair::generate();
+        let fee = 500u64;
+
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), value - fee)
+            .set_tx_type(crate::transaction::TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof: ExecutionStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: pub_inputs.to_bytes(),
+                },
+            })
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        state.apply_transaction_unchecked(&tx).unwrap();
+
+        let stored = state.get_contract_state_hash(&contract_id).unwrap();
+        assert_ne!(stored, &[0u8; 32], "state should have been updated");
+        // Verify the stored bytes match the expected final_state_hash
+        let expected = felt_state_to_bytes(&final_hash);
+        assert_eq!(stored, &expected);
+    }
+
+    #[test]
+    fn contract_state_mismatch_rejected() {
+        use crate::crypto::stark::convert::hash_to_felts;
+        use crate::crypto::stark::types::{ExecutionPublicInputs, ExecutionStarkProof};
+        use crate::vm::Opcode;
+        use winterfell::math::fields::f64::BaseElement as TestFelt;
+        use winterfell::math::FieldElement;
+
+        let mut state = ChainState::new();
+        let contract = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let contract_id = contract.id;
+        state.register_contract(contract).unwrap();
+
+        let function_hash = crate::hash_domain(b"test.fn", b"main");
+        // Use a non-zero initial_state_hash that doesn't match the stored [0; 32]
+        let wrong_initial = [
+            TestFelt::new(99),
+            TestFelt::new(99),
+            TestFelt::new(99),
+            TestFelt::new(99),
+        ];
+        let pub_inputs = ExecutionPublicInputs {
+            contract_id: hash_to_felts(&contract_id),
+            function_hash: hash_to_felts(&function_hash),
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: wrong_initial,
+            final_state_hash: [TestFelt::ZERO; 4],
+            steps_used: TestFelt::new(1),
+        };
+
+        let value = 1000u64;
+        let blinding = BlindingFactor::from_bytes([71; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[71]);
+        let commitment = Commitment::commit(value, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+        let recipient = FullKeypair::generate();
+        let fee = 500u64;
+
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), value - fee)
+            .set_tx_type(crate::transaction::TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof: ExecutionStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: pub_inputs.to_bytes(),
+                },
+            })
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.apply_transaction_unchecked(&tx);
+        assert!(matches!(result, Err(StateError::ContractStateMismatch)));
+    }
+
+    #[test]
+    fn contract_state_chains_within_block() {
+        use crate::crypto::stark::convert::hash_to_felts;
+        use crate::crypto::stark::types::{ExecutionPublicInputs, ExecutionStarkProof};
+        use crate::vm::Opcode;
+        use winterfell::math::fields::f64::BaseElement as TestFelt;
+        use winterfell::math::FieldElement;
+
+        let mut state = ChainState::new();
+        let contract = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let contract_id = contract.id;
+        state.register_contract(contract).unwrap();
+
+        let function_hash = crate::hash_domain(b"test.fn", b"chain");
+        let mid_state = [
+            TestFelt::new(10),
+            TestFelt::new(20),
+            TestFelt::new(30),
+            TestFelt::new(40),
+        ];
+        let final_state = [
+            TestFelt::new(50),
+            TestFelt::new(60),
+            TestFelt::new(70),
+            TestFelt::new(80),
+        ];
+
+        // Build call 1: zero -> mid
+        let pub_inputs1 = ExecutionPublicInputs {
+            contract_id: hash_to_felts(&contract_id),
+            function_hash: hash_to_felts(&function_hash),
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: [TestFelt::ZERO; 4],
+            final_state_hash: mid_state,
+            steps_used: TestFelt::new(1),
+        };
+        let value = 2000u64;
+        let blinding1 = BlindingFactor::from_bytes([80; 32]);
+        let spend_auth1 = crate::hash_domain(b"test.spend_auth", &[80]);
+        let commitment1 = Commitment::commit(value, &blinding1);
+        state.add_commitment(commitment1).unwrap();
+        let index1 = state.find_commitment(&commitment1).unwrap();
+        let merkle_path1 = state.commitment_path(index1).unwrap();
+        let recipient1 = FullKeypair::generate();
+        let fee = 100u64;
+        let tx1 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding: blinding1,
+                spend_auth: spend_auth1,
+                merkle_path: merkle_path1,
+            })
+            .add_output(recipient1.kem.public.clone(), value - fee)
+            .set_tx_type(crate::transaction::TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof: ExecutionStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: pub_inputs1.to_bytes(),
+                },
+            })
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        state.apply_transaction_unchecked(&tx1).unwrap();
+        assert_eq!(
+            state.get_contract_state_hash(&contract_id).unwrap(),
+            &felt_state_to_bytes(&mid_state)
+        );
+
+        // Build call 2: mid -> final (chaining within same "block")
+        let pub_inputs2 = ExecutionPublicInputs {
+            contract_id: hash_to_felts(&contract_id),
+            function_hash: hash_to_felts(&function_hash),
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: mid_state,
+            final_state_hash: final_state,
+            steps_used: TestFelt::new(1),
+        };
+        let blinding2 = BlindingFactor::from_bytes([81; 32]);
+        let spend_auth2 = crate::hash_domain(b"test.spend_auth", &[81]);
+        let commitment2 = Commitment::commit(value, &blinding2);
+        state.add_commitment(commitment2).unwrap();
+        let index2 = state.find_commitment(&commitment2).unwrap();
+        let merkle_path2 = state.commitment_path(index2).unwrap();
+        let recipient2 = FullKeypair::generate();
+        let tx2 = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding: blinding2,
+                spend_auth: spend_auth2,
+                merkle_path: merkle_path2,
+            })
+            .add_output(recipient2.kem.public.clone(), value - fee)
+            .set_tx_type(crate::transaction::TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof: ExecutionStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: pub_inputs2.to_bytes(),
+                },
+            })
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        state.apply_transaction_unchecked(&tx2).unwrap();
+        assert_eq!(
+            state.get_contract_state_hash(&contract_id).unwrap(),
+            &felt_state_to_bytes(&final_state)
+        );
+    }
+
+    #[test]
+    fn state_root_includes_contract_states() {
+        use crate::crypto::stark::convert::hash_to_felts;
+        use crate::crypto::stark::types::{ExecutionPublicInputs, ExecutionStarkProof};
+        use crate::vm::Opcode;
+        use winterfell::math::fields::f64::BaseElement as TestFelt;
+        use winterfell::math::FieldElement;
+
+        let mut state = ChainState::new();
+        let contract = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let contract_id = contract.id;
+        state.register_contract(contract).unwrap();
+        let root_before = state.state_root();
+
+        // Apply a call that changes the state hash
+        let function_hash = crate::hash_domain(b"test.fn", b"root");
+        let pub_inputs = ExecutionPublicInputs {
+            contract_id: hash_to_felts(&contract_id),
+            function_hash: hash_to_felts(&function_hash),
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: [TestFelt::ZERO; 4],
+            final_state_hash: [TestFelt::new(1); 4],
+            steps_used: TestFelt::new(1),
+        };
+
+        let value = 1000u64;
+        let blinding = BlindingFactor::from_bytes([90; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[90]);
+        let commitment = Commitment::commit(value, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+        let recipient = FullKeypair::generate();
+        let fee = 100u64;
+
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), value - fee)
+            .set_tx_type(crate::transaction::TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof: ExecutionStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: pub_inputs.to_bytes(),
+                },
+            })
+            .set_fee(fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        state.apply_transaction_unchecked(&tx).unwrap();
+        let root_after = state.state_root();
+        assert_ne!(
+            root_before, root_after,
+            "state_root should change when contract state updates"
+        );
+    }
+
+    #[test]
+    fn contract_states_hash_deterministic() {
+        use crate::vm::Opcode;
+        let mut state = ChainState::new();
+        let c1 = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let c2 =
+            crate::vm::ContractCode::new(vec![Opcode::Const { dst: 0, value: 1 }, Opcode::Halt])
+                .unwrap();
+        state.register_contract(c1).unwrap();
+        state.register_contract(c2).unwrap();
+
+        let hash1 = state.contract_states_hash();
+        let hash2 = state.contract_states_hash();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn contract_state_restored_from_storage() {
+        use crate::node::storage::SledStorage;
+        use crate::vm::Opcode;
+
+        let storage = SledStorage::open_temporary().unwrap();
+        let contract = crate::vm::ContractCode::new(vec![Opcode::Halt]).unwrap();
+        let contract_id = contract.id;
+
+        // Build an in-memory state with the contract deployed and a custom state hash
+        let mut reference = ChainState::new();
+        reference.register_contract(contract.clone()).unwrap();
+        let state_hash = [0x42; 32];
+        reference.contract_states.insert(contract_id, state_hash);
+
+        // Store contract and its state in storage
+        storage.put_contract(&contract).unwrap();
+        storage
+            .put_contract_state(&contract_id, &state_hash)
+            .unwrap();
+
+        // Use the reference state to generate a consistent meta
+        let meta = reference.to_chain_state_meta(0);
+        storage.put_chain_state_meta(&meta).unwrap();
+
+        let restored =
+            ChainState::restore_from_storage(&storage, &meta, crate::constants::NetworkId::Testnet)
+                .unwrap();
+        assert_eq!(
+            restored.get_contract_state_hash(&contract_id),
+            Some(&state_hash)
+        );
     }
 }

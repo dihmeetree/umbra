@@ -41,6 +41,8 @@ pub struct ChainStateMeta {
     pub total_minted: u64,
     #[serde(default)]
     pub last_slash_epoch: Option<u64>,
+    #[serde(default)]
+    pub contract_count: u64,
 }
 
 /// Stored validator with bond information.
@@ -110,6 +112,22 @@ pub trait Storage {
     fn put_coinbase_output(&self, sequence: u64, output: &TxOutput) -> Result<(), StorageError>;
     fn get_coinbase_output(&self, sequence: u64) -> Result<Option<TxOutput>, StorageError>;
 
+    fn put_contract(&self, contract: &crate::vm::ContractCode) -> Result<(), StorageError>;
+    fn get_contract(&self, id: &Hash) -> Result<Option<crate::vm::ContractCode>, StorageError>;
+    fn has_contract(&self, id: &Hash) -> Result<bool, StorageError>;
+    fn get_all_contracts(&self) -> Result<Vec<crate::vm::ContractCode>, StorageError>;
+
+    /// Store a contract's state hash (32 bytes encoding [Felt; 4]).
+    fn put_contract_state(
+        &self,
+        contract_id: &Hash,
+        state_hash: &[u8; 32],
+    ) -> Result<(), StorageError>;
+    /// Retrieve a contract's state hash.
+    fn get_contract_state(&self, contract_id: &Hash) -> Result<Option<[u8; 32]>, StorageError>;
+    /// Retrieve all contract state hashes.
+    fn get_all_contract_states(&self) -> Result<Vec<(Hash, [u8; 32])>, StorageError>;
+
     /// Persist a peer ban. `banned_until_ms` is ms since UNIX epoch.
     fn put_peer_ban(&self, peer_id: &Hash, banned_until_ms: u64) -> Result<(), StorageError>;
     /// Load all persisted peer bans (peer_id, banned_until_ms).
@@ -159,6 +177,8 @@ pub struct FinalizationBatch {
     pub validators: Vec<(Validator, u64, bool)>,
     pub removed_validators: Vec<Hash>,
     pub coinbase_outputs: Vec<(u64, TxOutput)>,
+    pub contracts: Vec<crate::vm::ContractCode>,
+    pub contract_state_updates: Vec<(Hash, [u8; 32])>,
     pub chain_state_meta: Option<ChainStateMeta>,
 }
 
@@ -175,6 +195,8 @@ pub struct SledStorage {
     finalized_index: sled::Tree,
     coinbase_outputs: sled::Tree,
     peer_bans: sled::Tree,
+    contracts: sled::Tree,
+    contract_states: sled::Tree,
     finalized_count: std::sync::atomic::AtomicU64,
 }
 
@@ -220,6 +242,12 @@ impl SledStorage {
         let peer_bans = db
             .open_tree("peer_bans")
             .map_err(|e| StorageError::Io(e.to_string()))?;
+        let contracts = db
+            .open_tree("contracts")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        let contract_states = db
+            .open_tree("contract_states")
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         let finalized_count = std::sync::atomic::AtomicU64::new(finalized_index.len() as u64);
         Ok(SledStorage {
             db,
@@ -232,6 +260,8 @@ impl SledStorage {
             finalized_index,
             coinbase_outputs,
             peer_bans,
+            contracts,
+            contract_states,
             finalized_count,
         })
     }
@@ -572,6 +602,92 @@ impl Storage for SledStorage {
         Ok(())
     }
 
+    fn put_contract(&self, contract: &crate::vm::ContractCode) -> Result<(), StorageError> {
+        let value =
+            crate::serialize(contract).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.contracts
+            .insert(contract.id, value)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_contract(&self, id: &Hash) -> Result<Option<crate::vm::ContractCode>, StorageError> {
+        match self
+            .contracts
+            .get(id)
+            .map_err(|e| StorageError::Io(e.to_string()))?
+        {
+            Some(bytes) => {
+                let contract = crate::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(contract))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn has_contract(&self, id: &Hash) -> Result<bool, StorageError> {
+        self.contracts
+            .contains_key(id)
+            .map_err(|e| StorageError::Io(e.to_string()))
+    }
+
+    fn get_all_contracts(&self) -> Result<Vec<crate::vm::ContractCode>, StorageError> {
+        let mut contracts = Vec::new();
+        for entry in self.contracts.iter() {
+            let (_, value) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            let contract: crate::vm::ContractCode = crate::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            contracts.push(contract);
+        }
+        Ok(contracts)
+    }
+
+    fn put_contract_state(
+        &self,
+        contract_id: &Hash,
+        state_hash: &[u8; 32],
+    ) -> Result<(), StorageError> {
+        self.contract_states
+            .insert(contract_id, state_hash.as_ref())
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_contract_state(&self, contract_id: &Hash) -> Result<Option<[u8; 32]>, StorageError> {
+        match self
+            .contract_states
+            .get(contract_id)
+            .map_err(|e| StorageError::Io(e.to_string()))?
+        {
+            Some(bytes) => {
+                let hash: [u8; 32] = bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| StorageError::Serialization("invalid state hash length".into()))?;
+                Ok(Some(hash))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn get_all_contract_states(&self) -> Result<Vec<(Hash, [u8; 32])>, StorageError> {
+        let mut states = Vec::new();
+        for entry in self.contract_states.iter() {
+            let (key, value) = entry.map_err(|e| StorageError::Io(e.to_string()))?;
+            let contract_id: Hash = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Serialization("invalid contract id length".into()))?;
+            let state_hash: [u8; 32] = value
+                .as_ref()
+                .try_into()
+                .map_err(|_| StorageError::Serialization("invalid state hash length".into()))?;
+            states.push((contract_id, state_hash));
+        }
+        Ok(states)
+    }
+
     fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError> {
         // Known limitation: sled does not support multi-tree atomic transactions.
         // Cross-tree writes (vertices, state, nullifiers) use a crash-recovery
@@ -637,6 +753,18 @@ impl Storage for SledStorage {
             cb_batch.insert(&seq.to_be_bytes(), value);
         }
 
+        let mut contract_batch = sled::Batch::default();
+        for contract in &batch.contracts {
+            let value = crate::serialize(contract)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            contract_batch.insert(&contract.id, value);
+        }
+
+        let mut contract_states_batch = sled::Batch::default();
+        for (contract_id, state_hash) in &batch.contract_state_updates {
+            contract_states_batch.insert(contract_id.as_ref(), state_hash.as_ref());
+        }
+
         let mut meta_batch = sled::Batch::default();
         if let Some(ref meta) = batch.chain_state_meta {
             let value =
@@ -665,6 +793,12 @@ impl Storage for SledStorage {
             .map_err(|e| StorageError::Io(e.to_string()))?;
         self.coinbase_outputs
             .apply_batch(cb_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.contracts
+            .apply_batch(contract_batch)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.contract_states
+            .apply_batch(contract_states_batch)
             .map_err(|e| StorageError::Io(e.to_string()))?;
         self.chain_meta
             .apply_batch(meta_batch)
@@ -735,6 +869,12 @@ impl Storage for SledStorage {
             .clear()
             .map_err(|e| StorageError::Io(e.to_string()))?;
         self.finalized_index
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.contracts
+            .clear()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        self.contract_states
             .clear()
             .map_err(|e| StorageError::Io(e.to_string()))?;
         self.finalized_count
@@ -833,6 +973,7 @@ mod tests {
             finalized_count: 42,
             total_minted: 500_000,
             last_slash_epoch: None,
+            contract_count: 0,
         };
 
         assert!(storage.get_chain_state_meta().unwrap().is_none());
@@ -1175,6 +1316,7 @@ mod tests {
             finalized_count: 0,
             total_minted: 0,
             last_slash_epoch: None,
+            contract_count: 0,
         };
         storage.put_chain_state_meta(&meta).unwrap();
         let vid = VertexId([3u8; 32]);
@@ -1217,6 +1359,7 @@ mod tests {
             finalized_count: 1,
             total_minted: 50_000,
             last_slash_epoch: None,
+            contract_count: 0,
         };
 
         let batch = super::FinalizationBatch {
@@ -1228,6 +1371,8 @@ mod tests {
             validators: vec![],
             removed_validators: vec![],
             coinbase_outputs: vec![(0, cb_output)],
+            contracts: vec![],
+            contract_state_updates: vec![],
             chain_state_meta: Some(meta),
         };
 
@@ -1502,5 +1647,63 @@ mod tests {
         assert_eq!(storage.finalized_vertex_count().unwrap(), 1);
         storage.put_finalized_vertex_index(1, &vertex.id).unwrap();
         assert_eq!(storage.finalized_vertex_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn put_get_contract_state_roundtrip() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let contract_id = [0xAA; 32];
+        let state_hash = [0xBB; 32];
+        storage
+            .put_contract_state(&contract_id, &state_hash)
+            .unwrap();
+        let retrieved = storage.get_contract_state(&contract_id).unwrap();
+        assert_eq!(retrieved, Some(state_hash));
+    }
+
+    #[test]
+    fn get_contract_state_none_for_unknown() {
+        let storage = SledStorage::open_temporary().unwrap();
+        assert_eq!(storage.get_contract_state(&[0xFF; 32]).unwrap(), None);
+    }
+
+    #[test]
+    fn get_all_contract_states_returns_all() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let id1 = [0x01; 32];
+        let id2 = [0x02; 32];
+        storage.put_contract_state(&id1, &[0xAA; 32]).unwrap();
+        storage.put_contract_state(&id2, &[0xBB; 32]).unwrap();
+        let all = storage.get_all_contract_states().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|(id, h)| *id == id1 && *h == [0xAA; 32]));
+        assert!(all.iter().any(|(id, h)| *id == id2 && *h == [0xBB; 32]));
+    }
+
+    #[test]
+    fn finalization_batch_persists_contract_state() {
+        let storage = SledStorage::open_temporary().unwrap();
+        let contract_id = [0xCC; 32];
+        let state_hash = [0xDD; 32];
+        let batch = super::FinalizationBatch {
+            contract_state_updates: vec![(contract_id, state_hash)],
+            ..Default::default()
+        };
+        storage.apply_finalization_batch(&batch).unwrap();
+        assert_eq!(
+            storage.get_contract_state(&contract_id).unwrap(),
+            Some(state_hash)
+        );
+    }
+
+    #[test]
+    fn clear_for_snapshot_clears_contract_states() {
+        let storage = SledStorage::open_temporary().unwrap();
+        storage
+            .put_contract_state(&[0x01; 32], &[0xAA; 32])
+            .unwrap();
+        assert!(storage.get_contract_state(&[0x01; 32]).unwrap().is_some());
+        storage.clear_for_snapshot_import().unwrap();
+        assert_eq!(storage.get_contract_state(&[0x01; 32]).unwrap(), None);
     }
 }

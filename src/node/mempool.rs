@@ -24,6 +24,8 @@ pub enum MempoolError {
     MempoolFullMaxFee,
     #[error("nullifier already spent in finalized state")]
     NullifierAlreadySpent(Nullifier),
+    #[error("contract transaction too large ({size} bytes, max {max} bytes)")]
+    TransactionTooLarge { size: usize, max: usize },
 }
 
 /// A transaction entry in the mempool with metadata.
@@ -141,6 +143,21 @@ impl Mempool {
 
         // 2. Structural validation
         tx.validate_structure(self.current_epoch)?;
+
+        // 2b. Size check for contract transactions
+        if matches!(
+            tx.tx_type,
+            crate::transaction::TxType::ContractDeploy { .. }
+                | crate::transaction::TxType::ContractCall { .. }
+        ) {
+            let size = tx.estimated_size();
+            if size > crate::constants::MAX_CONTRACT_TX_SIZE {
+                return Err(MempoolError::TransactionTooLarge {
+                    size,
+                    max: crate::constants::MAX_CONTRACT_TX_SIZE,
+                });
+            }
+        }
 
         // 3. Nullifier conflict detection
         for input in &tx.inputs {

@@ -89,6 +89,8 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/vertex/{id}", get(get_vertex_by_id))
         .route("/commitment-proof/{index}", get(get_commitment_proof))
         .route("/state-summary", get(get_state_summary))
+        .route("/contract/{id}", get(get_contract))
+        .route("/contract/{id}/exists", get(get_contract_exists))
         .with_state(rpc_state)
         .layer(
             CorsLayer::new()
@@ -815,6 +817,68 @@ async fn get_state_summary(State(state): State<RpcState>) -> Json<StateSummaryRe
         total_minted: s.total_minted(),
         active_validators: active_vals,
     })
+}
+
+// ── GET /contract/:id ──
+
+#[derive(Serialize)]
+struct ContractResponse {
+    id: String,
+    bytecode_len: usize,
+}
+
+async fn get_contract(
+    State(state): State<RpcState>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<ContractResponse>, (StatusCode, String)> {
+    let id_bytes: [u8; 32] = hex::decode(&id_hex)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid id: {}", e)))?
+        .try_into()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "id must be 32 bytes hex".to_string(),
+            )
+        })?;
+
+    let node = state.node.read().await;
+    let contract = node
+        .ledger
+        .state
+        .get_contract(&id_bytes)
+        .ok_or((StatusCode::NOT_FOUND, "contract not found".to_string()))?;
+
+    Ok(Json(ContractResponse {
+        id: hex::encode(contract.id),
+        bytecode_len: contract.bytecode.len(),
+    }))
+}
+
+// ── GET /contract/:id/exists ──
+
+#[derive(Serialize)]
+struct ContractExistsResponse {
+    exists: bool,
+}
+
+async fn get_contract_exists(
+    State(state): State<RpcState>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<ContractExistsResponse>, (StatusCode, String)> {
+    let id_bytes: [u8; 32] = hex::decode(&id_hex)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid id: {}", e)))?
+        .try_into()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "id must be 32 bytes hex".to_string(),
+            )
+        })?;
+
+    let node = state.node.read().await;
+    let exists = node.ledger.state.has_contract(&id_bytes);
+
+    Ok(Json(ContractExistsResponse { exists }))
 }
 
 #[cfg(test)]

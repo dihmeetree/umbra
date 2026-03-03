@@ -2092,11 +2092,30 @@ impl Node {
                 let mut batch = crate::node::storage::FinalizationBatch::default();
 
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
-                    // Collect transactions and nullifiers
+                    // Collect transactions, nullifiers, contracts, and state updates
                     for tx in &v.transactions {
                         batch.transactions.push(tx.clone());
                         for input in &tx.inputs {
                             batch.nullifiers.push(input.nullifier);
+                        }
+                        match &tx.tx_type {
+                            crate::transaction::TxType::ContractDeploy { bytecode } => {
+                                if let Ok(contract) = crate::vm::ContractCode::new(bytecode.clone())
+                                {
+                                    batch.contract_state_updates.push((contract.id, [0u8; 32]));
+                                    batch.contracts.push(contract);
+                                }
+                            }
+                            crate::transaction::TxType::ContractCall { contract_id, .. } => {
+                                if let Some(state_hash) =
+                                    state.ledger.state.get_contract_state_hash(contract_id)
+                                {
+                                    batch
+                                        .contract_state_updates
+                                        .push((*contract_id, *state_hash));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     batch.vertices.push(v.clone());
@@ -3262,6 +3281,7 @@ mod tests {
                 epoch_fees: 0,
                 validator_count: 0,
                 last_slash_epoch: None,
+                contract_count: 0,
             }),
             last_activity: Instant::now(),
         };
@@ -3369,6 +3389,7 @@ mod tests {
             finalized_count: 100,
             total_minted: 1_000_000,
             last_slash_epoch: None,
+            contract_count: 0,
         }
     }
 

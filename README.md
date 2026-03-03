@@ -90,7 +90,7 @@ umbra/
     lib.rs                  Protocol constants, hashing utilities
     config.rs               TOML config file support (umbra.toml)
     demo.rs                 Interactive protocol demonstration
-    state.rs                Chain state (bonds, slashing, sled-backed nullifiers), Ledger, parallel verification
+    state.rs                Chain state (bonds, slashing, sled-backed nullifiers, contract registry, contract state), Ledger, parallel verification
     main.rs                 Node + wallet binary with clap subcommands and config file loading
     crypto/
       keys.rs               Hybrid signing (Dilithium5 + SPHINCS+) + Kyber1024 KEM keypairs
@@ -104,15 +104,24 @@ umbra/
         mod.rs              STARK module root, proof options, type aliases
         convert.rs          Goldilocks field element conversion utilities
         rescue.rs           Rescue Prime round function, MDS/ARK constants
-        types.rs            BalanceStarkProof, SpendStarkProof, witness types
+        types.rs            BalanceStarkProof, SpendStarkProof, ExecutionStarkProof, witness types
         balance_air.rs      AIR for balance proofs (commitment openings + sum + range proofs)
         balance_prover.rs   Prover for balance STARK proofs
         spend_air.rs        AIR for spend proofs (nullifier + Merkle membership + proof_link)
         spend_prover.rs     Prover for spend STARK proofs
+        execution_air.rs    AIR for contract execution proofs (VM trace constraints)
+        execution_prover.rs Prover for contract execution STARK proofs
         verify.rs           STARK verification wrappers
     transaction/
-      mod.rs                Transaction, TxType, TxInput, TxOutput types and validation
+      mod.rs                Transaction types (Transfer, ContractDeploy, ContractCall), validation
       builder.rs            TransactionBuilder API for constructing transactions
+    vm/
+      mod.rs                Contract VM module root, re-exports
+      instruction.rs        Opcode enum (Add, Sub, Mul, Div, Const, Eq, CJump, Jump, Load, Store, Hash, etc.)
+      executor.rs           Register-based VM over Goldilocks field, trace recording for STARK proving
+      memory.rs             Fixed-size memory model with bounds checking
+      contract.rs           ContractCode, ContractId, state commitment hashing
+      builder.rs            High-level contract call builder (execute + prove + package)
     consensus/
       mod.rs                PoVP design documentation
       dag.rs                DAG data structure (vertices with VRF proofs, protocol version, pruning)
@@ -122,7 +131,7 @@ umbra/
       core.rs               Node orchestrator: consensus, Dandelion++, peer discovery, protocol signaling
       rpc.rs                JSON HTTP API: tx, state, health, metrics, fee-estimate, light client endpoints
       mempool.rs            Fee-priority transaction pool with nullifier conflict detection + fee estimation
-      storage.rs            Persistent storage trait + sled backend (vertices, txs, validators)
+      storage.rs            Persistent storage trait + sled backend (vertices, txs, validators, contracts, contract state)
     network/
       mod.rs                Network module root
       protocol.rs           P2P wire protocol (message types, KEM handshake, auth messages)
@@ -163,7 +172,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **1166 tests**.
+**~41,000 lines of Rust** across 51 source files with **1252 tests**.
 
 ## Building
 
@@ -478,13 +487,27 @@ Fee-priority transaction pool with configurable limits:
 - Expired transaction eviction — `evict_expired()` removes transactions past their `expiry_epoch`
 - Configurable size limits: max 10,000 transactions / 50 MiB (default)
 
+### Smart Contracts
+
+STARK-provable smart contract execution via a register-based virtual machine:
+
+- **Contract VM** — 16 general-purpose registers over the Goldilocks field (p = 2^64 - 2^32 + 1), bounded execution (64K steps, 16K memory), trace recording for STARK proving
+- **Opcodes** — arithmetic (Add, Sub, Mul, Div), constants, equality, control flow (Jump, CJump), memory (Load, Store), cryptographic (Hash via Rescue Prime), I/O (LoadInput, EmitOutput, EmitNullifier), termination (Halt, Fail)
+- **Execution AIR** — Winterfell AIR constraints verify correct VM execution; proofs are generated and verified using the same STARK infrastructure as balance/spend proofs
+- **Contract deployment** — `ContractDeploy` transactions register validated bytecode on-chain; contracts are identified by `hash_domain("umbra.contract_id", bytecode)`
+- **Contract calls** — `ContractCall` transactions include a STARK execution proof; the chain verifies the proof and cross-checks contract_id, function_hash, output commitments, and emitted nullifiers
+- **Persistent state** — per-contract state hash (`[u8; 32]`) stored on-chain; on each call, the chain verifies the proof's `initial_state_hash` matches the stored hash, then updates to `final_state_hash`. Actual memory contents remain off-chain (the STARK proof cryptographically binds them to the hashes)
+- **State chaining** — multiple calls to the same contract within a single block correctly chain state: call N's `initial_state_hash` must equal call N-1's `final_state_hash`
+- **RPC endpoints** — `GET /contract/:id` retrieves contract bytecode; `GET /contract/:id/exists` checks registration
+- **Builder API** — `build_contract_call()` combines VM execution, STARK proving, and transaction packaging into a single function call
+
 ### Persistent Storage
 
 `Storage` trait with a [sled](https://docs.rs/sled) embedded database backend:
 
-- **8 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`, `finalized_index`, `coinbase_outputs`
+- **10 named trees**: `vertices`, `transactions`, `nullifiers`, `chain_meta`, `commitment_levels`, `validators`, `finalized_index`, `coinbase_outputs`, `contracts`, `contract_states`
 - All values are bincode-serialized; keys are raw 32-byte hashes (finalized_index and coinbase_outputs use big-endian sequence numbers)
-- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts, finalized count, total minted) for persistence
+- `ChainStateMeta` captures full chain state snapshots (epoch, roots, counts, finalized count, total minted, contract count) for persistence
 - Commitment level storage enables Merkle tree reconstruction on restart
 - Finalized vertex index supports paginated retrieval for wallet sync and state sync
 - `open_temporary()` provides in-memory storage for testing
@@ -539,13 +562,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (~1166 tests)
+cargo test                       # Full suite (~1252 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1166 tests cover:
+All 1252 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -576,6 +599,11 @@ All 1166 tests cover:
 - **Chain state** — persist/restore roundtrip (Merkle tree, nullifiers, validators, epoch state), ledger restore from storage, snapshot export/import roundtrip with state root verification; genesis coinbase creation and deterministic blinding
 - **Wallet web** — WalletWebState construction and cache behavior, wallet_exists (present/absent), RPC client without TLS, invalidate_cache clears loaded wallet, load_wallet returns None when no file, load_wallet caches on first load, save_wallet updates cache, error_page sets message; CSRF token validation (constant-time comparison, init rejects invalid CSRF, scan rejects invalid CSRF); HTTP handler tests via axum oneshot: dashboard redirects to init, init page 200/redirect, init action creates wallet+address files, security headers (X-Frame-Options, X-Content-Type-Options, Cache-Control, CSP), send/messages/history/address pages redirect without wallet, 404 for nonexistent routes
 - **Network identity** — NetworkId display/FromStr, default port mapping per network, chain_id differs per network, chain_id backward compatibility, genesis domain separation, testnet-tuned constants (epoch length, genesis mint, validator bond), serde roundtrip; genesis vertex differs per network, genesis vertex backward compatibility; config TOML parsing with network field, default bootstrap peers per network
+- **Contract VM** — register-based VM over Goldilocks field: arithmetic ops (add/sub/mul/div), constants, equality, conditional/unconditional jumps, memory load/store, Rescue Prime hash (8-round trace), input/output commitment emission, nullifier emission, halt/fail; trace dimensions, bounds checking (max steps, max memory), empty program rejection, execution trace recording for STARK proving
+- **Contract state** — ContractId determinism, ContractCode validation (empty bytecode, missing halt, size limits), contract registry (register, duplicate rejection, max contracts, state root changes), persistent contract state (zero on deploy, updates after call, mismatch rejected, chaining within block, state root includes contract states, deterministic contract states hash, restore from storage), contract state commitment hashing
+- **Contract transactions** — deploy validation (empty bytecode, oversized, invalid), call validation (proof verification, contract_id/function_hash cross-check), builder helpers (deploy_contract, call_contract, build_contract_call with state hashes), fee computation (deploy per-byte, call step-based), mempool size enforcement
+- **Contract STARK proofs** — execution AIR constraints, prove/verify roundtrip for simple programs, tampered public inputs rejected, serialization roundtrips for ExecutionPublicInputs and ExecutionStarkProof
+- **Contract RPC** — GET /contract/:id (found, not found, invalid hex), GET /contract/:id/exists
 - **Faucet** — rate limiter blocks repeated requests, hex address validation, status starts at zero
 
 ## Network Simulator
@@ -1027,13 +1055,20 @@ All transaction validity is verified via zk-STARKs:
 - **Sanitize SnapshotChunk and NewVertex** — `sanitize()` now caps `SnapshotChunk.data` at `SNAPSHOT_CHUNK_SIZE + 64` bytes and `NewVertex.transactions` at `VERTEX_MAX_DRAIN` entries, bounding validation CPU from a single large message
 - **Safe u32 casts** — `encode_message` and `write_encrypted` use `u32::try_from` instead of `as u32` for length fields, returning errors on overflow rather than silently truncating
 - **pad_to_bucket minimum** — `pad_to_bucket(0)` now returns one full bucket instead of zero, ensuring encrypted frames always contain at least one padding bucket
+- **Contract bytecode validation** — `ContractCode::new()` validates that bytecode is non-empty, does not exceed `MAX_CONTRACT_SIZE` (64 KiB), and ends with a `Halt` instruction, preventing deployment of malformed or non-terminating contracts
+- **Contract execution bounds** — the VM enforces `MAX_STEPS` (65,536) and `MAX_MEMORY` (16,384 field elements), preventing unbounded computation and memory exhaustion from malicious contracts
+- **Contract state hash verification** — `apply_transaction_unchecked()` verifies the execution proof's `initial_state_hash` against the stored on-chain state hash using `constant_time_eq`, rejecting calls with stale or fabricated initial state; the check is performed sequentially in Pass 2 to support correct chaining of multiple calls to the same contract within a single block
+- **Contract state persistence** — per-contract state hashes are stored in a dedicated sled tree and included in `state_root()`, ensuring state consistency across restarts and enabling detection of storage corruption via state root divergence
+- **Execution proof binding** — contract call transactions verify the execution proof's `contract_id` and `function_hash` match the transaction fields during `validate_structure()`, preventing proof transplant attacks across contracts or functions
+- **Contract transaction size limits** — contract transactions are capped at `MAX_CONTRACT_TX_SIZE` (256 KiB) in the mempool, preventing memory exhaustion from large execution proofs
+- **Contract registry limits** — the chain enforces `MAX_CONTRACTS` (100,000), preventing unbounded state growth from contract deployment spam
 
 ## Production Roadmap
 
-Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
+Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, STARK-provable smart contracts with persistent state, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1166 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1252 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 

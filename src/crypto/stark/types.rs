@@ -150,6 +150,235 @@ pub struct SpendStarkProof {
     pub public_inputs_bytes: Vec<u8>,
 }
 
+// ── Execution Proof (Contract VM) ──
+
+/// Public inputs for a contract execution STARK proof.
+///
+/// These are known to both prover and verifier.
+#[derive(Clone, Debug)]
+pub struct ExecutionPublicInputs {
+    /// Hash of the contract bytecode (contract identity).
+    pub contract_id: [Felt; 4],
+    /// Function selector (hash of function name/signature).
+    pub function_hash: [Felt; 4],
+    /// Input commitment digests consumed by the contract.
+    pub input_commitments: Vec<[Felt; 4]>,
+    /// Output commitment digests produced by the contract.
+    pub output_commitments: Vec<[Felt; 4]>,
+    /// Nullifiers emitted by the contract.
+    pub emitted_nullifiers: Vec<[Felt; 4]>,
+    /// Hash of the initial memory state (contract state before execution).
+    pub initial_state_hash: [Felt; 4],
+    /// Hash of the final memory state (contract state after execution).
+    pub final_state_hash: [Felt; 4],
+    /// Number of execution steps used.
+    pub steps_used: Felt,
+}
+
+/// Maximum number of input/output commitments in an execution proof.
+pub const MAX_CONTRACT_IO: usize = 8;
+
+/// Maximum number of nullifiers in an execution proof.
+pub const MAX_CONTRACT_NULLIFIERS: usize = 8;
+
+impl ExecutionPublicInputs {
+    /// Number of inputs.
+    pub fn num_inputs(&self) -> usize {
+        self.input_commitments.len()
+    }
+
+    /// Number of outputs.
+    pub fn num_outputs(&self) -> usize {
+        self.output_commitments.len()
+    }
+
+    /// Serialize to bytes for embedding in proof.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // contract_id
+        for e in &self.contract_id {
+            buf.extend_from_slice(&e.as_int().to_le_bytes());
+        }
+        // function_hash
+        for e in &self.function_hash {
+            buf.extend_from_slice(&e.as_int().to_le_bytes());
+        }
+        // input_commitments
+        buf.extend_from_slice(&(self.input_commitments.len() as u32).to_le_bytes());
+        for c in &self.input_commitments {
+            for e in c {
+                buf.extend_from_slice(&e.as_int().to_le_bytes());
+            }
+        }
+        // output_commitments
+        buf.extend_from_slice(&(self.output_commitments.len() as u32).to_le_bytes());
+        for c in &self.output_commitments {
+            for e in c {
+                buf.extend_from_slice(&e.as_int().to_le_bytes());
+            }
+        }
+        // emitted_nullifiers
+        buf.extend_from_slice(&(self.emitted_nullifiers.len() as u32).to_le_bytes());
+        for n in &self.emitted_nullifiers {
+            for e in n {
+                buf.extend_from_slice(&e.as_int().to_le_bytes());
+            }
+        }
+        // initial_state_hash
+        for e in &self.initial_state_hash {
+            buf.extend_from_slice(&e.as_int().to_le_bytes());
+        }
+        // final_state_hash
+        for e in &self.final_state_hash {
+            buf.extend_from_slice(&e.as_int().to_le_bytes());
+        }
+        // steps_used
+        buf.extend_from_slice(&self.steps_used.as_int().to_le_bytes());
+        buf
+    }
+
+    /// Deserialize from bytes. Rejects trailing data and values >= Goldilocks prime.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut pos = 0;
+
+        let read_felt = |data: &[u8], pos: &mut usize| -> Option<Felt> {
+            if *pos + 8 > data.len() {
+                return None;
+            }
+            let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().ok()?);
+            *pos += 8;
+            if val >= 18_446_744_069_414_584_321 {
+                return None;
+            }
+            Some(Felt::new(val))
+        };
+        let read_u32 = |data: &[u8], pos: &mut usize| -> Option<u32> {
+            if *pos + 4 > data.len() {
+                return None;
+            }
+            let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().ok()?);
+            *pos += 4;
+            Some(val)
+        };
+        let read_digest = |data: &[u8], pos: &mut usize| -> Option<[Felt; 4]> {
+            Some([
+                read_felt(data, pos)?,
+                read_felt(data, pos)?,
+                read_felt(data, pos)?,
+                read_felt(data, pos)?,
+            ])
+        };
+
+        let contract_id = read_digest(data, &mut pos)?;
+        let function_hash = read_digest(data, &mut pos)?;
+
+        let n_in = read_u32(data, &mut pos)? as usize;
+        if n_in > MAX_CONTRACT_IO {
+            return None;
+        }
+        let mut input_commitments = Vec::with_capacity(n_in);
+        for _ in 0..n_in {
+            input_commitments.push(read_digest(data, &mut pos)?);
+        }
+
+        let n_out = read_u32(data, &mut pos)? as usize;
+        if n_out > MAX_CONTRACT_IO {
+            return None;
+        }
+        let mut output_commitments = Vec::with_capacity(n_out);
+        for _ in 0..n_out {
+            output_commitments.push(read_digest(data, &mut pos)?);
+        }
+
+        let n_null = read_u32(data, &mut pos)? as usize;
+        if n_null > MAX_CONTRACT_NULLIFIERS {
+            return None;
+        }
+        let mut emitted_nullifiers = Vec::with_capacity(n_null);
+        for _ in 0..n_null {
+            emitted_nullifiers.push(read_digest(data, &mut pos)?);
+        }
+
+        let initial_state_hash = read_digest(data, &mut pos)?;
+        let final_state_hash = read_digest(data, &mut pos)?;
+        let steps_used = read_felt(data, &mut pos)?;
+
+        if pos != data.len() {
+            return None;
+        }
+
+        Some(ExecutionPublicInputs {
+            contract_id,
+            function_hash,
+            input_commitments,
+            output_commitments,
+            emitted_nullifiers,
+            initial_state_hash,
+            final_state_hash,
+            steps_used,
+        })
+    }
+}
+
+impl ToElements<Felt> for ExecutionPublicInputs {
+    fn to_elements(&self) -> Vec<Felt> {
+        let mut elems = Vec::new();
+        elems.extend_from_slice(&self.contract_id);
+        elems.extend_from_slice(&self.function_hash);
+        for c in &self.input_commitments {
+            elems.extend_from_slice(c);
+        }
+        for c in &self.output_commitments {
+            elems.extend_from_slice(c);
+        }
+        for n in &self.emitted_nullifiers {
+            elems.extend_from_slice(n);
+        }
+        elems.extend_from_slice(&self.initial_state_hash);
+        elems.extend_from_slice(&self.final_state_hash);
+        elems.push(self.steps_used);
+        elems
+    }
+}
+
+/// Witness data for the execution proof (known only to prover).
+///
+/// Debug is intentionally not derived to prevent accidental logging of secret values.
+/// Secret data is zeroed on drop via a manual `Drop` implementation.
+pub struct ExecutionWitness {
+    /// The VM execution trace (from executor output).
+    pub trace_rows: Vec<Vec<Felt>>,
+    /// Number of trace columns.
+    pub trace_width: usize,
+}
+
+impl Drop for ExecutionWitness {
+    fn drop(&mut self) {
+        for row in &mut self.trace_rows {
+            for felt in row.iter_mut() {
+                unsafe {
+                    std::ptr::write_volatile(felt, Felt::ZERO);
+                }
+            }
+        }
+        self.trace_rows.clear();
+    }
+}
+
+/// A serialized STARK proof for contract execution verification.
+///
+/// Proves (in zero knowledge):
+/// - The VM executed correctly from initial state to halted state
+/// - The execution produced the claimed outputs and nullifiers
+/// - The execution consumed the claimed inputs
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionStarkProof {
+    /// The serialized winterfell proof bytes.
+    pub proof_bytes: Vec<u8>,
+    /// Serialized public inputs.
+    pub public_inputs_bytes: Vec<u8>,
+}
+
 // ── Zeroize helpers for Felt arrays ──
 
 /// Zero a `[Felt; 4]` array using volatile writes to prevent compiler elision.
@@ -601,5 +830,99 @@ mod tests {
             tx_content_hash: [Felt::ZERO; 4],
         };
         assert_eq!(pub_inputs.num_inputs(), 2);
+    }
+
+    // ── Execution public inputs tests ──
+
+    fn sample_execution_pub_inputs() -> ExecutionPublicInputs {
+        ExecutionPublicInputs {
+            contract_id: [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
+            function_hash: [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
+            input_commitments: vec![[Felt::new(10), Felt::new(11), Felt::new(12), Felt::new(13)]],
+            output_commitments: vec![[Felt::new(20), Felt::new(21), Felt::new(22), Felt::new(23)]],
+            emitted_nullifiers: vec![[Felt::new(30), Felt::new(31), Felt::new(32), Felt::new(33)]],
+            initial_state_hash: [Felt::new(40), Felt::new(41), Felt::new(42), Felt::new(43)],
+            final_state_hash: [Felt::new(50), Felt::new(51), Felt::new(52), Felt::new(53)],
+            steps_used: Felt::new(100),
+        }
+    }
+
+    #[test]
+    fn execution_public_inputs_roundtrip() {
+        let pub_inputs = sample_execution_pub_inputs();
+        let bytes = pub_inputs.to_bytes();
+        let decoded = ExecutionPublicInputs::from_bytes(&bytes).expect("roundtrip should succeed");
+        assert_eq!(decoded.contract_id, pub_inputs.contract_id);
+        assert_eq!(decoded.function_hash, pub_inputs.function_hash);
+        assert_eq!(decoded.input_commitments.len(), 1);
+        assert_eq!(decoded.output_commitments.len(), 1);
+        assert_eq!(decoded.emitted_nullifiers.len(), 1);
+        assert_eq!(decoded.initial_state_hash, pub_inputs.initial_state_hash);
+        assert_eq!(decoded.final_state_hash, pub_inputs.final_state_hash);
+        assert_eq!(decoded.steps_used, pub_inputs.steps_used);
+    }
+
+    #[test]
+    fn execution_public_inputs_rejects_trailing_data() {
+        let pub_inputs = sample_execution_pub_inputs();
+        let mut bytes = pub_inputs.to_bytes();
+        bytes.push(0xFF);
+        assert!(
+            ExecutionPublicInputs::from_bytes(&bytes).is_none(),
+            "should reject trailing data"
+        );
+    }
+
+    #[test]
+    fn execution_public_inputs_rejects_truncated_data() {
+        let pub_inputs = sample_execution_pub_inputs();
+        let bytes = pub_inputs.to_bytes();
+        assert!(
+            ExecutionPublicInputs::from_bytes(&bytes[..bytes.len() - 1]).is_none(),
+            "should reject truncated data"
+        );
+    }
+
+    #[test]
+    fn execution_public_inputs_rejects_oversized_io() {
+        let pub_inputs = sample_execution_pub_inputs();
+        let mut bytes = pub_inputs.to_bytes();
+        // Overwrite input count to MAX_CONTRACT_IO + 1
+        let too_many = (MAX_CONTRACT_IO + 1) as u32;
+        // Input count starts after contract_id (32 bytes) + function_hash (32 bytes)
+        bytes[64..68].copy_from_slice(&too_many.to_le_bytes());
+        assert!(
+            ExecutionPublicInputs::from_bytes(&bytes).is_none(),
+            "should reject n_in > MAX_CONTRACT_IO"
+        );
+    }
+
+    #[test]
+    fn execution_public_inputs_to_elements() {
+        let pub_inputs = sample_execution_pub_inputs();
+        let elems = pub_inputs.to_elements();
+        // 4 (contract_id) + 4 (function_hash) + 4 (1 input) + 4 (1 output) +
+        // 4 (1 nullifier) + 4 (initial_state) + 4 (final_state) + 1 (steps) = 29
+        assert_eq!(elems.len(), 29);
+        assert_eq!(elems[0], Felt::new(1)); // first element of contract_id
+    }
+
+    #[test]
+    fn execution_public_inputs_empty_io_roundtrip() {
+        let pub_inputs = ExecutionPublicInputs {
+            contract_id: [Felt::ZERO; 4],
+            function_hash: [Felt::ZERO; 4],
+            input_commitments: vec![],
+            output_commitments: vec![],
+            emitted_nullifiers: vec![],
+            initial_state_hash: [Felt::ZERO; 4],
+            final_state_hash: [Felt::ZERO; 4],
+            steps_used: Felt::new(1),
+        };
+        let bytes = pub_inputs.to_bytes();
+        let decoded = ExecutionPublicInputs::from_bytes(&bytes).unwrap();
+        assert!(decoded.input_commitments.is_empty());
+        assert!(decoded.output_commitments.is_empty());
+        assert!(decoded.emitted_nullifiers.is_empty());
     }
 }

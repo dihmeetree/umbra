@@ -16,6 +16,7 @@ pub mod network;
 pub mod node;
 pub mod state;
 pub mod transaction;
+pub mod vm;
 pub mod wallet;
 
 // Prevent fast-tests from being used in release builds.
@@ -246,6 +247,25 @@ pub mod constants {
     pub const P2P_REKEY_INTERVAL: u64 = 10_000;
     /// Maximum time (seconds) between rekeys for forward secrecy.
     pub const P2P_REKEY_TIME_SECS: u64 = 300;
+
+    // ── Smart Contracts ──
+
+    /// Maximum bytecode size for a deployed contract (64 KiB).
+    pub const MAX_CONTRACT_SIZE: usize = 65_536;
+    /// Maximum number of contracts in the registry.
+    pub const MAX_CONTRACTS: usize = 100_000;
+    /// Maximum contract VM memory slots.
+    pub const MAX_CONTRACT_MEMORY: usize = 16_384;
+    /// Maximum input commitments per contract call.
+    pub const MAX_CONTRACT_INPUTS: usize = 8;
+    /// Maximum output commitments per contract call.
+    pub const MAX_CONTRACT_OUTPUTS: usize = 8;
+    /// Fee per VM step executed in a contract call (base units).
+    pub const CONTRACT_STEP_FEE: u64 = 1;
+    /// Fee per byte of deployed contract bytecode (base units).
+    pub const CONTRACT_DEPLOY_FEE_PER_BYTE: u64 = 10;
+    /// Maximum serialized size of a contract transaction (256 KiB).
+    pub const MAX_CONTRACT_TX_SIZE: usize = 262_144;
 
     /// Minimum transaction fee (in base units).
     ///

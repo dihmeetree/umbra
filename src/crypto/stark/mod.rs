@@ -6,9 +6,10 @@
 //! - Post-quantum security (hash-based)
 //! - ~128-bit conjectured security (capped by Rp64_256 collision resistance)
 //!
-//! Two proof types:
+//! Three proof types:
 //! - **BalanceStarkProof**: proves commitment openings + balance equation + range
 //! - **SpendStarkProof**: proves Merkle membership + nullifier derivation
+//! - **ExecutionStarkProof**: proves correct contract VM execution
 
 pub mod convert;
 pub mod rescue;
@@ -16,6 +17,8 @@ pub mod types;
 
 pub mod balance_air;
 pub mod balance_prover;
+pub mod execution_air;
+pub mod execution_prover;
 pub mod spend_air;
 pub mod spend_prover;
 pub mod verify;
@@ -36,6 +39,7 @@ pub type StarkCoin = DefaultRandomCoin<Rp64_256>;
 
 // Re-export prover entry points for convenience.
 pub use balance_prover::prove_balance;
+pub use execution_prover::prove_execution;
 pub use spend_prover::prove_spend;
 
 /// Lightweight proof options for testing and simulation.

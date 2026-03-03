@@ -8,9 +8,11 @@ use winterfell::crypto::{DefaultRandomCoin, MerkleTree};
 use winterfell::{AcceptableOptions, Proof};
 
 use super::balance_air::BalanceAir;
+use super::execution_air::ExecutionAir;
 use super::spend_air::SpendAir;
 use super::types::{
-    BalancePublicInputs, BalanceStarkProof, SpendPublicInputs, SpendStarkProof, StarkError,
+    BalancePublicInputs, BalanceStarkProof, ExecutionPublicInputs, ExecutionStarkProof,
+    SpendPublicInputs, SpendStarkProof, StarkError,
 };
 
 /// Minimum conjectured security level (bits) required for proof acceptance.
@@ -67,6 +69,36 @@ pub fn verify_spend_proof(proof: &SpendStarkProof) -> Result<SpendPublicInputs, 
         pub_inputs.clone(),
         &acceptable,
     )
+    .map_err(|e| StarkError::VerificationFailed(e.to_string()))?;
+
+    Ok(pub_inputs)
+}
+
+/// Verify a contract execution STARK proof.
+///
+/// Checks that the proof attests to:
+/// - Execution started from a clean state (registers zeroed, pc=0)
+/// - Execution terminated in a halted state
+/// - Once halted, the state remained frozen
+pub fn verify_execution_proof(
+    proof: &ExecutionStarkProof,
+) -> Result<ExecutionPublicInputs, StarkError> {
+    let pub_inputs =
+        ExecutionPublicInputs::from_bytes(&proof.public_inputs_bytes).ok_or_else(|| {
+            StarkError::DeserializationFailed("invalid execution public inputs".into())
+        })?;
+
+    let stark_proof = Proof::from_bytes(&proof.proof_bytes)
+        .map_err(|e| StarkError::DeserializationFailed(e.to_string()))?;
+
+    let acceptable = AcceptableOptions::MinConjecturedSecurity(MIN_SECURITY);
+
+    winterfell::verify::<
+        ExecutionAir,
+        Rp64_256,
+        DefaultRandomCoin<Rp64_256>,
+        MerkleTree<Rp64_256>,
+    >(stark_proof, pub_inputs.clone(), &acceptable)
     .map_err(|e| StarkError::VerificationFailed(e.to_string()))?;
 
     Ok(pub_inputs)

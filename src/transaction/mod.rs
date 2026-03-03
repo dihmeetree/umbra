@@ -103,6 +103,20 @@ pub enum TxType {
         /// The validator's Kyber1024 KEM public key (for receiving coinbase rewards).
         kem_public_key: KemPublicKey,
     },
+    /// Deploy a new smart contract.
+    ContractDeploy {
+        /// The contract bytecode (sequence of VM opcodes).
+        bytecode: Vec<crate::vm::Opcode>,
+    },
+    /// Call a deployed smart contract function.
+    ContractCall {
+        /// ID of the contract to call.
+        contract_id: Hash,
+        /// Hash identifying the function entry point.
+        function_hash: Hash,
+        /// STARK proof of correct VM execution.
+        execution_proof: crate::crypto::stark::types::ExecutionStarkProof,
+    },
     /// Deregister an active validator and return the bond.
     ValidatorDeregister {
         /// ID (fingerprint) of the validator being deregistered.
@@ -295,6 +309,40 @@ impl Transaction {
                 // KEM key must have the correct Kyber1024 size (1568 bytes)
                 if !kem_public_key.is_valid_size() {
                     return Err(TxValidationError::InvalidValidatorKey);
+                }
+            }
+            TxType::ContractDeploy { bytecode } => {
+                if bytecode.is_empty() {
+                    return Err(TxValidationError::EmptyContractBytecode);
+                }
+                let serialized = crate::serialize(bytecode)
+                    .map_err(|e| TxValidationError::InvalidContractBytecode(e.to_string()))?;
+                if serialized.len() > crate::constants::MAX_CONTRACT_SIZE {
+                    return Err(TxValidationError::ContractTooLarge);
+                }
+            }
+            TxType::ContractCall {
+                contract_id,
+                function_hash,
+                execution_proof,
+            } => {
+                // Verify the execution proof
+                let verified =
+                    crate::crypto::stark::verify::verify_execution_proof(execution_proof)
+                        .map_err(|e| TxValidationError::InvalidExecutionProof(e.to_string()))?;
+
+                // Cross-check: proof's contract_id must match the transaction field
+                let proof_contract_id =
+                    crate::crypto::stark::convert::felts_to_hash(&verified.contract_id);
+                if !crate::constant_time_eq(&proof_contract_id, contract_id) {
+                    return Err(TxValidationError::ContractIdMismatch);
+                }
+
+                // Cross-check: proof's function_hash must match the transaction field
+                let proof_function_hash =
+                    crate::crypto::stark::convert::felts_to_hash(&verified.function_hash);
+                if !crate::constant_time_eq(&proof_function_hash, function_hash) {
+                    return Err(TxValidationError::FunctionHashMismatch);
                 }
             }
             TxType::ValidatorDeregister {
@@ -491,6 +539,16 @@ impl Transaction {
                     + 64 // blake3_binding
                     + 32 // bond_blinding
             }
+            TxType::ContractDeploy { bytecode } => {
+                1 + bytecode.len() * 8 // discriminant + serialized opcodes
+            }
+            TxType::ContractCall {
+                execution_proof, ..
+            } => {
+                1 + 32 + 32 // discriminant + contract_id + function_hash
+                    + execution_proof.proof_bytes.len()
+                    + execution_proof.public_inputs_bytes.len()
+            }
         };
         let raw = base + balance + inputs + outputs + messages + tx_type_extra + 32;
         // Add 10% overhead margin for bincode framing and field delimiters
@@ -564,6 +622,25 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
             hasher.update(&signing_key.sphincs);
             hasher.update(&(kem_public_key.0.len() as u32).to_le_bytes());
             hasher.update(&kem_public_key.0);
+        }
+        TxType::ContractDeploy { bytecode } => {
+            hasher.update(&[3u8]);
+            let serialized = crate::serialize(bytecode).unwrap_or_default();
+            hasher.update(&(serialized.len() as u32).to_le_bytes());
+            hasher.update(&serialized);
+        }
+        TxType::ContractCall {
+            contract_id,
+            function_hash,
+            execution_proof,
+        } => {
+            hasher.update(&[4u8]);
+            hasher.update(contract_id);
+            hasher.update(function_hash);
+            hasher.update(&(execution_proof.proof_bytes.len() as u32).to_le_bytes());
+            hasher.update(&execution_proof.proof_bytes);
+            hasher.update(&(execution_proof.public_inputs_bytes.len() as u32).to_le_bytes());
+            hasher.update(&execution_proof.public_inputs_bytes);
         }
         TxType::ValidatorDeregister {
             validator_id,
@@ -650,6 +727,18 @@ pub enum TxValidationError {
     InvalidChainId,
     #[error("output encrypted note exceeds maximum size")]
     OutputNoteTooLarge,
+    #[error("contract bytecode is empty")]
+    EmptyContractBytecode,
+    #[error("contract bytecode too large")]
+    ContractTooLarge,
+    #[error("invalid contract bytecode: {0}")]
+    InvalidContractBytecode(String),
+    #[error("invalid execution proof: {0}")]
+    InvalidExecutionProof(String),
+    #[error("contract_id mismatch between proof and transaction")]
+    ContractIdMismatch,
+    #[error("function_hash mismatch between proof and transaction")]
+    FunctionHashMismatch,
 }
 
 #[cfg(test)]
@@ -1750,5 +1839,240 @@ mod tests {
             h1, h2,
             "content hash must change when encrypted_note.kem_ciphertext changes"
         );
+    }
+
+    // ---- Contract Deploy validation tests ----
+
+    fn make_deploy_tx(bytecode: Vec<crate::vm::Opcode>) -> Transaction {
+        let recipient = FullKeypair::generate();
+        let serialized_len = crate::serialize(&bytecode).unwrap().len();
+        let deploy_fee = crate::constants::MIN_TX_FEE
+            + (serialized_len as u64) * crate::constants::CONTRACT_DEPLOY_FEE_PER_BYTE;
+        TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: deploy_fee + 1000,
+                blinding: BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 1000)
+            .set_tx_type(TxType::ContractDeploy {
+                bytecode: bytecode.clone(),
+            })
+            .set_fee(deploy_fee)
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn validate_deploy_rejects_empty_bytecode() {
+        let tx = make_deploy_tx(vec![]);
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::EmptyContractBytecode)
+        ));
+    }
+
+    #[test]
+    fn validate_deploy_rejects_too_large_bytecode() {
+        // Create bytecode that exceeds MAX_CONTRACT_SIZE when serialized
+        let big_bytecode = vec![crate::vm::Opcode::Halt; crate::constants::MAX_CONTRACT_SIZE + 1];
+        let tx = make_deploy_tx(big_bytecode);
+        assert!(matches!(
+            tx.validate_structure(0),
+            Err(TxValidationError::ContractTooLarge)
+        ));
+    }
+
+    #[test]
+    fn validate_deploy_accepts_valid_bytecode() {
+        use crate::vm::Opcode;
+        let bytecode = vec![Opcode::Const { dst: 0, value: 42 }, Opcode::Halt];
+        let tx = make_deploy_tx(bytecode);
+        // Should not fail on contract-specific checks (may fail on other checks like binding)
+        let result = tx.validate_structure(0);
+        assert!(
+            !matches!(result, Err(TxValidationError::EmptyContractBytecode))
+                && !matches!(result, Err(TxValidationError::ContractTooLarge))
+                && !matches!(result, Err(TxValidationError::InvalidContractBytecode(_)))
+        );
+    }
+
+    #[test]
+    fn content_hash_includes_contract_deploy_bytecode() {
+        use crate::vm::Opcode;
+        let mut hasher1 = blake3::Hasher::new();
+        let tx_type1 = TxType::ContractDeploy {
+            bytecode: vec![Opcode::Halt],
+        };
+        hash_tx_type_into(&tx_type1, &mut hasher1);
+
+        let mut hasher2 = blake3::Hasher::new();
+        let tx_type2 = TxType::ContractDeploy {
+            bytecode: vec![Opcode::Const { dst: 0, value: 1 }, Opcode::Halt],
+        };
+        hash_tx_type_into(&tx_type2, &mut hasher2);
+
+        assert_ne!(
+            hasher1.finalize(),
+            hasher2.finalize(),
+            "different bytecodes must produce different content hashes"
+        );
+    }
+
+    #[test]
+    fn content_hash_deploy_discriminant_differs_from_transfer() {
+        let mut hasher_transfer = blake3::Hasher::new();
+        hash_tx_type_into(&TxType::Transfer, &mut hasher_transfer);
+
+        let mut hasher_deploy = blake3::Hasher::new();
+        let tx_type = TxType::ContractDeploy {
+            bytecode: vec![crate::vm::Opcode::Halt],
+        };
+        hash_tx_type_into(&tx_type, &mut hasher_deploy);
+
+        assert_ne!(hasher_transfer.finalize(), hasher_deploy.finalize());
+    }
+
+    #[test]
+    fn content_hash_call_discriminant_differs_from_deploy() {
+        use crate::crypto::stark::types::ExecutionStarkProof;
+
+        let mut hasher_deploy = blake3::Hasher::new();
+        let deploy = TxType::ContractDeploy {
+            bytecode: vec![crate::vm::Opcode::Halt],
+        };
+        hash_tx_type_into(&deploy, &mut hasher_deploy);
+
+        let mut hasher_call = blake3::Hasher::new();
+        let call = TxType::ContractCall {
+            contract_id: [0u8; 32],
+            function_hash: [0u8; 32],
+            execution_proof: ExecutionStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+        };
+        hash_tx_type_into(&call, &mut hasher_call);
+
+        assert_ne!(hasher_deploy.finalize(), hasher_call.finalize());
+    }
+
+    #[test]
+    fn content_hash_call_includes_contract_id() {
+        use crate::crypto::stark::types::ExecutionStarkProof;
+
+        let proof = ExecutionStarkProof {
+            proof_bytes: vec![],
+            public_inputs_bytes: vec![],
+        };
+
+        let mut h1 = blake3::Hasher::new();
+        hash_tx_type_into(
+            &TxType::ContractCall {
+                contract_id: [0xAA; 32],
+                function_hash: [0u8; 32],
+                execution_proof: proof.clone(),
+            },
+            &mut h1,
+        );
+
+        let mut h2 = blake3::Hasher::new();
+        hash_tx_type_into(
+            &TxType::ContractCall {
+                contract_id: [0xBB; 32],
+                function_hash: [0u8; 32],
+                execution_proof: proof,
+            },
+            &mut h2,
+        );
+
+        assert_ne!(
+            h1.finalize(),
+            h2.finalize(),
+            "different contract_id must produce different content hashes"
+        );
+    }
+
+    #[test]
+    fn content_hash_call_includes_function_hash() {
+        use crate::crypto::stark::types::ExecutionStarkProof;
+
+        let proof = ExecutionStarkProof {
+            proof_bytes: vec![],
+            public_inputs_bytes: vec![],
+        };
+
+        let mut h1 = blake3::Hasher::new();
+        hash_tx_type_into(
+            &TxType::ContractCall {
+                contract_id: [0u8; 32],
+                function_hash: [0xAA; 32],
+                execution_proof: proof.clone(),
+            },
+            &mut h1,
+        );
+
+        let mut h2 = blake3::Hasher::new();
+        hash_tx_type_into(
+            &TxType::ContractCall {
+                contract_id: [0u8; 32],
+                function_hash: [0xBB; 32],
+                execution_proof: proof,
+            },
+            &mut h2,
+        );
+
+        assert_ne!(
+            h1.finalize(),
+            h2.finalize(),
+            "different function_hash must produce different content hashes"
+        );
+    }
+
+    #[test]
+    fn tx_type_serialization_roundtrip_deploy() {
+        use crate::vm::Opcode;
+        let tx_type = TxType::ContractDeploy {
+            bytecode: vec![
+                Opcode::Const { dst: 0, value: 42 },
+                Opcode::Const { dst: 1, value: 7 },
+                Opcode::Add {
+                    dst: 2,
+                    lhs: 0,
+                    rhs: 1,
+                },
+                Opcode::Halt,
+            ],
+        };
+        let encoded = crate::serialize(&tx_type).unwrap();
+        let decoded: TxType = crate::deserialize(&encoded).unwrap();
+        // Compare via content hash
+        let mut h1 = blake3::Hasher::new();
+        hash_tx_type_into(&tx_type, &mut h1);
+        let mut h2 = blake3::Hasher::new();
+        hash_tx_type_into(&decoded, &mut h2);
+        assert_eq!(h1.finalize(), h2.finalize());
+    }
+
+    #[test]
+    fn tx_type_serialization_roundtrip_call() {
+        use crate::crypto::stark::types::ExecutionStarkProof;
+        let tx_type = TxType::ContractCall {
+            contract_id: [0xAB; 32],
+            function_hash: [0xCD; 32],
+            execution_proof: ExecutionStarkProof {
+                proof_bytes: vec![1, 2, 3, 4],
+                public_inputs_bytes: vec![5, 6, 7, 8],
+            },
+        };
+        let encoded = crate::serialize(&tx_type).unwrap();
+        let decoded: TxType = crate::deserialize(&encoded).unwrap();
+        let mut h1 = blake3::Hasher::new();
+        hash_tx_type_into(&tx_type, &mut h1);
+        let mut h2 = blake3::Hasher::new();
+        hash_tx_type_into(&decoded, &mut h2);
+        assert_eq!(h1.finalize(), h2.finalize());
     }
 }

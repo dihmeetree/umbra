@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~35k lines across 45 source files with 1166 tests. Single crate, no workspace.
+Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~41k lines across 51 source files with 1252 tests. Single crate, no workspace.
 
 ## Build & Test
 
 ```bash
 cargo build --release        # Full build (requires C compiler for PQClean backends)
 cargo check                  # Fast type-check
-cargo test --features fast-tests # Fast suite (~1166 tests, ~1.5 min)
+cargo test --features fast-tests # Fast suite (~1252 tests, ~1.5 min)
 cargo test                       # Full suite (includes real SPHINCS+, ~3 hrs)
 cargo test <module>::tests       # Run specific module tests (e.g., consensus::bft::tests)
 cargo clippy --all-targets       # Lint — must be warning-free
@@ -26,12 +26,13 @@ Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` eve
 | --------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lib.rs`                          | `src/lib.rs`             | Protocol constants, `Hash` type, `hash_domain`, `hash_concat`, serialization helpers                                                                           |
 | `crypto/`                         | `src/crypto/*.rs`        | Post-quantum primitives: Dilithium5 signing, Kyber1024 KEM, stealth addresses, Rescue Prime commitments, nullifiers, Merkle proofs, VRF, encryption, zk-STARKs |
-| `transaction/`                    | `src/transaction/mod.rs` | Transaction types, validation (`validate_structure`), `TxInput`/`TxOutput`                                                                                     |
+| `transaction/`                    | `src/transaction/mod.rs` | Transaction types (Transfer, ContractDeploy, ContractCall), validation (`validate_structure`), `TxInput`/`TxOutput`                                            |
 | `transaction/builder.rs`          |                          | `TransactionBuilder` API for constructing transactions with STARK proofs                                                                                       |
+| `vm/`                             | `src/vm/*.rs`            | Contract VM: register-based execution over Goldilocks field, STARK-provable traces, contract state, bytecode opcodes, call builder                             |
 | `consensus/dag.rs`                |                          | DAG data structure (vertices, tips, finalized ordering, pruning)                                                                                               |
 | `consensus/bft.rs`                |                          | BFT voting, certificates, equivocation detection, VRF committee selection                                                                                      |
-| `state.rs`                        | `src/state.rs`           | `ChainState` (validators, bonds, slashing, epoch management), `Ledger` (DAG + state + Merkle tree), `restore_from_storage`                                     |
-| `storage.rs`                      | `src/storage.rs`         | `Storage` trait + `SledStorage` (sled embedded DB with 8 named trees)                                                                                          |
+| `state.rs`                        | `src/state.rs`           | `ChainState` (validators, bonds, slashing, epoch management, contract registry, contract state), `Ledger` (DAG + state + Merkle tree), `restore_from_storage`  |
+| `storage.rs`                      | `src/storage.rs`         | `Storage` trait + `SledStorage` (sled embedded DB with 10 named trees)                                                                                         |
 | `mempool.rs`                      | `src/mempool.rs`         | Fee-priority transaction pool with nullifier conflict detection                                                                                                |
 | `network.rs`                      | `src/network.rs`         | Wire protocol `Message` enum, bincode encode/decode with size limits                                                                                           |
 | `p2p.rs`                          | `src/p2p.rs`             | Encrypted TCP transport (Kyber KEM + Dilithium auth + ChaCha20-Poly1305 AEAD)                                                                                  |

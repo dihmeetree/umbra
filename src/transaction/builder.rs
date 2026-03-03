@@ -145,9 +145,39 @@ impl TransactionBuilder {
         self
     }
 
-    /// Set the transaction type (validator register/deregister).
+    /// Set the transaction type (validator register/deregister/contract).
     pub fn set_tx_type(mut self, tx_type: TxType) -> Self {
         self.tx_type = tx_type;
+        self
+    }
+
+    /// Configure this transaction as a contract deployment.
+    ///
+    /// The fee is computed as `MIN_TX_FEE + serialized_bytecode_len * CONTRACT_DEPLOY_FEE_PER_BYTE`.
+    pub fn deploy_contract(mut self, bytecode: Vec<crate::vm::Opcode>) -> Self {
+        let serialized_len = crate::serialize(&bytecode).unwrap_or_default().len();
+        self.fee = crate::constants::MIN_TX_FEE
+            + (serialized_len as u64) * crate::constants::CONTRACT_DEPLOY_FEE_PER_BYTE;
+        self.tx_type = TxType::ContractDeploy { bytecode };
+        self
+    }
+
+    /// Configure this transaction as a contract call.
+    ///
+    /// The caller must provide an explicit fee (covering step costs).
+    pub fn call_contract(
+        mut self,
+        contract_id: crate::Hash,
+        function_hash: crate::Hash,
+        execution_proof: crate::crypto::stark::types::ExecutionStarkProof,
+        fee: u64,
+    ) -> Self {
+        self.fee = fee;
+        self.tx_type = TxType::ContractCall {
+            contract_id,
+            function_hash,
+            execution_proof,
+        };
         self
     }
 

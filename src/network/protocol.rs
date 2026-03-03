@@ -446,6 +446,7 @@ mod tests {
             finalized_count: 42,
             total_minted: 500_000,
             last_slash_epoch: None,
+            contract_count: 0,
         };
         let msg = Message::SnapshotManifest {
             meta,
