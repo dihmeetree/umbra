@@ -242,9 +242,9 @@ impl Transaction {
             }
         }
 
-        // Bound encrypted note size per output. Note plaintext is 40 bytes
-        // (8-byte value + 32-byte blinding); with AEAD overhead the ciphertext
-        // is ~56 bytes. 256 bytes is a generous cap that prevents bloat attacks.
+        // Bound encrypted note size per output. Note plaintext is 41 bytes
+        // (1-byte version + 8-byte value + 32-byte blinding); with AEAD overhead
+        // the ciphertext is ~57 bytes. 256 bytes is a generous cap that prevents bloat attacks.
         for output in &self.outputs {
             if output.encrypted_note.ciphertext.len() > 256 {
                 return Err(TxValidationError::OutputNoteTooLarge);
@@ -517,6 +517,8 @@ pub fn compute_tx_content_hash(
         hasher.update(&output.stealth_address.one_time_key);
         hasher.update(&(output.stealth_address.kem_ciphertext.0.len() as u32).to_le_bytes());
         hasher.update(&output.stealth_address.kem_ciphertext.0);
+        hasher.update(&(output.encrypted_note.kem_ciphertext.0.len() as u32).to_le_bytes());
+        hasher.update(&output.encrypted_note.kem_ciphertext.0);
         hasher.update(&output.encrypted_note.nonce);
         hasher.update(&(output.encrypted_note.ciphertext.len() as u32).to_le_bytes());
         hasher.update(&output.encrypted_note.ciphertext);
@@ -566,6 +568,10 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
                 &(bond_return_output.stealth_address.kem_ciphertext.0.len() as u32).to_le_bytes(),
             );
             hasher.update(&bond_return_output.stealth_address.kem_ciphertext.0);
+            hasher.update(
+                &(bond_return_output.encrypted_note.kem_ciphertext.0.len() as u32).to_le_bytes(),
+            );
+            hasher.update(&bond_return_output.encrypted_note.kem_ciphertext.0);
             hasher.update(&bond_return_output.encrypted_note.nonce);
             hasher
                 .update(&(bond_return_output.encrypted_note.ciphertext.len() as u32).to_le_bytes());
@@ -1666,6 +1672,38 @@ mod tests {
             hash_with_note(0xAA),
             hash_with_note(0xBB),
             "bond_return_output encrypted_note must be included in content hash"
+        );
+    }
+
+    #[test]
+    fn content_hash_includes_encrypted_note_kem_ciphertext() {
+        // Replacing encrypted_note.kem_ciphertext must change compute_tx_content_hash,
+        // otherwise an attacker can swap it to prevent the recipient from decrypting.
+        use crate::crypto::commitment::Commitment;
+        use crate::crypto::encryption::EncryptedPayload;
+        use crate::crypto::stealth::StealthAddress;
+
+        let make_output = |kem_byte: u8| TxOutput {
+            commitment: Commitment([0u8; 32]),
+            stealth_address: StealthAddress {
+                one_time_key: [0u8; 32],
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![0u8; 1568]),
+            },
+            encrypted_note: EncryptedPayload {
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![kem_byte; 1568]),
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 57],
+            },
+            blake3_binding: [0u8; 64],
+        };
+
+        let chain_id = [0u8; 32];
+        let tx_type = TxType::Transfer;
+        let h1 = compute_tx_content_hash(&[], &[make_output(0xAA)], &[], 0, &chain_id, 0, &tx_type);
+        let h2 = compute_tx_content_hash(&[], &[make_output(0xBB)], &[], 0, &chain_id, 0, &tx_type);
+        assert_ne!(
+            h1, h2,
+            "content hash must change when encrypted_note.kem_ciphertext changes"
         );
     }
 }

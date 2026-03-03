@@ -1050,7 +1050,7 @@ impl ChainState {
         BlindingFactor::from_bytes(hash)
     }
 
-    /// Encode coinbase note data (same 40-byte format as transaction builder).
+    /// Encode coinbase note data (same 41-byte format as transaction builder).
     fn encode_coinbase_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
         // Note format: [1-byte version][8-byte LE value][32-byte blinding]
         let mut data = Vec::with_capacity(41);

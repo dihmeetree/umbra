@@ -1752,8 +1752,19 @@ impl Node {
                         && self.snapshot_manifests.len()
                             >= crate::constants::MAX_SNAPSHOT_MANIFEST_ROOTS
                     {
-                        tracing::warn!("Too many distinct snapshot state_roots, ignoring");
-                        return;
+                        // Evict the entry with the fewest votes rather than silently
+                        // dropping the new root. A Sybil set could otherwise pre-fill
+                        // the map with unique roots and block honest peers from being
+                        // tracked.
+                        if let Some(evict_key) = self
+                            .snapshot_manifests
+                            .iter()
+                            .min_by_key(|(_, v)| v.len())
+                            .map(|(k, _)| *k)
+                        {
+                            tracing::warn!("Snapshot manifest map full, evicting lowest-vote root");
+                            self.snapshot_manifests.remove(&evict_key);
+                        }
                     }
                     let entry = self.snapshot_manifests.entry(state_root).or_default();
                     if !entry.iter().any(|(pid, _, _, _)| *pid == from) {
