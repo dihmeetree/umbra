@@ -1596,10 +1596,24 @@ impl Node {
                     }
                 }
                 self.get_snapshot_timestamps.insert(from, now);
-                // Prune stale entries to prevent unbounded growth
+                // Enforce hard cap: first prune stale entries, then evict oldest
+                // if the map is still over the limit. The age-only retain is
+                // insufficient when many fresh entries arrive under peer churn.
                 if self.get_snapshot_timestamps.len() > crate::constants::MAX_PEERS {
                     let cutoff = now - std::time::Duration::from_secs(30);
                     self.get_snapshot_timestamps.retain(|_, t| *t > cutoff);
+                    while self.get_snapshot_timestamps.len() > crate::constants::MAX_PEERS {
+                        if let Some(oldest) = self
+                            .get_snapshot_timestamps
+                            .iter()
+                            .min_by_key(|(_, ts)| **ts)
+                            .map(|(peer, _)| *peer)
+                        {
+                            self.get_snapshot_timestamps.remove(&oldest);
+                        } else {
+                            break;
+                        }
+                    }
                 }
                 if let Some((ref bytes, total_chunks, ref meta, ref created)) = self.snapshot_cache
                 {

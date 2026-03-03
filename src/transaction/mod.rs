@@ -470,7 +470,8 @@ impl Transaction {
                 bond_return_output,
                 ..
             } => {
-                1 + auth_signature.dilithium.len() + auth_signature.sphincs.len()
+                1 + 32 // discriminant + validator_id
+                    + auth_signature.dilithium.len() + auth_signature.sphincs.len()
                     + 32 // commitment
                     + 32 // one_time_key
                     + bond_return_output.stealth_address.kem_ciphertext.0.len()
