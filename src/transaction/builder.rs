@@ -112,6 +112,10 @@ impl TransactionBuilder {
     }
 
     /// Set the transaction fee.
+    ///
+    /// Only used for `ValidatorRegister` and `ValidatorDeregister` transactions.
+    /// For `Transfer` transactions the fee is computed deterministically from the
+    /// transaction shape and any value set here is silently ignored.
     pub fn set_fee(mut self, fee: u64) -> Self {
         self.fee = fee;
         self
@@ -179,6 +183,11 @@ impl TransactionBuilder {
         for msg_spec in &self.messages {
             if msg_spec.plaintext.len() > crate::constants::MAX_MESSAGE_SIZE {
                 return Err(TxBuildError::MessageTooLarge);
+            }
+        }
+        for spec in &self.inputs {
+            if spec.value == 0 {
+                return Err(TxBuildError::ZeroValueInput);
             }
         }
         for spec in &self.outputs {
@@ -392,9 +401,18 @@ impl Default for TransactionBuilder {
     }
 }
 
+/// Note format version byte. Increment if the layout changes.
+const NOTE_VERSION: u8 = 1;
+/// Encoded note length: 1 version + 8 value + 32 blinding = 41 bytes.
+const ENCODED_NOTE_LEN: usize = 41;
+
 /// Encode note data (value + blinding) for encryption.
+///
+/// Layout: `[1-byte version][8-byte LE value][32-byte blinding]`
+/// The version byte enables forward-compatible format changes.
 fn encode_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
-    let mut data = Vec::with_capacity(40);
+    let mut data = Vec::with_capacity(ENCODED_NOTE_LEN);
+    data.push(NOTE_VERSION);
     data.extend_from_slice(&value.to_le_bytes());
     data.extend_from_slice(&blinding.0);
     data
@@ -402,15 +420,18 @@ fn encode_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
 
 /// Decode note data from decrypted bytes.
 ///
-/// Expects exactly 40 bytes (8 bytes value + 32 bytes blinding factor).
+/// Expects exactly `ENCODED_NOTE_LEN` bytes with a recognized version byte.
 /// Rejects payloads of any other length to prevent trailing-data confusion.
 pub fn decode_note(data: &[u8]) -> Option<(u64, BlindingFactor)> {
-    if data.len() != 40 {
+    if data.len() != ENCODED_NOTE_LEN {
         return None;
     }
-    let value = u64::from_le_bytes(data[..8].try_into().ok()?);
+    if data[0] != NOTE_VERSION {
+        return None;
+    }
+    let value = u64::from_le_bytes(data[1..9].try_into().ok()?);
     let mut blind_bytes = [0u8; 32];
-    blind_bytes.copy_from_slice(&data[8..40]);
+    blind_bytes.copy_from_slice(&data[9..41]);
     Some((value, BlindingFactor::from_bytes(blind_bytes)))
 }
 
@@ -445,6 +466,8 @@ pub enum TxBuildError {
     MessageTooLarge,
     #[error("zero-value outputs are not allowed")]
     ZeroValueOutput,
+    #[error("zero-value inputs are not allowed")]
+    ZeroValueInput,
 }
 
 #[cfg(test)]
@@ -735,13 +758,16 @@ mod tests {
         let encoded = encode_note(value, &blinding);
         assert_eq!(
             encoded.len(),
-            40,
-            "encode_note must produce exactly 40 bytes"
+            ENCODED_NOTE_LEN,
+            "encode_note must produce exactly {} bytes",
+            ENCODED_NOTE_LEN
         );
-        // First 8 bytes: value in little-endian
-        assert_eq!(&encoded[..8], &value.to_le_bytes());
-        // Next 32 bytes: blinding factor
-        assert_eq!(&encoded[8..40], &[0xAB; 32]);
+        // Byte 0: version
+        assert_eq!(encoded[0], NOTE_VERSION);
+        // Bytes 1..9: value in little-endian
+        assert_eq!(&encoded[1..9], &value.to_le_bytes());
+        // Bytes 9..41: blinding factor
+        assert_eq!(&encoded[9..41], &[0xAB; 32]);
     }
 
     #[test]
@@ -931,10 +957,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_note_exact_40_bytes() {
-        let data = [0u8; 40];
+    fn decode_note_exact_41_bytes_with_version() {
+        // Note format: [1-byte version][8-byte LE value][32-byte blinding]
+        let mut data = [0u8; 41];
+        data[0] = 1; // NOTE_VERSION
         let result = decode_note(&data);
-        assert!(result.is_some());
+        assert!(
+            result.is_some(),
+            "41-byte note with correct version must decode"
+        );
         let (value, blinding) = result.unwrap();
         assert_eq!(value, 0);
         assert_eq!(blinding.0, [0u8; 32]);
@@ -960,5 +991,64 @@ mod tests {
         let mainnet = TransactionBuilder::new().with_network(NetworkId::Mainnet);
         let testnet = TransactionBuilder::new().with_network(NetworkId::Testnet);
         assert_ne!(mainnet.chain_id, testnet.chain_id);
+    }
+
+    #[test]
+    #[cfg(feature = "fast-tests")]
+    fn zero_value_input_rejected() {
+        use crate::crypto::keys::FullKeypair;
+        let recipient = FullKeypair::generate();
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 0,
+                blinding: crate::crypto::commitment::BlindingFactor::random(),
+                spend_auth: crate::hash_domain(b"test", b"auth"),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 0)
+            .build();
+        assert!(
+            matches!(result, Err(TxBuildError::ZeroValueInput)),
+            "zero-value input must be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn note_version_byte_present() {
+        let blinding = crate::crypto::commitment::BlindingFactor::from_bytes([0x42; 32]);
+        let encoded = encode_note(12345, &blinding);
+        assert_eq!(
+            encoded.len(),
+            ENCODED_NOTE_LEN,
+            "encoded note must be {} bytes",
+            ENCODED_NOTE_LEN
+        );
+        assert_eq!(
+            encoded[0], NOTE_VERSION,
+            "first byte must be version {}",
+            NOTE_VERSION
+        );
+    }
+
+    #[test]
+    fn decode_note_rejects_wrong_version() {
+        let blinding = crate::crypto::commitment::BlindingFactor::from_bytes([0x01; 32]);
+        let mut encoded = encode_note(100, &blinding);
+        encoded[0] = NOTE_VERSION.wrapping_add(1); // corrupt version
+        assert!(
+            decode_note(&encoded).is_none(),
+            "unrecognized version byte must be rejected"
+        );
+    }
+
+    #[test]
+    fn decode_note_rejects_old_40_byte_format() {
+        // Pre-version notes were 40 bytes (no version byte). Ensure they are rejected.
+        let data = vec![0u8; 40];
+        assert!(
+            decode_note(&data).is_none(),
+            "40-byte (versionless) notes must be rejected after format upgrade"
+        );
     }
 }

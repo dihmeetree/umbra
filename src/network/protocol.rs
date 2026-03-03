@@ -150,13 +150,20 @@ pub enum Message {
         requester_external_addr: String,
     },
 
-    // ── Transport Rekeying (v4) ──
+    // ── Transport Rekeying ──
     /// Request a session rekey with a new Kyber KEM ciphertext.
-    /// Sent over the existing encrypted channel for forward secrecy.
+    /// Sent over the existing encrypted channel.
     RekeyRequest { kem_ciphertext: KemCiphertext },
 
     /// Acknowledge a rekey request. The receiver has derived new session keys.
     RekeyAck,
+}
+
+/// Truncate a string to at most `max_bytes` bytes, respecting UTF-8 char
+/// boundaries. `String::truncate` panics if the index falls mid-codepoint,
+/// so we walk back to the nearest boundary first.
+fn truncate_str_utf8(s: &mut String, max_bytes: usize) {
+    s.truncate(s.floor_char_boundary(max_bytes));
 }
 
 impl Message {
@@ -181,6 +188,41 @@ impl Message {
             }
             Message::EpochStateResponse { committee, .. } => {
                 committee.truncate(crate::constants::COMMITTEE_SIZE);
+            }
+            Message::SnapshotChunk { data, .. } => {
+                // Enforce SNAPSHOT_CHUNK_SIZE + small overhead for framing
+                let max = crate::constants::SNAPSHOT_CHUNK_SIZE + 64;
+                data.truncate(max);
+            }
+            Message::NewVertex(vertex) => {
+                // Cap transaction count per vertex to prevent excessive
+                // validation CPU from a single message
+                vertex
+                    .transactions
+                    .truncate(crate::constants::VERTEX_MAX_DRAIN);
+            }
+            Message::NatInfo {
+                external_addr,
+                observed_addr,
+            } => {
+                // Bound string fields to prevent memory exhaustion from oversized addresses.
+                // Use floor_char_boundary to avoid panicking on multi-byte UTF-8 sequences.
+                if let Some(s) = external_addr.as_mut() {
+                    truncate_str_utf8(s, 64);
+                }
+                truncate_str_utf8(observed_addr, 64);
+            }
+            Message::NatPunchRequest {
+                requester_external_addr,
+                ..
+            } => {
+                truncate_str_utf8(requester_external_addr, 64);
+            }
+            Message::NatPunchNotify {
+                requester_external_addr,
+                ..
+            } => {
+                truncate_str_utf8(requester_external_addr, 64);
             }
             _ => {}
         }
@@ -231,7 +273,9 @@ pub fn encode_message(msg: &Message) -> Result<Vec<u8>, NetworkError> {
     if payload.len() > crate::constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err(NetworkError::MessageTooLarge);
     }
-    let len = (payload.len() as u32).to_le_bytes();
+    let len = u32::try_from(payload.len())
+        .map_err(|_| NetworkError::MessageTooLarge)?
+        .to_le_bytes();
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len);
     buf.extend_from_slice(&payload);
@@ -843,6 +887,113 @@ mod tests {
         msg.sanitize();
         if let Message::PeersResponse(peers) = &msg {
             assert!(peers.len() <= 1000);
+        }
+    }
+
+    #[test]
+    fn sanitize_nat_info_truncates_long_strings() {
+        let mut msg = Message::NatInfo {
+            external_addr: Some("x".repeat(200)),
+            observed_addr: "y".repeat(200),
+        };
+        msg.sanitize();
+        if let Message::NatInfo {
+            external_addr,
+            observed_addr,
+        } = &msg
+        {
+            assert!(external_addr.as_ref().map_or(0, |s| s.len()) <= 64);
+            assert!(observed_addr.len() <= 64);
+        } else {
+            panic!("expected NatInfo");
+        }
+    }
+
+    #[test]
+    fn sanitize_nat_punch_request_truncates_addr() {
+        let mut msg = Message::NatPunchRequest {
+            target_peer_id: [0u8; 32],
+            requester_external_addr: "z".repeat(200),
+        };
+        msg.sanitize();
+        if let Message::NatPunchRequest {
+            requester_external_addr,
+            ..
+        } = &msg
+        {
+            assert!(requester_external_addr.len() <= 64);
+        } else {
+            panic!("expected NatPunchRequest");
+        }
+    }
+
+    #[test]
+    fn sanitize_snapshot_chunk_truncates_data() {
+        let max = crate::constants::SNAPSHOT_CHUNK_SIZE + 64;
+        let mut msg = Message::SnapshotChunk {
+            chunk_index: 0,
+            total_chunks: 1,
+            data: vec![0u8; max + 1000],
+        };
+        msg.sanitize();
+        if let Message::SnapshotChunk { data, .. } = &msg {
+            assert!(
+                data.len() <= max,
+                "SnapshotChunk data must be capped at SNAPSHOT_CHUNK_SIZE+64"
+            );
+        } else {
+            panic!("expected SnapshotChunk");
+        }
+    }
+
+    #[test]
+    fn sanitize_nat_info_no_panic_on_utf8_boundary() {
+        // "ä" is a 2-byte UTF-8 sequence (0xC3 0xA4). Placing it at bytes 63-64
+        // means the byte index 64 falls mid-codepoint, which String::truncate would
+        // panic on. truncate_str_utf8 must handle this gracefully.
+        let s = "a".repeat(63) + "ä"; // 65 bytes total
+        assert_eq!(s.len(), 65);
+        let mut msg = Message::NatInfo {
+            external_addr: Some(s.clone()),
+            observed_addr: s.clone(),
+        };
+        msg.sanitize(); // must not panic
+        if let Message::NatInfo {
+            external_addr,
+            observed_addr,
+        } = &msg
+        {
+            // Both fields must be truncated to <= 64 bytes and remain valid UTF-8
+            assert!(external_addr.as_ref().map_or(0, |s| s.len()) <= 64);
+            assert!(observed_addr.len() <= 64);
+            assert!(external_addr
+                .as_ref()
+                .is_none_or(|s| std::str::from_utf8(s.as_bytes()).is_ok()));
+            assert!(std::str::from_utf8(observed_addr.as_bytes()).is_ok());
+        } else {
+            panic!("expected NatInfo");
+        }
+    }
+
+    #[test]
+    fn sanitize_nat_punch_no_panic_on_utf8_boundary() {
+        // Same UTF-8 boundary case for NatPunchRequest/NatPunchNotify.
+        let s = "x".repeat(62) + "日"; // "日" = 3-byte UTF-8; total 65 bytes
+        assert_eq!(s.len(), 65);
+        let mut msg = Message::NatPunchRequest {
+            target_peer_id: [0u8; 32],
+            requester_external_addr: s.clone(),
+        };
+        msg.sanitize();
+        if let Message::NatPunchRequest {
+            requester_external_addr,
+            ..
+        } = &msg
+        {
+            assert!(requester_external_addr.len() <= 64);
+            assert!(std::str::from_utf8(requester_external_addr.as_bytes()).is_ok());
+        } else {
+            panic!("expected NatPunchRequest");
         }
     }
 }

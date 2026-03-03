@@ -79,6 +79,11 @@ impl Signature {
     }
 
     /// Check if this signature has valid sizes for both components.
+    /// Returns `true` if the signature has a valid size — either all-empty
+    /// (representing an absent signature) or correctly sized components.
+    /// Under the `fast-tests` feature only the Dilithium component length is
+    /// enforced; SPHINCS+ may be absent even on a non-empty signature.
+    /// Use [`is_empty`](Self::is_empty) to distinguish absent from present.
     pub fn is_valid_size(&self) -> bool {
         #[cfg(not(feature = "fast-tests"))]
         {

@@ -1050,9 +1050,11 @@ impl ChainState {
         BlindingFactor::from_bytes(hash)
     }
 
-    /// Encode coinbase note data (same 40-byte format as transaction builder).
+    /// Encode coinbase note data (same 41-byte format as transaction builder).
     fn encode_coinbase_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
-        let mut data = Vec::with_capacity(40);
+        // Note format: [1-byte version][8-byte LE value][32-byte blinding]
+        let mut data = Vec::with_capacity(41);
+        data.push(1u8); // NOTE_VERSION
         data.extend_from_slice(&value.to_le_bytes());
         data.extend_from_slice(&blinding.0);
         data
@@ -1641,7 +1643,8 @@ mod tests {
         let commitment = Commitment::commit(100, &blinding);
         let stealth_result =
             crate::crypto::stealth::StealthAddress::generate(&recipient.kem.public, 0).unwrap();
-        let note_data = vec![0u8; 40];
+        let mut note_data = vec![0u8; 41];
+        note_data[0] = 1u8; // NOTE_VERSION
         let encrypted_note =
             crate::crypto::encryption::EncryptedPayload::encrypt_with_shared_secret(
                 &stealth_result.shared_secret,

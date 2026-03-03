@@ -149,7 +149,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **1144 tests**.
+**~35,000 lines of Rust** across 45 source files with **1159 tests**.
 
 ## Building
 
@@ -525,13 +525,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (~1144 tests)
+cargo test                       # Full suite (~1159 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1144 tests cover:
+All 1159 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -997,13 +997,28 @@ All transaction validity is verified via zk-STARKs:
 - **Merkle depth validation** — `compute_merkle_root_checked` validates that path length equals `MERKLE_DEPTH` before computing, preventing silent root computation with incorrect path lengths; debug assertions guard `pad_merkle_path`, `canonical_root`, and `build_merkle_tree` sibling skip against invariant violations
 - **Incremental Merkle restore consistency** — `IncrementalMerkleTree::restore()` recomputes parent nodes from leaves upward and repairs any inconsistencies, preventing corrupted storage data from silently propagating into the live tree
 - **Fast-tests signature validation** — `Signature::is_valid_size` under `fast-tests` requires both Dilithium and SPHINCS+ components to be empty or present, preventing acceptance of half-populated test signatures
+- **Ban expiry safety** — `checked_duration_since` replaces `duration_since` when computing ban remainders, eliminating a panic if the ban timestamp expires between the guard check and duration computation
+- **Snapshot Sybil resistance** — `SNAPSHOT_QUORUM` raised from 2 to 3 and `snapshot_manifests` capped at `MAX_SNAPSHOT_MANIFEST_ROOTS = 16` entries, requiring more peer agreement and bounding memory use from Sybil peers sending unique state roots
+- **Sync dedup cleared on completion** — `clear_sync_dedup()` is now called when vertex sync completes, freeing the deduplication set that previously grew unbounded for the node lifetime
+- **Constant-time peer identity** — peer_id vs public key fingerprint comparisons in both inbound and outbound handshake paths now use `constant_time_eq`, consistent with all other identity comparisons
+- **View-change rate limiting** — `last_finalized_time` is reset after advancing the BFT round on staleness detection, preventing rapid repeated round advancement when the leader is unresponsive
+- **Mempool recovery on vertex failure** — transactions drained from the mempool before vertex insertion are returned to the mempool if insertion fails, preventing silent loss of pending transactions
+- **Bond return output binding** — `hash_tx_type_into` for `ValidatorDeregister` now includes `kem_ciphertext` and `encrypted_note` fields of the bond return output in the content hash, closing a narrow malleability window for encrypted note substitution
+- **Zero chain_id rejection** — `validate_structure` rejects transactions with an all-zero chain_id as an early filter before expensive STARK verification
+- **Encrypted note size cap** — `validate_structure` enforces a 256-byte cap on per-output encrypted note ciphertexts, preventing bloat attacks via hand-crafted transactions
+- **Versioned note encoding** — transaction note encoding now includes a 1-byte version prefix (layout: `[version][8-byte LE value][32-byte blinding]`), enabling forward-compatible format changes and explicitly rejecting unversioned legacy notes
+- **GetSnapshot rate limiting** — manifest responses are rate-limited to one per peer per 5 seconds with bounded per-peer tracking, preventing repeated snapshot serialization triggered by a single peer
+- **NatInfo field bounds** — `sanitize()` truncates `NatInfo`, `NatPunchRequest`, and `NatPunchNotify` string address fields to 64 bytes, preventing memory exhaustion from oversized address strings
+- **Sanitize SnapshotChunk and NewVertex** — `sanitize()` now caps `SnapshotChunk.data` at `SNAPSHOT_CHUNK_SIZE + 64` bytes and `NewVertex.transactions` at `VERTEX_MAX_DRAIN` entries, bounding validation CPU from a single large message
+- **Safe u32 casts** — `encode_message` and `write_encrypted` use `u32::try_from` instead of `as u32` for length fields, returning errors on overflow rather than silently truncating
+- **pad_to_bucket minimum** — `pad_to_bucket(0)` now returns one full bucket instead of zero, ensuring encrypted frames always contain at least one padding bucket
 
 ## Production Roadmap
 
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — independent cryptographic protocol review and penetration testing (five internal audits have been completed, addressing 75+ findings across all severity levels and expanding test coverage from 226 to 1144 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
+- **External security audit** — independent cryptographic protocol review and penetration testing (six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1159 tests with targeted state correctness, validation bypass, regression tests, cryptographic hardening, comprehensive unit test coverage across all modules, formal verification of all 206 AIR constraints, 25 end-to-end integration tests covering transaction lifecycle, BFT certification, equivocation slashing, epoch management, snapshot round-trips, wallet flows, validator registration, and multi-hop transfers, 12 consensus property tests verifying BFT safety (no conflicting certificates, quorum intersection, epoch/chain isolation), liveness (honest majority certification, leader fairness, round advancement), and consistency (deterministic finalization order, symmetric verification), and 4 fuzz targets for serialization boundaries (network messages, transactions, vertices); a full-stack network simulator validates multi-node BFT consensus, transaction flow, and attack rejection)
 
 ## License
 
