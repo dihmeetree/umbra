@@ -68,6 +68,9 @@ askama_web = { version = "0.15", features = ["axum-0.8"] }
 # Key derivation (memory-hard password hashing for wallet files)
 argon2 = "0.5"
 
+# Secure password input for wallet CLI
+rpassword = "5"
+
 # Utilities
 hex = "0.4"
 thiserror = "2"

@@ -86,6 +86,10 @@ impl EncryptedPayload {
     ///
     /// Returns `None` if the KEM encapsulation fails or if the plaintext
     /// exceeds `MAX_ENCRYPT_PLAINTEXT`.
+    ///
+    /// Known limitation: the number of encrypted outputs per transaction reveals
+    /// the transaction structure (number of recipients). Constant-count outputs
+    /// would require protocol changes and increase transaction size.
     pub fn encrypt(recipient: &KemPublicKey, plaintext: &[u8]) -> Option<Self> {
         if plaintext.len() > crate::constants::MAX_ENCRYPT_PLAINTEXT {
             return None;

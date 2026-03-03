@@ -43,7 +43,15 @@ pub fn is_valid_public_addr(addr: &SocketAddr) -> bool {
                 && !v4.is_link_local()
                 && !v4.is_broadcast()
         }
-        IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified(),
+        IpAddr::V6(v6) => {
+            !v6.is_loopback() && !v6.is_unspecified() && !v6.is_multicast() && {
+                let segments = v6.segments();
+                // Reject unique-local addresses (fc00::/7)
+                (segments[0] & 0xfe00) != 0xfc00
+                    // Reject link-local addresses (fe80::/10)
+                    && (segments[0] & 0xffc0) != 0xfe80
+            }
+        }
     }
 }
 
@@ -2323,5 +2331,41 @@ mod tests {
 
         let unspecified: SocketAddr = "[::]:9732".parse().unwrap();
         assert!(!is_valid_public_addr(&unspecified));
+    }
+
+    #[test]
+    fn ipv6_multicast_rejected() {
+        let addr: std::net::SocketAddr = "[ff02::1]:8080".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn ipv6_link_local_rejected() {
+        let addr: std::net::SocketAddr = "[fe80::1]:8080".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn ipv6_unique_local_rejected() {
+        let addr: std::net::SocketAddr = "[fd00::1]:8080".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_ipv6_multicast() {
+        let addr: SocketAddr = "[ff02::1]:8000".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_ipv6_link_local() {
+        let addr: SocketAddr = "[fe80::1]:8000".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn is_valid_public_addr_rejects_ipv6_unique_local() {
+        let addr: SocketAddr = "[fd00::1]:8000".parse().unwrap();
+        assert!(!is_valid_public_addr(&addr));
     }
 }

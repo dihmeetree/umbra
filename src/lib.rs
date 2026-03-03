@@ -511,7 +511,8 @@ pub fn deserialize_snapshot<T: serde::de::DeserializeOwned>(
     if bytes.len() > constants::MAX_SNAPSHOT_DESERIALIZE_BYTES {
         return Err(bincode::error::DecodeError::LimitExceeded);
     }
-    let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
+    let config = bincode::config::legacy().with_limit::<{ 2 * 1024 * 1024 * 1024 }>();
+    let (val, _len) = bincode::serde::decode_from_slice(bytes, config)?;
     Ok(val)
 }
 

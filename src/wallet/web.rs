@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use askama::Template;
 use askama_web::WebTemplate;
@@ -37,9 +38,12 @@ pub struct WalletWebState {
     /// Serializes mutating wallet operations (send, consolidate) to prevent
     /// race conditions between concurrent requests.
     wallet_op_lock: Arc<tokio::sync::Mutex<()>>,
-    /// CSRF token for form submissions (hex-encoded 32 random bytes).
-    csrf_token: String,
+    /// CSRF token state: (token_string, created_at). Rotated every hour.
+    csrf_state: Arc<RwLock<(String, Instant)>>,
 }
+
+/// Maximum age of a CSRF token before automatic rotation.
+const CSRF_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 impl WalletWebState {
     fn new(
@@ -54,13 +58,24 @@ impl WalletWebState {
             wallet_tls,
             wallet: Arc::new(RwLock::new(None)),
             wallet_op_lock: Arc::new(tokio::sync::Mutex::new(())),
-            csrf_token: hex::encode(csrf_bytes),
+            csrf_state: Arc::new(RwLock::new((hex::encode(csrf_bytes), Instant::now()))),
         }
     }
 
+    /// Get the current CSRF token, regenerating if older than CSRF_MAX_AGE.
+    async fn csrf_token(&self) -> String {
+        let mut state = self.csrf_state.write().await;
+        if state.1.elapsed() > CSRF_MAX_AGE {
+            let new_bytes: [u8; 32] = rand::random();
+            *state = (hex::encode(new_bytes), Instant::now());
+        }
+        state.0.clone()
+    }
+
     /// Validate a CSRF token from a form submission.
-    fn validate_csrf(&self, token: &str) -> bool {
-        crate::constant_time_eq(token.as_bytes(), self.csrf_token.as_bytes())
+    async fn validate_csrf(&self, token: &str) -> bool {
+        let state = self.csrf_state.read().await;
+        crate::constant_time_eq(token.as_bytes(), state.0.as_bytes())
     }
 
     /// Create an RPC client, using mTLS if configured.
@@ -256,7 +271,7 @@ pub fn router(state: WalletWebState) -> Router {
         .route("/history", get(history_page))
         .route("/scan", post(scan_action))
         .layer(axum::middleware::from_fn(security_headers))
-        .layer(tower_http::cors::CorsLayer::very_permissive())
+        .layer(tower_http::cors::CorsLayer::new())
         .with_state(state)
 }
 
@@ -335,7 +350,7 @@ async fn dashboard(State(state): State<WalletWebState>) -> Response {
         chain_state_root,
         flash_success: None,
         flash_error: None,
-        csrf_token: state.csrf_token.clone(),
+        csrf_token: state.csrf_token().await,
     }
     .into_response()
 }
@@ -347,17 +362,17 @@ async fn init_page(State(state): State<WalletWebState>) -> Response {
     InitTemplate {
         active_tab: "",
         flash_error: None,
-        csrf_token: state.csrf_token.clone(),
+        csrf_token: state.csrf_token().await,
     }
     .into_response()
 }
 
 async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfForm>) -> Response {
-    if !state.validate_csrf(&form.csrf_token) {
+    if !state.validate_csrf(&form.csrf_token).await {
         return InitTemplate {
             active_tab: "",
             flash_error: Some("Invalid CSRF token. Please reload the page and try again.".into()),
-            csrf_token: state.csrf_token.clone(),
+            csrf_token: state.csrf_token().await,
         }
         .into_response();
     }
@@ -371,7 +386,7 @@ async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
         return InitTemplate {
             active_tab: "",
             flash_error: Some(format!("Failed to create directory: {}", e)),
-            csrf_token: state.csrf_token.clone(),
+            csrf_token: state.csrf_token().await,
         }
         .into_response();
     }
@@ -381,7 +396,7 @@ async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
         return InitTemplate {
             active_tab: "",
             flash_error: Some(format!("Failed to save wallet: {}", e)),
-            csrf_token: state.csrf_token.clone(),
+            csrf_token: state.csrf_token().await,
         }
         .into_response();
     }
@@ -475,18 +490,18 @@ async fn send_page(State(state): State<WalletWebState>) -> Response {
         active_tab: "send",
         balance: wallet.balance(),
         flash_error: None,
-        csrf_token: state.csrf_token.clone(),
+        csrf_token: state.csrf_token().await,
     }
     .into_response()
 }
 
 async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendForm>) -> Response {
-    if !state.validate_csrf(&form.csrf_token) {
+    if !state.validate_csrf(&form.csrf_token).await {
         return SendTemplate {
             active_tab: "send",
             balance: 0,
             flash_error: Some("Invalid CSRF token. Please reload the page and try again.".into()),
-            csrf_token: state.csrf_token.clone(),
+            csrf_token: state.csrf_token().await,
         }
         .into_response();
     }
@@ -521,7 +536,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Scan failed: {}", e)),
-                csrf_token: state.csrf_token.clone(),
+                csrf_token: state.csrf_token().await,
             }
             .into_response()
         }
@@ -536,7 +551,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Invalid recipient hex: {}", e)),
-                csrf_token: state.csrf_token.clone(),
+                csrf_token: state.csrf_token().await,
             }
             .into_response()
         }
@@ -548,7 +563,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Invalid recipient address: {}", e)),
-                csrf_token: state.csrf_token.clone(),
+                csrf_token: state.csrf_token().await,
             }
             .into_response()
         }
@@ -574,7 +589,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                     estimated_ciphertext_len,
                     crate::constants::MAX_MESSAGE_SIZE
                 )),
-                csrf_token: state.csrf_token.clone(),
+                csrf_token: state.csrf_token().await,
             }
             .into_response();
         }
@@ -588,7 +603,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Build failed: {}", e)),
-                csrf_token: state.csrf_token.clone(),
+                csrf_token: state.csrf_token().await,
             }
             .into_response()
         }
@@ -615,7 +630,7 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
                 active_tab: "send",
                 balance: wallet.balance(),
                 flash_error: Some(format!("Submission failed: {}", e)),
-                csrf_token: state.csrf_token.clone(),
+                csrf_token: state.csrf_token().await,
             }
             .into_response();
         }
@@ -703,7 +718,7 @@ async fn history_page(State(state): State<WalletWebState>) -> Response {
 }
 
 async fn scan_action(State(state): State<WalletWebState>, Form(form): Form<CsrfForm>) -> Response {
-    if !state.validate_csrf(&form.csrf_token) {
+    if !state.validate_csrf(&form.csrf_token).await {
         return error_page("Invalid CSRF token. Please reload the page and try again.")
             .into_response();
     }
@@ -764,7 +779,7 @@ async fn scan_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
         chain_state_root,
         flash_success: Some("Chain scan complete.".to_string()),
         flash_error: None,
-        csrf_token: state.csrf_token.clone(),
+        csrf_token: state.csrf_token().await,
     }
     .into_response()
 }
@@ -923,7 +938,7 @@ mod tests {
     async fn init_action_creates_wallet_and_redirects() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        let csrf = state.csrf_token.clone();
+        let csrf = state.csrf_token().await;
         let app = router(state);
         let body = format!("csrf_token={}", csrf);
         let resp = send_request(
@@ -984,14 +999,14 @@ mod tests {
         assert_eq!(resp.status(), 200);
     }
 
-    #[test]
-    fn csrf_token_validation() {
+    #[tokio::test]
+    async fn csrf_token_validation() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        let valid_token = state.csrf_token.clone();
-        assert!(state.validate_csrf(&valid_token));
-        assert!(!state.validate_csrf("wrong_token"));
-        assert!(!state.validate_csrf(""));
+        let valid_token = state.csrf_token().await;
+        assert!(state.validate_csrf(&valid_token).await);
+        assert!(!state.validate_csrf("wrong_token").await);
+        assert!(!state.validate_csrf("").await);
     }
 
     #[tokio::test]
@@ -1066,5 +1081,25 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn csrf_token_rotates_after_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let token1 = state.csrf_token().await;
+
+        // Manually expire the token
+        {
+            let mut csrf = state.csrf_state.write().await;
+            csrf.1 = Instant::now() - std::time::Duration::from_secs(7200);
+        }
+
+        let token2 = state.csrf_token().await;
+        assert_ne!(token1, token2, "CSRF token should rotate after expiry");
+        // Old token should be invalid
+        assert!(!state.validate_csrf(&token1).await);
+        // New token should be valid
+        assert!(state.validate_csrf(&token2).await);
     }
 }

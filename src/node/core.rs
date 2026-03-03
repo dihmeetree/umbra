@@ -221,6 +221,17 @@ pub struct Node {
     upnp_gateway: Option<(crate::network::nat::UpnpGateway, SocketAddr)>,
     /// Last epoch for which VRF was refreshed (avoids redundant evaluations).
     last_vrf_epoch: u64,
+    /// Collected snapshot manifests keyed by state_root, for quorum verification.
+    /// Each entry holds (peer_id, meta, total_chunks, snapshot_size).
+    snapshot_manifests: HashMap<
+        Hash,
+        Vec<(
+            crate::network::PeerId,
+            super::storage::ChainStateMeta,
+            u32,
+            u64,
+        )>,
+    >,
 }
 
 /// Node configuration.
@@ -255,6 +266,9 @@ pub enum NodeError {
 ///
 /// Reads from `data_dir/validator.key` if it exists; otherwise generates
 /// a new keypair and writes it to that path.
+///
+/// Known limitation: the key file is stored unencrypted on disk. Operators
+/// should use full-disk encryption or OS-level file permissions to protect it.
 pub fn load_or_generate_keypair(
     data_dir: &Path,
 ) -> Result<(SigningKeypair, KemKeypair), std::io::Error> {
@@ -581,6 +595,7 @@ impl Node {
             chunk_request_timestamps: HashMap::new(),
             upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
             last_vrf_epoch: 0,
+            snapshot_manifests: HashMap::new(),
         })
     }
 
@@ -732,6 +747,7 @@ impl Node {
                     }
                     SyncState::SyncingSnapshot { peer, .. } if *peer == peer_id => {
                         tracing::warn!("Snapshot sync peer disconnected, will retry");
+                        self.snapshot_manifests.clear();
                         self.sync_state = SyncState::NeedSync { our_finalized: 0 };
                     }
                     _ => {}
@@ -900,11 +916,16 @@ impl Node {
             Message::BftVote(vote) => {
                 // Gossip deduplication for votes.
                 // Include epoch/round to prevent cross-epoch vote suppression.
+                let type_byte = match &vote.vote_type {
+                    crate::consensus::bft::VoteType::Accept => [1u8],
+                    crate::consensus::bft::VoteType::Reject => [0u8],
+                };
                 let vote_dedup_key = crate::hash_concat(&[
                     &vote.voter_id,
                     &vote.vertex_id.0,
                     &vote.epoch.to_le_bytes(),
                     &vote.round.to_le_bytes(),
+                    &type_byte,
                 ]);
                 if self.is_seen(&vote_dedup_key) {
                     return; // Already processed this vote
@@ -1689,20 +1710,43 @@ impl Node {
                         return;
                     }
 
+                    // Require SNAPSHOT_QUORUM peers to agree on the same state_root
+                    // before trusting a snapshot manifest and downloading it.
+                    let state_root = meta.state_root;
+                    let entry = self.snapshot_manifests.entry(state_root).or_default();
+                    if !entry.iter().any(|(pid, _, _, _)| *pid == from) {
+                        entry.push((from, meta.clone(), total_chunks, snapshot_size));
+                    }
+                    let quorum_count = entry.len();
+                    if quorum_count < crate::constants::SNAPSHOT_QUORUM {
+                        tracing::info!(
+                            state_root = hex::encode(&state_root[..8]),
+                            votes = quorum_count,
+                            needed = crate::constants::SNAPSHOT_QUORUM,
+                            "Snapshot manifest collected, waiting for quorum"
+                        );
+                        return;
+                    }
+
+                    // Quorum reached -- use the first peer's manifest
+                    let (quorum_peer, quorum_meta, quorum_chunks, quorum_size) = entry[0].clone();
+                    self.snapshot_manifests.clear();
+
                     tracing::info!(
-                        epoch = meta.epoch,
-                        finalized = meta.finalized_count,
-                        chunks = total_chunks,
-                        size = snapshot_size,
-                        "Received snapshot manifest"
+                        epoch = quorum_meta.epoch,
+                        finalized = quorum_meta.finalized_count,
+                        chunks = quorum_chunks,
+                        size = quorum_size,
+                        quorum = quorum_count,
+                        "Snapshot quorum reached, starting download"
                     );
 
                     self.sync_state = SyncState::SyncingSnapshot {
-                        peer: from,
-                        total_chunks,
-                        received_chunks: vec![None; total_chunks as usize],
-                        snapshot_size,
-                        meta: Box::new(meta),
+                        peer: quorum_peer,
+                        total_chunks: quorum_chunks,
+                        received_chunks: vec![None; quorum_chunks as usize],
+                        snapshot_size: quorum_size,
+                        meta: Box::new(quorum_meta),
                         last_activity: Instant::now(),
                     };
 
@@ -2101,7 +2145,7 @@ impl Node {
 
                     // Update committee from eligible validators (respects activation_epoch)
                     let new_epoch = dag_epoch;
-                    state.bft.committee = state
+                    let all_active: Vec<_> = state
                         .ledger
                         .state
                         .active_validators()
@@ -2109,6 +2153,19 @@ impl Node {
                         .filter(|v| v.activation_epoch <= new_epoch)
                         .cloned()
                         .collect();
+
+                    if total_validators > crate::constants::COMMITTEE_SIZE {
+                        // Seed committee with validators that have VRF commitments.
+                        // VRF verification remains mandatory since total_validators > committee.len().
+                        state.bft.committee = all_active
+                            .into_iter()
+                            .filter(|v| state.bft.vrf_commitment(&v.id).is_some())
+                            .take(crate::constants::COMMITTEE_SIZE)
+                            .collect();
+                    } else {
+                        // Small network: all validators form the committee.
+                        state.bft.committee = all_active;
+                    }
 
                     if vrf.is_selected(crate::constants::COMMITTEE_SIZE, total_validators) {
                         tracing::info!(epoch = dag_epoch, "Selected for committee via VRF");
@@ -2555,6 +2612,7 @@ impl Node {
             chunk_request_timestamps: HashMap::new(),
             upnp_gateway: None,
             last_vrf_epoch: 0,
+            snapshot_manifests: HashMap::new(),
         }
     }
 }
@@ -2985,6 +3043,36 @@ mod tests {
         // Second identical vote — should be deduped
         node.handle_message(from, Message::BftVote(vote)).await;
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn vote_dedup_allows_different_vote_types() {
+        // Verify that the dedup key includes vote_type, so Accept and Reject
+        // votes from the same voter for the same vertex are not deduplicated.
+        let voter_id = [1u8; 32];
+        let vertex_id = crate::consensus::dag::VertexId([2u8; 32]);
+        let epoch: u64 = 1;
+        let round: u64 = 1;
+
+        let reject_key = crate::hash_concat(&[
+            &voter_id,
+            &vertex_id.0,
+            &epoch.to_le_bytes(),
+            &round.to_le_bytes(),
+            &[0u8], // Reject
+        ]);
+        let accept_key = crate::hash_concat(&[
+            &voter_id,
+            &vertex_id.0,
+            &epoch.to_le_bytes(),
+            &round.to_le_bytes(),
+            &[1u8], // Accept
+        ]);
+
+        assert_ne!(
+            reject_key, accept_key,
+            "different vote types must have different dedup keys"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -3581,12 +3669,30 @@ mod tests {
         let chunk_size = crate::constants::SNAPSHOT_CHUNK_SIZE as u64;
         let snapshot_size = chunk_size * 2; // 2 chunks
         let total_chunks = 2u32;
+        let meta = test_chain_state_meta(5);
 
-        let from = crate::hash_domain(b"test-peer", &[1]);
+        // First manifest: should NOT transition yet (quorum not reached)
+        let peer1 = crate::hash_domain(b"test-peer", &[1]);
         node.handle_message(
-            from,
+            peer1,
             Message::SnapshotManifest {
-                meta: test_chain_state_meta(5),
+                meta: meta.clone(),
+                total_chunks,
+                snapshot_size,
+            },
+        )
+        .await;
+        assert!(
+            matches!(node.sync_state, SyncState::NeedSync { .. }),
+            "should still be NeedSync after first manifest"
+        );
+
+        // Second manifest from different peer with same state_root: quorum reached
+        let peer2 = crate::hash_domain(b"test-peer", &[2]);
+        node.handle_message(
+            peer2,
+            Message::SnapshotManifest {
+                meta,
                 total_chunks,
                 snapshot_size,
             },

@@ -159,6 +159,23 @@ pub enum Message {
     RekeyAck,
 }
 
+impl Message {
+    /// Truncate oversized Vec fields after deserialization.
+    /// The 16 MiB bincode limit bounds total message size, but individual
+    /// Vec fields could contain unreasonably many entries.
+    pub fn sanitize(&mut self) {
+        match self {
+            Message::TipsResponse(tips) => {
+                tips.truncate(crate::constants::MAX_TIPS_RESPONSE);
+            }
+            Message::PeersResponse(peers) => {
+                peers.truncate(1000);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Information about a known peer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -225,7 +242,9 @@ pub fn decode_message(data: &[u8]) -> Option<Message> {
     if data.len() < 4usize.saturating_add(len) {
         return None;
     }
-    let (msg, _) = bincode::serde::decode_from_slice(&data[4..4 + len], bincode_config()).ok()?;
+    let (mut msg, _): (Message, _) =
+        bincode::serde::decode_from_slice(&data[4..4 + len], bincode_config()).ok()?;
+    msg.sanitize();
     Some(msg)
 }
 
@@ -786,5 +805,33 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded = decode_message(&encoded).unwrap();
         assert!(matches!(decoded, Message::RekeyAck));
+    }
+
+    #[test]
+    fn sanitize_truncates_tips_response() {
+        let mut msg = Message::TipsResponse(vec![crate::consensus::dag::VertexId([0u8; 32]); 5000]);
+        msg.sanitize();
+        if let Message::TipsResponse(tips) = &msg {
+            assert!(tips.len() <= crate::constants::MAX_TIPS_RESPONSE);
+        }
+    }
+
+    #[test]
+    fn sanitize_truncates_peers_response() {
+        let kp = SigningKeypair::generate();
+        let mut msg = Message::PeersResponse(
+            (0..5000)
+                .map(|_| PeerInfo {
+                    peer_id: crate::Hash::default(),
+                    public_key: kp.public.clone(),
+                    address: "1.2.3.4:1234".into(),
+                    last_seen: 0,
+                })
+                .collect(),
+        );
+        msg.sanitize();
+        if let Message::PeersResponse(peers) = &msg {
+            assert!(peers.len() <= 1000);
+        }
     }
 }

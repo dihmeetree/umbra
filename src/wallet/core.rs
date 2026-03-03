@@ -1006,6 +1006,23 @@ impl Wallet {
     }
 
     pub fn load_from_file(path: &Path, password: Option<&str>) -> Result<(Self, u64), WalletError> {
+        // Warn if wallet file has overly permissive Unix permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mode = meta.mode();
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        path = %path.display(),
+                        mode = format!("{:o}", mode & 0o777),
+                        "Wallet file has group/other permissions. Consider: chmod 600 {}",
+                        path.display(),
+                    );
+                }
+            }
+        }
+
         let raw = std::fs::read(path)
             .map_err(|e| WalletError::Persistence(format!("read failed: {}", e)))?;
         let is_encrypted = raw.len() >= 4 && raw[..4] == ENCRYPTED_MAGIC;
@@ -2098,5 +2115,32 @@ mod tests {
         // Should reject the output due to blake3_binding mismatch
         assert_eq!(wallet.balance(), 0);
         assert_eq!(wallet.output_count(), 0);
+    }
+
+    #[test]
+    fn encrypted_wallet_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dat");
+        let wallet = Wallet::new();
+        let password = "test-password-123";
+
+        wallet.save_to_file(&path, 42, Some(password)).unwrap();
+
+        // Verify file starts with encrypted magic
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..4], ENCRYPTED_MAGIC);
+
+        // Load with correct password
+        let (loaded, seq) = Wallet::load_from_file(&path, Some(password)).unwrap();
+        assert_eq!(seq, 42);
+        assert_eq!(loaded.balance(), wallet.balance());
+
+        // Load with wrong password should fail
+        let result = Wallet::load_from_file(&path, Some("wrong-password"));
+        assert!(result.is_err());
+
+        // Load with no password should fail
+        let result = Wallet::load_from_file(&path, None);
+        assert!(result.is_err());
     }
 }

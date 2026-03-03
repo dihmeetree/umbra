@@ -171,6 +171,8 @@ pub struct Ledger {
     pub dag: crate::consensus::dag::Dag,
     /// The chain state (commitments, nullifiers)
     pub state: ChainState,
+    /// Vertex IDs applied during post-snapshot sync (prevents duplicate coinbase).
+    sync_applied_vertices: std::collections::HashSet<crate::consensus::dag::VertexId>,
 }
 
 impl ChainState {
@@ -1251,6 +1253,8 @@ impl ChainState {
             nullifiers,
             nullifier_storage: None,
             migrated_nullifier_count: 0,
+            // Restored from snapshot metadata rather than recomputed from nullifiers.
+            // This is safe because the snapshot is validated by state_root verification.
             nullifier_hash: meta.nullifier_hash,
             validators,
             validator_bonds,
@@ -1285,6 +1289,7 @@ impl Ledger {
         Ledger {
             dag,
             state: ChainState::new_for_network(network),
+            sync_applied_vertices: HashSet::new(),
         }
     }
 
@@ -1378,10 +1383,19 @@ impl Ledger {
         &mut self,
         vertex: &Vertex,
     ) -> Result<Option<TxOutput>, StateError> {
+        if !self.sync_applied_vertices.insert(vertex.id) {
+            return Ok(None); // Already applied during this sync session
+        }
         vertex
             .validate_structure(false)
             .map_err(StateError::InvalidVertex)?;
         self.state.apply_vertex(vertex)
+    }
+
+    /// Clear the sync dedup set after post-snapshot sync completes.
+    pub fn clear_sync_dedup(&mut self) {
+        self.sync_applied_vertices.clear();
+        self.sync_applied_vertices.shrink_to_fit();
     }
 
     /// Restore a ledger from persistent storage.
@@ -1424,7 +1438,11 @@ impl Ledger {
         let state = ChainState::restore_from_storage(storage, meta, network)?;
         let genesis = crate::consensus::dag::Dag::genesis_vertex_for_network(network);
         let dag = crate::consensus::dag::Dag::new(genesis);
-        Ok(Ledger { dag, state })
+        Ok(Ledger {
+            dag,
+            state,
+            sync_applied_vertices: HashSet::new(),
+        })
     }
 }
 
@@ -3580,5 +3598,15 @@ mod tests {
                 .unwrap();
         assert_eq!(restored.state.commitment_count(), commitment_count);
         assert_eq!(restored.state.epoch(), ledger.state.epoch());
+    }
+
+    #[test]
+    fn apply_vertex_state_only_dedup_prevents_duplicate() {
+        let mut ledger = Ledger::new();
+        let genesis = crate::consensus::dag::Dag::genesis_vertex();
+        // Apply genesis twice - second should return Ok(None) due to dedup
+        let _first = ledger.apply_vertex_state_only(&genesis);
+        let second = ledger.apply_vertex_state_only(&genesis);
+        assert!(second.unwrap().is_none());
     }
 }

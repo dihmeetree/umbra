@@ -287,6 +287,9 @@ impl SigningPublicKey {
     }
 
     /// Derive a compact fingerprint (BLAKE3 hash of both public keys).
+    ///
+    /// Uses `hash_concat` which includes length prefixes, so changing to a
+    /// different scheme (e.g., domain-separated hash) would be consensus-breaking.
     pub fn fingerprint(&self) -> Hash {
         crate::hash_concat(&[b"umbra.signing.fingerprint", &self.dilithium, &self.sphincs])
     }

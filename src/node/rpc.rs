@@ -90,7 +90,19 @@ pub fn router(rpc_state: RpcState) -> Router {
         .route("/commitment-proof/{index}", get(get_commitment_proof))
         .route("/state-summary", get(get_state_summary))
         .with_state(rpc_state)
-        .layer(CorsLayer::very_permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin([
+                    "http://127.0.0.1:8080"
+                        .parse::<axum::http::HeaderValue>()
+                        .unwrap(),
+                    "http://localhost:8080"
+                        .parse::<axum::http::HeaderValue>()
+                        .unwrap(),
+                ])
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers([axum::http::header::CONTENT_TYPE]),
+        )
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB max body
 }
 

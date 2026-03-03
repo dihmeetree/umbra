@@ -383,7 +383,15 @@ impl BftState {
         }
 
         if vote.round == self.round + 1 {
-            self.next_round_votes.push(vote);
+            // Cap buffer at 2x committee size to prevent memory exhaustion from malicious votes.
+            let max_buffered = self.committee.len().saturating_mul(2).max(1);
+            if self.next_round_votes.len() >= max_buffered {
+                return None;
+            }
+            // Validate committee membership before buffering.
+            if self.committee.iter().any(|v| v.id == vote.voter_id) {
+                self.next_round_votes.push(vote);
+            }
             return None;
         }
 
@@ -2328,14 +2336,15 @@ mod tests {
     fn select_committee_from_proofs_basic() {
         let epoch_seed = crate::crypto::vrf::EpochSeed::genesis();
         let mut proofs = Vec::new();
-        for _ in 0..10 {
+        // Use enough validators so fallback guarantees >= MIN_COMMITTEE_SIZE
+        for _ in 0..30 {
             let kp = SigningKeypair::generate();
             let v = Validator::new(kp.public.clone());
             let vrf_input = epoch_seed.vrf_input(&v.id);
             let vrf_output = VrfOutput::evaluate(&kp, &vrf_input);
             proofs.push((v, vrf_output));
         }
-        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 5, proofs.len());
+        let committee = select_committee_from_proofs(&epoch_seed, &proofs, 21, proofs.len());
         // Should return at least MIN_COMMITTEE_SIZE members
         assert!(committee.len() >= crate::constants::MIN_COMMITTEE_SIZE);
     }
@@ -2740,5 +2749,54 @@ mod tests {
         // Clear caches
         bft.clear_epoch_caches();
         assert!(bft.get_certificate(&vid).is_none());
+    }
+
+    #[test]
+    fn next_round_votes_capped_at_committee_size() {
+        let chain_id = test_chain_id();
+        let (keypairs, validators) = make_committee(3);
+        let mut bft = BftState::new(1, validators.clone(), chain_id);
+        bft.round = 0;
+        // Max buffered = committee.len() * 2 = 6
+        // Send 10 votes for round 1 from committee member 0
+        for i in 0..10u8 {
+            let vid_i = VertexId([i; 32]);
+            let sign_data = vote_sign_data(&vid_i, 1, 1, &VoteType::Accept, &chain_id);
+            let sig = keypairs[0].sign(&sign_data);
+            let vote = Vote {
+                vertex_id: vid_i,
+                voter_id: validators[0].id,
+                epoch: 1,
+                round: 1,
+                vote_type: VoteType::Accept,
+                signature: sig,
+                vrf_proof: None,
+            };
+            bft.receive_vote(vote);
+        }
+        assert!(bft.next_round_votes.len() <= 6);
+    }
+
+    #[test]
+    fn next_round_votes_rejects_non_committee_member() {
+        let chain_id = test_chain_id();
+        let (keypairs, validators) = make_committee(2);
+        let mut bft = BftState::new(1, validators[..1].to_vec(), chain_id);
+        bft.round = 0;
+        // Vote from non-committee member
+        let vid = VertexId([1u8; 32]);
+        let sign_data = vote_sign_data(&vid, 1, 1, &VoteType::Accept, &chain_id);
+        let sig = keypairs[1].sign(&sign_data);
+        let vote = Vote {
+            vertex_id: vid,
+            voter_id: validators[1].id,
+            epoch: 1,
+            round: 1,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        };
+        bft.receive_vote(vote);
+        assert!(bft.next_round_votes.is_empty());
     }
 }

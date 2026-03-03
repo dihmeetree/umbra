@@ -186,7 +186,7 @@ impl Mempool {
 
         // 5. Insert
         let insertion_order = self.insertion_counter;
-        self.insertion_counter += 1;
+        self.insertion_counter = self.insertion_counter.wrapping_add(1);
         let key = FeeKey::new(fee, insertion_order);
 
         for input in &tx.inputs {

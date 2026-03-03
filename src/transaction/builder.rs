@@ -247,6 +247,9 @@ impl TransactionBuilder {
             let commitment = Commitment::commit(spec.value, &spec.blinding);
             let nullifier = Nullifier::derive(&spec.spend_auth, &commitment.0);
 
+            if spec.merkle_path.is_empty() {
+                tracing::warn!("Input has empty Merkle path; proof will use all-zero siblings");
+            }
             // Pad Merkle path to depth 20 for STARK
             let padded_path = pad_merkle_path(&spec.merkle_path, MERKLE_DEPTH);
             let stark_path = path_to_stark_witness(&padded_path);

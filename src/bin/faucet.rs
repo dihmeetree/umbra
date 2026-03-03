@@ -44,12 +44,17 @@ struct Args {
     /// Cooldown between requests from the same IP (seconds).
     #[arg(long, default_value = "3600")]
     cooldown: u64,
+
+    /// Trust X-Forwarded-For header for client IP (use behind reverse proxy)
+    #[arg(long)]
+    trust_proxy: bool,
 }
 
 struct FaucetState {
     rpc_addr: String,
     amount: u64,
     cooldown: Duration,
+    trust_proxy: bool,
     rate_limit: Mutex<HashMap<std::net::IpAddr, Instant>>,
     total_distributed: Mutex<u64>,
     requests_served: Mutex<u64>,
@@ -79,9 +84,19 @@ struct StatusResponse {
 async fn handle_faucet(
     State(state): State<Arc<FaucetState>>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<FaucetRequest>,
 ) -> impl IntoResponse {
-    let ip = addr.ip();
+    let ip = if state.trust_proxy {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+            .unwrap_or(addr.ip())
+    } else {
+        addr.ip()
+    };
 
     // Check rate limit
     {
@@ -103,6 +118,11 @@ async fn handle_faucet(
             }
         }
         limits.insert(ip, Instant::now());
+        // Periodically prune stale entries to prevent unbounded growth
+        if limits.len() > 10_000 {
+            let cooldown = state.cooldown;
+            limits.retain(|_, last| last.elapsed() < cooldown);
+        }
     }
 
     // Validate address format (hex string, reasonable length)
@@ -185,6 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rpc_addr: args.rpc_addr,
         amount: args.amount,
         cooldown: Duration::from_secs(args.cooldown),
+        trust_proxy: args.trust_proxy,
         rate_limit: Mutex::new(HashMap::new()),
         total_distributed: Mutex::new(0),
         requests_served: Mutex::new(0),
@@ -217,6 +238,7 @@ mod tests {
             rpc_addr: "127.0.0.1:9743".into(),
             amount: 1000,
             cooldown: Duration::from_secs(3600),
+            trust_proxy: false,
             rate_limit: Mutex::new(HashMap::new()),
             total_distributed: Mutex::new(0),
             requests_served: Mutex::new(0),
@@ -258,6 +280,7 @@ mod tests {
             rpc_addr: "127.0.0.1:9743".into(),
             amount: 5000,
             cooldown: Duration::from_secs(60),
+            trust_proxy: false,
             rate_limit: Mutex::new(HashMap::new()),
             total_distributed: Mutex::new(0),
             requests_served: Mutex::new(0),

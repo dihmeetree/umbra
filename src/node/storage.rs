@@ -573,6 +573,9 @@ impl Storage for SledStorage {
     }
 
     fn apply_finalization_batch(&self, batch: &FinalizationBatch) -> Result<(), StorageError> {
+        // Known limitation: sled does not support multi-tree atomic transactions.
+        // Cross-tree writes (vertices, state, nullifiers) use a crash-recovery
+        // marker to detect partial application and replay on restart.
         // Set crash-recovery marker before applying cross-tree writes
         self.chain_meta
             .insert(b"finalization_in_progress", &[1u8])

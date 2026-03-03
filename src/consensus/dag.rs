@@ -72,6 +72,7 @@ impl Vertex {
         protocol_version: u32,
     ) -> VertexId {
         let mut hasher = blake3::Hasher::new_derive_key("umbra.vertex.id");
+        hasher.update(&(parents.len() as u32).to_le_bytes());
         for p in parents {
             hasher.update(&p.0);
         }
@@ -270,6 +271,7 @@ impl Dag {
     }
 
     /// Insert a vertex, optionally skipping signature verification (for testing/genesis).
+    #[doc(hidden)]
     pub fn insert_unchecked(&mut self, vertex: Vertex) -> Result<(), VertexError> {
         self.insert_impl(vertex, true)
     }
@@ -488,6 +490,9 @@ impl Dag {
     ///
     /// Vertices remain in sled storage for historical sync. Returns the number
     /// of vertices pruned.
+    ///
+    /// Known limitation: `proposer_vertex_count` is not adjusted when pruning
+    /// old epochs, so per-proposer caps are only accurate within the current epoch.
     pub fn prune_finalized(&mut self, before_epoch: u64) -> usize {
         let to_prune: Vec<VertexId> = self
             .finalized
@@ -2162,5 +2167,39 @@ mod tests {
         let direct = Dag::genesis_vertex();
         let via_network = Dag::genesis_vertex_for_network(crate::constants::NetworkId::Mainnet);
         assert_eq!(direct.id, via_network.id);
+    }
+
+    #[test]
+    fn compute_id_includes_parent_count() {
+        // Two vertices with same single parent but different parent lists should differ
+        // This test verifies the parent count prefix is included in the hash
+        let parent = VertexId([1u8; 32]);
+        let proposer_fp = [0u8; 32];
+        let tx_root = [0u8; 32];
+        let state_root = [0u8; 32];
+        let pv = crate::constants::PROTOCOL_VERSION_ID;
+
+        let id1 = Vertex::compute_id(
+            &[parent],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &state_root,
+            pv,
+        );
+        let id2 = Vertex::compute_id(
+            &[parent, parent],
+            0,
+            1,
+            &proposer_fp,
+            &tx_root,
+            None,
+            &state_root,
+            pv,
+        );
+        // They should have different IDs because parent count differs
+        assert_ne!(id1, id2);
     }
 }
