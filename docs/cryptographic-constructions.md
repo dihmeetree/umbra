@@ -55,9 +55,9 @@ The design philosophy is **defense in depth**:
 | VRF | BLAKE3-based (custom) | 256-bit output | 256 bits | ~128 bits |
 
 All algorithms are implemented via well-audited Rust libraries:
-- `pqcrypto-dilithium` v0.5 (PQClean reference implementation; superseded by `pqcrypto-mldsa` — migration tracked in TODO.md)
+- `pqcrypto-dilithium` v0.5 (PQClean reference implementation; superseded by `pqcrypto-mldsa` — migration is a planned future task)
 - `pqcrypto-sphincsplus` v0.7 (PQClean reference implementation)
-- `pqcrypto-kyber` v0.8 (PQClean reference implementation; superseded by `pqcrypto-mlkem`, RUSTSEC-2024-0381 — migration tracked in TODO.md)
+- `pqcrypto-kyber` v0.8 (PQClean reference implementation; superseded by `pqcrypto-mlkem`, RUSTSEC-2024-0381 — migration is a planned future task)
 - `blake3` v1 (official blake3 crate)
 - `winterfell` v0.13 (Rescue Prime + STARK prover/verifier)
 
@@ -355,13 +355,13 @@ Umbra's VRF is a deterministic, verifiable pseudorandom function built over BLAK
 
 ```
 VRF.prove(sk, input) → (vrf_output, vrf_proof):
-  vrf_output = H_d("umbra.vrf.output", sk || input)
-  vrf_proof  = H_d("umbra.vrf.proof",  sk || input || vrf_output)
+  vrf_output            = H_d("umbra.vrf.output",            sk || input)
+  vrf_proof_commitment  = H_d("umbra.vrf.proof_commitment",  sk || input || vrf_output)
 
-VRF.verify(pk, input, vrf_output, vrf_proof):
-  expected_output = H_d("umbra.vrf.output", ...)
+VRF.verify(pk, input, vrf_output, vrf_proof_commitment):
+  expected_output      = H_d("umbra.vrf.output", ...)
   // Verify via signature that pk corresponds to the sk used
-  return constant_time_eq(vrf_proof, H_d("umbra.vrf.proof", ...))
+  return constant_time_eq(vrf_proof_commitment, H_d("umbra.vrf.proof_commitment", ...))
 ```
 
 **Note**: the current VRF construction is a simplified BLAKE3-based VRF. It is deterministic and verifiable, but is not a standard VRF construction with formal UC security proofs (such as ECVRF or Lattice-based VRF). For the committee selection use case, the key properties required are:
@@ -545,21 +545,31 @@ Initiator (I)                              Responder (R)
 The transaction content hash binds all malleable transaction fields to prevent signature reuse across modified transactions:
 
 ```
-tx_content_hash = H_concat(
-    [len(inputs)],
-    for each input i:
-        inputs[i].nullifier || inputs[i].proof_link,
-    [len(outputs)],
-    for each output j:
-        outputs[j].commitment
-        || [len(kem_ct_j)] || kem_ct_j        // stealth address KEM ciphertext
-        || one_time_key_j
-        || [len(note_kem_ct_j)] || note_kem_ct_j  // note encryption KEM ciphertext
-        || [len(note_ciphertext_j)] || note_ciphertext_j,
-    [fee],
-    [timestamp]
+tx_content_hash = H_d("umbra.tx_content_hash",
+    chain_id (32 bytes)
+    || expiry_epoch (8 bytes LE)
+    || fee (8 bytes LE)
+    || tx_type_byte [|| tx_type_specific_fields]
+    || input_count (4 bytes LE)
+    || for each input i:
+        inputs[i].nullifier (32) || inputs[i].proof_link (32)
+    || output_count (4 bytes LE)
+    || for each output j:
+        outputs[j].commitment (32)
+        || one_time_key_j (32)
+        || len_le32(kem_ct_j) || kem_ct_j          // stealth address KEM ciphertext
+        || len_le32(note_kem_ct_j) || note_kem_ct_j // note encryption KEM ciphertext
+        || note_nonce_j (24)
+        || len_le32(note_ciphertext_j) || note_ciphertext_j
+        || blake3_binding_j (32)
+    || message_count (4 bytes LE)
+    || for each message k:
+        len_le32(msg_kem_ct_k) || msg_kem_ct_k
+        || msg_nonce_k (24)
+        || len_le32(msg_ciphertext_k) || msg_ciphertext_k
 )
 ```
+All field-level length prefixes are 4-byte little-endian u32.
 
 The `kem_ciphertext` fields are included to close the malleability gap: without binding the KEM ciphertexts, an adversary could swap the ciphertext on an existing valid transaction and redirect funds to a different recipient without invalidating the signature.
 
@@ -606,17 +616,17 @@ All Umbra domain-separated hash calls use ASCII prefixes registered here:
 7. Aly, A., Ashur, T., Ben-Sasson, E., Dhooghe, S., Szepieniec, A. (2020). "Design of Symmetric-Key Primitives for Advanced Cryptographic Protocols." IACR ePrint 2019/426.
 8. Szepieniec, A., Ashur, T., Dhooghe, S. (2020). "Rescue-Prime: a Standard Specification (SoK)." IACR ePrint 2020/1143.
 9. Ben-Sasson, E., Bentov, I., Horesh, Y., Riabzev, M. (2018). "Scalable, transparent, and post-quantum secure computational integrity." IACR ePrint 2018/046.
-10. Ducas, L., et al. (2021). "CRYSTALS-Dilithium Algorithm Specifications and Supporting Documentation." NIST PQC Round 3 submission. [https://pq-crystals.org/dilithium/]
-11. Bernstein, D.J., et al. (2022). "SPHINCS+: Stateless Hash-Based Signatures." NIST PQC Round 3 submission. [https://sphincs.org/]
-12. Bos, J., et al. (2021). "CRYSTALS-Kyber Algorithm Specifications." NIST PQC Round 3 submission. [https://pq-crystals.org/kyber/]
+10. Ducas, L., et al. (2021). "CRYSTALS-Dilithium Algorithm Specifications and Supporting Documentation." NIST PQC Round 3 submission. <https://pq-crystals.org/dilithium/>
+11. Bernstein, D.J., et al. (2022). "SPHINCS+: Stateless Hash-Based Signatures." NIST PQC Round 3 submission. <https://sphincs.org/>
+12. Bos, J., et al. (2021). "CRYSTALS-Kyber Algorithm Specifications." NIST PQC Round 3 submission. <https://pq-crystals.org/kyber/>
 13. Fiat, A., Shamir, A. (1986). "How to prove yourself: Practical solutions to identification and signature problems." CRYPTO 1986.
-14. Bonneau, J., et al. (2020). "Zcash Protocol Specification." ECC. [https://zips.z.cash/protocol/protocol.pdf] (reference for shielded transaction design patterns)
+14. Bonneau, J., et al. (2020). "Zcash Protocol Specification." ECC. <https://zips.z.cash/protocol/protocol.pdf> (reference for shielded transaction design patterns)
 15. Möser, M., et al. (2017). "An Empirical Analysis of Traceability in the Monero Blockchain." PoPETs 2018/3. (motivates stealth address design)
 16. Fanti, G., Venkatakrishnan, S.B., Bhatt, S., Yerlan, A., Viswanath, P. (2018). "Dandelion++: Lightweight Cryptocurrency Networking with Formal Anonymity Guarantees." ACM SIGMETRICS 2018.
 
 ### Implementation Libraries
 
-17. `winterfell` — STARK prover/verifier in Rust. [https://github.com/facebook/winterfell]
-18. `pqcrypto` — Rust bindings to PQClean reference implementations. [https://github.com/rustpq/pqcrypto]
-19. `blake3` — Official BLAKE3 Rust implementation. [https://github.com/BLAKE3-team/BLAKE3]
-20. `chacha20poly1305` — RustCrypto ChaCha20-Poly1305 implementation. [https://github.com/RustCrypto/AEADs]
+17. `winterfell` — STARK prover/verifier in Rust. <https://github.com/facebook/winterfell>
+18. `pqcrypto` — Rust bindings to PQClean reference implementations. <https://github.com/rustpq/pqcrypto>
+19. `blake3` — Official BLAKE3 Rust implementation. <https://github.com/BLAKE3-team/BLAKE3>
+20. `chacha20poly1305` — RustCrypto ChaCha20-Poly1305 implementation. <https://github.com/RustCrypto/AEADs>

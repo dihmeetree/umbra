@@ -106,6 +106,7 @@ These constants are defined in `src/lib.rs::constants` and are protocol-level â€
 | `MAX_VERTEX_TIMESTAMP_DRIFT_SECS` | 60 | Maximum future timestamp drift |
 | `BFT_QUORUM` | 15 | Fallback quorum (`floor(2*21/3)+1`) |
 | `EPOCH_LENGTH` | 1,000 | Vertices per epoch before rotation |
+| `COMMITTEE_ELIGIBILITY_DELAY_EPOCHS` | 2 | Epochs after registration before a validator is committee-eligible |
 | `MAX_PARENTS` | 8 | Maximum parent vertex references |
 | `MAX_PEERS` | 64 | Maximum simultaneous peer connections |
 | `MAX_NETWORK_MESSAGE_BYTES` | 16,777,216 | Maximum deserialized message size (16 MiB) |
@@ -502,6 +503,7 @@ A `ValidatorRegister` transaction:
 **State update**:
 - Record `(validator_id, bond)` in the validator set.
 - Insert bond commitment into the Merkle tree.
+- Set `activation_epoch = current_epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS`. The validator is not eligible for committee selection until this epoch, preventing registration-timing attacks.
 
 ### 7.3 Validator Deregistration
 
@@ -603,7 +605,9 @@ Stem phase:
   1. New transaction enters stem phase.
   2. Select one random peer as the next hop.
   3. Forward after a random delay in [DANDELION_STEM_DELAY_MIN_MS, DANDELION_STEM_DELAY_MAX_MS].
-  4. Repeat for DANDELION_STEM_HOPS (2) hops.
+  4. Attempt up to DANDELION_STEM_HOPS (2) hops; however, in the current implementation
+     receiving nodes immediately fluff rather than continuing the stem, so the effective
+     stem length is 1 hop.
   5. If stem timeout (DANDELION_TIMEOUT_MS = 5000ms) expires without fluffing:
      fluff immediately (broadcast normally).
 
