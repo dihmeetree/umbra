@@ -308,6 +308,10 @@ impl Transaction {
                 if bond_return_output.commitment.0 == [0u8; 32] {
                     return Err(TxValidationError::InvalidBondReturn);
                 }
+                // Apply the same encrypted-note ciphertext cap as for regular outputs
+                if bond_return_output.encrypted_note.ciphertext.len() > 256 {
+                    return Err(TxValidationError::OutputNoteTooLarge);
+                }
             }
         }
 
@@ -1629,6 +1633,40 @@ mod tests {
                 Err(TxValidationError::OutputNoteTooLarge)
             ),
             "oversized encrypted note must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_structure_rejects_oversized_bond_return_encrypted_note() {
+        // bond_return_output.encrypted_note is outside self.outputs, so the
+        // per-output ciphertext cap must be checked separately for ValidatorDeregister.
+        let mut tx = make_test_tx();
+        let kp = crate::crypto::keys::FullKeypair::generate();
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&kp.kem.public, 0).unwrap();
+        let mut encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt(&kp.kem.public, b"bond").unwrap();
+        encrypted_note.ciphertext = vec![0u8; 257]; // one byte over the 256-byte cap
+        tx.tx_type = TxType::ValidatorDeregister {
+            validator_id: [0x42; 32],
+            auth_signature: Signature {
+                dilithium: vec![0u8; crate::crypto::keys::DILITHIUM5_SIG_BYTES],
+                sphincs: vec![],
+            },
+            bond_return_output: Box::new(TxOutput {
+                commitment: crate::crypto::commitment::Commitment([1u8; 32]),
+                stealth_address: stealth_result.address,
+                encrypted_note,
+                blake3_binding: [0u8; 64],
+            }),
+            bond_blinding: [0u8; 32],
+        };
+        assert!(
+            matches!(
+                tx.validate_structure(0),
+                Err(TxValidationError::OutputNoteTooLarge)
+            ),
+            "oversized bond_return_output encrypted_note must be rejected"
         );
     }
 
