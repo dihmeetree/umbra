@@ -217,6 +217,8 @@ pub struct Node {
     snapshot_cache: Option<(Vec<u8>, u32, super::storage::ChainStateMeta, Instant)>,
     /// Per-peer timestamp of last snapshot chunk request served (DDoS rate limiting).
     chunk_request_timestamps: HashMap<crate::network::PeerId, Instant>,
+    /// Per-peer timestamp of last GetSnapshot request served (DDoS rate limiting).
+    get_snapshot_timestamps: HashMap<crate::network::PeerId, Instant>,
     /// UPnP gateway handle for lease renewal and cleanup (None if UPnP is not active).
     upnp_gateway: Option<(crate::network::nat::UpnpGateway, SocketAddr)>,
     /// Last epoch for which VRF was refreshed (avoids redundant evaluations).
@@ -593,6 +595,7 @@ impl Node {
             sync_peer_last_claimed: 0,
             snapshot_cache: None,
             chunk_request_timestamps: HashMap::new(),
+            get_snapshot_timestamps: HashMap::new(),
             upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
             last_vrf_epoch: 0,
             snapshot_manifests: HashMap::new(),
@@ -1326,6 +1329,9 @@ impl Node {
 
                         // Validate vertex structure (signature, ID) and transactions
                         // to prevent a malicious sync peer from injecting bad data.
+                        // Note: VRF proofs are not checked during sync because synced
+                        // vertices come from finalized history. Full STARK proof
+                        // verification occurs in apply_vertex/apply_vertex_state_only.
                         if vertex.round > 0 {
                             if let Err(e) = vertex.validate_structure(false) {
                                 tracing::warn!(error = %e, seq, "Sync: rejected vertex with invalid structure");
@@ -1508,6 +1514,10 @@ impl Node {
                             }
                         }
                         tracing::info!("Sync complete");
+                        {
+                            let mut state = self.state.write().await;
+                            state.ledger.clear_sync_dedup();
+                        }
                         self.sync_state = SyncState::Synced;
                     }
                 }
@@ -1576,6 +1586,21 @@ impl Node {
             }
             // ── Snapshot Sync ──
             Message::GetSnapshot => {
+                // Rate limit manifest responses per peer to prevent DoS via
+                // repeated snapshot serialization. One manifest per 5 seconds is enough.
+                let now = Instant::now();
+                let manifest_interval = std::time::Duration::from_secs(5);
+                if let Some(last) = self.get_snapshot_timestamps.get(&from) {
+                    if now.duration_since(*last) < manifest_interval {
+                        return;
+                    }
+                }
+                self.get_snapshot_timestamps.insert(from, now);
+                // Prune stale entries to prevent unbounded growth
+                if self.get_snapshot_timestamps.len() > crate::constants::MAX_PEERS {
+                    let cutoff = now - std::time::Duration::from_secs(30);
+                    self.get_snapshot_timestamps.retain(|_, t| *t > cutoff);
+                }
                 if let Some((ref bytes, total_chunks, ref meta, ref created)) = self.snapshot_cache
                 {
                     if created.elapsed()
@@ -1720,7 +1745,16 @@ impl Node {
 
                     // Require SNAPSHOT_QUORUM peers to agree on the same state_root
                     // before trusting a snapshot manifest and downloading it.
+                    // Cap the number of tracked state_roots to prevent Sybil peers
+                    // from exhausting memory by sending unique roots.
                     let state_root = meta.state_root;
+                    if !self.snapshot_manifests.contains_key(&state_root)
+                        && self.snapshot_manifests.len()
+                            >= crate::constants::MAX_SNAPSHOT_MANIFEST_ROOTS
+                    {
+                        tracing::warn!("Too many distinct snapshot state_roots, ignoring");
+                        return;
+                    }
                     let entry = self.snapshot_manifests.entry(state_root).or_default();
                     if !entry.iter().any(|(pid, _, _, _)| *pid == from) {
                         entry.push((from, meta.clone(), total_chunks, snapshot_size));
@@ -2342,6 +2376,9 @@ impl Node {
                     let mut state = self.state.write().await;
                     state.bft.advance_round();
                     state.ledger.dag.advance_round();
+                    // Reset the timer to prevent repeated rapid round advancement
+                    // when the node is partitioned or the leader is unresponsive.
+                    state.last_finalized_time = Some(Instant::now());
                     tracing::info!(
                         new_round = state.bft.round,
                         "View-change: advanced to next round"
@@ -2596,6 +2633,10 @@ impl Node {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to insert own vertex");
+                // Return drained transactions to the mempool so they are not lost
+                for tx in vertex.transactions {
+                    let _ = state.mempool.insert(tx);
+                }
             }
         }
     }
@@ -2629,6 +2670,7 @@ impl Node {
             sync_peer_last_claimed: 0,
             snapshot_cache: None,
             chunk_request_timestamps: HashMap::new(),
+            get_snapshot_timestamps: HashMap::new(),
             upnp_gateway: None,
             last_vrf_epoch: 0,
             snapshot_manifests: HashMap::new(),
@@ -3706,10 +3748,26 @@ mod tests {
             "should still be NeedSync after first manifest"
         );
 
-        // Second manifest from different peer with same state_root: quorum reached
+        // Second manifest: quorum not yet reached (need 3)
         let peer2 = crate::hash_domain(b"test-peer", &[2]);
         node.handle_message(
             peer2,
+            Message::SnapshotManifest {
+                meta: meta.clone(),
+                total_chunks,
+                snapshot_size,
+            },
+        )
+        .await;
+        assert!(
+            matches!(node.sync_state, SyncState::NeedSync { .. }),
+            "should still be NeedSync after second manifest (quorum=3)"
+        );
+
+        // Third manifest from different peer with same state_root: quorum reached
+        let peer3 = crate::hash_domain(b"test-peer", &[3]);
+        node.handle_message(
+            peer3,
             Message::SnapshotManifest {
                 meta,
                 total_chunks,

@@ -213,6 +213,12 @@ impl Transaction {
     /// `current_epoch`: the current epoch for expiry checks. Pass 0 to skip
     /// expiry validation (e.g., when epoch is unknown during initial sync).
     pub fn validate_structure(&self, current_epoch: u64) -> Result<(), TxValidationError> {
+        // Reject transactions with unset chain_id (all zeros). Full chain_id
+        // matching against the expected network is done in state-level validation,
+        // but this catches obviously malformed transactions early.
+        if self.chain_id == [0u8; 32] {
+            return Err(TxValidationError::InvalidChainId);
+        }
         if self.inputs.is_empty() {
             return Err(TxValidationError::NoInputs);
         }
@@ -233,6 +239,15 @@ impl Transaction {
         for msg in &self.messages {
             if msg.payload.ciphertext.len() > crate::constants::MAX_MESSAGE_SIZE {
                 return Err(TxValidationError::MessageTooLarge);
+            }
+        }
+
+        // Bound encrypted note size per output. Note plaintext is 40 bytes
+        // (8-byte value + 32-byte blinding); with AEAD overhead the ciphertext
+        // is ~56 bytes. 256 bytes is a generous cap that prevents bloat attacks.
+        for output in &self.outputs {
+            if output.encrypted_note.ciphertext.len() > 256 {
+                return Err(TxValidationError::OutputNoteTooLarge);
             }
         }
 
@@ -442,7 +457,31 @@ impl Transaction {
                 + m.payload.ciphertext.len() // ciphertext
             })
             .sum();
-        let raw = base + balance + inputs + outputs + messages + 32;
+        let tx_type_extra = match &self.tx_type {
+            TxType::Transfer => 1, // discriminant only
+            TxType::ValidatorRegister {
+                signing_key,
+                kem_public_key,
+            } => {
+                1 + signing_key.dilithium.len() + signing_key.sphincs.len() + kem_public_key.0.len()
+            }
+            TxType::ValidatorDeregister {
+                auth_signature,
+                bond_return_output,
+                ..
+            } => {
+                1 + auth_signature.dilithium.len() + auth_signature.sphincs.len()
+                    + 32 // commitment
+                    + 32 // one_time_key
+                    + bond_return_output.stealth_address.kem_ciphertext.0.len()
+                    + bond_return_output.encrypted_note.kem_ciphertext.0.len()
+                    + 24 // nonce
+                    + bond_return_output.encrypted_note.ciphertext.len()
+                    + 64 // blake3_binding
+                    + 32 // bond_blinding
+            }
+        };
+        let raw = base + balance + inputs + outputs + messages + tx_type_extra + 32;
         // Add 10% overhead margin for bincode framing and field delimiters
         raw + raw / 10
     }
@@ -523,6 +562,14 @@ fn hash_tx_type_into(tx_type: &TxType, hasher: &mut blake3::Hasher) {
             hasher.update(validator_id);
             hasher.update(&bond_return_output.commitment.0);
             hasher.update(&bond_return_output.stealth_address.one_time_key);
+            hasher.update(
+                &(bond_return_output.stealth_address.kem_ciphertext.0.len() as u32).to_le_bytes(),
+            );
+            hasher.update(&bond_return_output.stealth_address.kem_ciphertext.0);
+            hasher.update(&bond_return_output.encrypted_note.nonce);
+            hasher
+                .update(&(bond_return_output.encrypted_note.ciphertext.len() as u32).to_le_bytes());
+            hasher.update(&bond_return_output.encrypted_note.ciphertext);
             hasher.update(&bond_return_output.blake3_binding);
             hasher.update(bond_blinding);
         }
@@ -582,6 +629,10 @@ pub enum TxValidationError {
     InvalidBondReturn,
     #[error("duplicate output commitment in transaction")]
     DuplicateOutputCommitment,
+    #[error("chain_id is unset (all zeros)")]
+    InvalidChainId,
+    #[error("output encrypted note exceeds maximum size")]
+    OutputNoteTooLarge,
 }
 
 #[cfg(test)]
@@ -1272,11 +1323,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_note_accepts_zeros() {
-        let result = crate::transaction::builder::decode_note(&[0u8; 40]);
+    fn decode_note_accepts_versioned_zeros() {
+        // Note format: [1-byte version][8-byte LE value][32-byte blinding] = 41 bytes
+        let mut data = [0u8; 41];
+        data[0] = 1; // NOTE_VERSION
+        let result = crate::transaction::builder::decode_note(&data);
         assert!(
             result.is_some(),
-            "decode_note should accept exactly 40 zero bytes"
+            "decode_note should accept 41-byte note with correct version byte"
         );
         let (value, blinding) = result.unwrap();
         assert_eq!(value, 0);
@@ -1540,5 +1594,78 @@ mod tests {
             .build()
             .unwrap();
         assert_ne!(tx1.tx_id(), tx2.tx_id());
+    }
+
+    #[test]
+    #[cfg(feature = "fast-tests")]
+    fn validate_structure_rejects_zero_chain_id() {
+        let mut tx = make_test_tx();
+        tx.chain_id = [0u8; 32];
+        assert!(
+            matches!(
+                tx.validate_structure(0),
+                Err(TxValidationError::InvalidChainId)
+            ),
+            "zero chain_id must be rejected"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "fast-tests")]
+    fn validate_structure_rejects_oversized_encrypted_note() {
+        let mut tx = make_test_tx();
+        // Bloat the first output's encrypted note ciphertext beyond the 256-byte cap
+        tx.outputs[0].encrypted_note.ciphertext = vec![0u8; 257];
+        assert!(
+            matches!(
+                tx.validate_structure(0),
+                Err(TxValidationError::OutputNoteTooLarge)
+            ),
+            "oversized encrypted note must be rejected"
+        );
+    }
+
+    #[test]
+    fn hash_tx_type_bond_return_includes_encrypted_note() {
+        // Verify that modifying encrypted_note changes hash_tx_type_into output
+        // for ValidatorDeregister, confirming H12 fix is in place.
+        use crate::crypto::commitment::Commitment;
+        use crate::crypto::encryption::EncryptedPayload;
+        use crate::crypto::stealth::StealthAddress;
+
+        let make_output = |note_byte: u8| TxOutput {
+            commitment: Commitment([0u8; 32]),
+            stealth_address: StealthAddress {
+                one_time_key: [0u8; 32],
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![0u8; 1568]),
+            },
+            encrypted_note: EncryptedPayload {
+                kem_ciphertext: crate::crypto::keys::KemCiphertext(vec![0u8; 1568]),
+                nonce: [0u8; 24],
+                ciphertext: vec![note_byte; 57],
+            },
+            blake3_binding: [0u8; 64],
+        };
+
+        let hash_with_note = |note_byte: u8| {
+            let mut hasher = blake3::Hasher::new();
+            let tx_type = TxType::ValidatorDeregister {
+                validator_id: [0u8; 32],
+                auth_signature: crate::crypto::keys::Signature {
+                    dilithium: vec![],
+                    sphincs: vec![],
+                },
+                bond_return_output: Box::new(make_output(note_byte)),
+                bond_blinding: [0u8; 32],
+            };
+            hash_tx_type_into(&tx_type, &mut hasher);
+            hasher.finalize()
+        };
+
+        assert_ne!(
+            hash_with_note(0xAA),
+            hash_with_note(0xBB),
+            "bond_return_output encrypted_note must be included in content hash"
+        );
     }
 }

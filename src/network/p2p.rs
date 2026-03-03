@@ -7,8 +7,11 @@
 //! 4. Encrypted transport — ChaCha20-Poly1305 AEAD per message
 //!
 //! Known limitations:
-//! - The node's KEM keypair is static across connections. Ephemeral per-connection
-//!   KEM keys would improve forward secrecy but require a protocol redesign.
+//! - The node's KEM keypair is static across connections. Periodic rekeying provides
+//!   key renewal (post-compromise security) but not full forward secrecy: compromising
+//!   the static KEM secret key allows deriving all past session keys. Ephemeral
+//!   per-connection KEM keys would achieve true forward secrecy but require a protocol
+//!   redesign.
 //! - The Hello message is sent in plaintext, leaking peer identity before the
 //!   encrypted channel is established. A Noise-protocol handshake pattern would
 //!   mitigate this.
@@ -58,6 +61,10 @@ pub fn is_valid_public_addr(addr: &SocketAddr) -> bool {
 // ── Rate Limiting ──
 
 /// Simple token-bucket rate limiter for per-peer message throttling.
+///
+/// Uses f64 for token arithmetic. At typical rates (≤1000 msg/s) accumulated
+/// floating-point error is negligible (< 1 ULP per refill). Tokens are clamped
+/// to [0, max_tokens] on each update to prevent unbounded drift.
 struct RateLimiter {
     tokens: f64,
     max_tokens: f64,
@@ -170,9 +177,10 @@ fn compute_transcript_hash(initiator_id: &Hash, responder_id: &Hash, kem_ct: &[u
 }
 
 /// Round up to the next multiple of `P2P_PADDING_BUCKET`.
+/// Always returns at least one full bucket so encrypted frames are never empty.
 fn pad_to_bucket(len: usize) -> usize {
     let bucket = crate::constants::P2P_PADDING_BUCKET;
-    len.div_ceil(bucket) * bucket
+    len.max(1).div_ceil(bucket) * bucket
 }
 
 /// Write an encrypted + authenticated message frame with padding.
@@ -183,6 +191,12 @@ fn pad_to_bucket(len: usize) -> usize {
 ///
 /// Frame format: `[4-byte LE frame_len][8-byte LE counter][aead_ciphertext]`
 /// AEAD ciphertext contains: encrypted `[4-byte LE real_len][payload][zero_padding]` + 16-byte tag
+///
+/// The counter is sent on the wire for explicitness, but the receiver validates
+/// it against its expected sequential counter before use. Both sides maintain
+/// synchronized counters; the wire counter is purely redundant. The counter is
+/// intentionally not reset across rekeys — (key, nonce) uniqueness is maintained
+/// by the key change itself.
 async fn write_encrypted(
     writer: &mut OwnedWriteHalf,
     msg: &Message,
@@ -195,7 +209,8 @@ async fn write_encrypted(
     let payload = network::encode_message(msg).map_err(|e| P2pError::SendFailed(e.to_string()))?;
 
     // Embed real length inside the encrypted region, then pad to bucket boundary
-    let real_len = payload.len() as u32;
+    let real_len = u32::try_from(payload.len())
+        .map_err(|_| P2pError::SendFailed("payload exceeds u32 length".into()))?;
     let padded_len = pad_to_bucket(4 + payload.len());
     let mut padded = Vec::with_capacity(padded_len);
     padded.extend_from_slice(&real_len.to_le_bytes());
@@ -217,7 +232,8 @@ async fn write_encrypted(
         .map_err(|_| P2pError::SendFailed("AEAD encryption failed".into()))?;
 
     // ciphertext includes 16-byte tag
-    let frame_len = (8 + ciphertext.len()) as u32;
+    let frame_len = u32::try_from(8 + ciphertext.len())
+        .map_err(|_| P2pError::SendFailed("ciphertext exceeds u32 frame length".into()))?;
     let mut frame = Vec::with_capacity(4 + frame_len as usize);
     frame.extend_from_slice(&frame_len.to_le_bytes());
     frame.extend_from_slice(&counter.to_le_bytes());
@@ -410,7 +426,7 @@ impl PeerReputation {
 
     fn penalize(&mut self, amount: i32) {
         self.score = self.score.saturating_sub(amount);
-        self.violations += 1;
+        self.violations = self.violations.saturating_add(1);
         if self.score < crate::constants::PEER_BAN_THRESHOLD {
             let ban_duration =
                 std::time::Duration::from_secs(crate::constants::PEER_BAN_DURATION_SECS);
@@ -992,7 +1008,8 @@ async fn p2p_loop(
                             // Notify node layer for persistence
                             if let Some(banned_until) = rep.banned_until {
                                 use std::time::{SystemTime, UNIX_EPOCH};
-                                let remaining = banned_until.duration_since(Instant::now());
+                                let remaining = banned_until.checked_duration_since(Instant::now())
+                                    .unwrap_or_default();
                                 let now_ms = SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -1069,7 +1086,7 @@ async fn handle_inbound_inner(
                 return Err(P2pError::InvalidHandshake);
             }
             // Verify peer_id matches the fingerprint of their public key
-            if peer_id != public_key.fingerprint() {
+            if !crate::constant_time_eq(&peer_id, &public_key.fingerprint()) {
                 return Err(P2pError::InvalidHandshake);
             }
             (peer_id, public_key, kem_public_key)
@@ -1177,7 +1194,7 @@ async fn handle_outbound(
                         return Err(P2pError::InvalidHandshake);
                     }
                     // Verify peer_id matches the fingerprint of their public key
-                    if peer_id != public_key.fingerprint() {
+                    if !crate::constant_time_eq(&peer_id, &public_key.fingerprint()) {
                         return Err(P2pError::InvalidHandshake);
                     }
                     (peer_id, public_key, kem_public_key)
@@ -1241,8 +1258,10 @@ async fn handle_outbound(
 
 /// Spawn encrypted read and write tasks for an authenticated connection.
 ///
-/// Includes periodic Kyber KEM rekeying for forward secrecy. Only the outbound
-/// (initiator) side initiates rekeys; the inbound side responds.
+/// Includes periodic Kyber KEM rekeying for key renewal. Note: since the static
+/// KEM keypair is reused, this provides post-compromise security (new keys after
+/// a compromise) but not forward secrecy against static key compromise. Only the
+/// outbound (initiator) side initiates rekeys; the inbound side responds.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_encrypted_connection_tasks(
     peer_id: PeerId,
@@ -2367,5 +2386,58 @@ mod tests {
     fn is_valid_public_addr_rejects_ipv6_unique_local() {
         let addr: SocketAddr = "[fd00::1]:8000".parse().unwrap();
         assert!(!is_valid_public_addr(&addr));
+    }
+
+    #[test]
+    fn pad_to_bucket_zero_returns_one_bucket() {
+        let bucket = crate::constants::P2P_PADDING_BUCKET;
+        assert_eq!(
+            pad_to_bucket(0),
+            bucket,
+            "pad_to_bucket(0) must return one full bucket, not 0"
+        );
+    }
+
+    #[test]
+    fn pad_to_bucket_exact_multiple_unchanged() {
+        let bucket = crate::constants::P2P_PADDING_BUCKET;
+        assert_eq!(pad_to_bucket(bucket), bucket);
+        assert_eq!(pad_to_bucket(bucket * 3), bucket * 3);
+    }
+
+    #[test]
+    fn pad_to_bucket_rounds_up() {
+        let bucket = crate::constants::P2P_PADDING_BUCKET;
+        assert_eq!(pad_to_bucket(1), bucket);
+        assert_eq!(pad_to_bucket(bucket + 1), bucket * 2);
+    }
+
+    #[test]
+    fn violations_saturate_on_overflow() {
+        let mut rep = PeerReputation::new();
+        rep.violations = u32::MAX;
+        rep.penalize(1);
+        assert_eq!(
+            rep.violations,
+            u32::MAX,
+            "violations must saturate at u32::MAX"
+        );
+    }
+
+    #[test]
+    fn ban_expiry_duration_no_panic() {
+        // Verify that checked_duration_since does not panic when the ban has
+        // already expired (i.e., banned_until is in the past).
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap_or(std::time::Instant::now());
+        let remaining = past
+            .checked_duration_since(std::time::Instant::now())
+            .unwrap_or_default();
+        assert_eq!(
+            remaining,
+            std::time::Duration::ZERO,
+            "expired ban must return zero duration"
+        );
     }
 }

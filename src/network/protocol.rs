@@ -150,9 +150,9 @@ pub enum Message {
         requester_external_addr: String,
     },
 
-    // ── Transport Rekeying (v4) ──
+    // ── Transport Rekeying ──
     /// Request a session rekey with a new Kyber KEM ciphertext.
-    /// Sent over the existing encrypted channel for forward secrecy.
+    /// Sent over the existing encrypted channel.
     RekeyRequest { kem_ciphertext: KemCiphertext },
 
     /// Acknowledge a rekey request. The receiver has derived new session keys.
@@ -181,6 +181,40 @@ impl Message {
             }
             Message::EpochStateResponse { committee, .. } => {
                 committee.truncate(crate::constants::COMMITTEE_SIZE);
+            }
+            Message::SnapshotChunk { data, .. } => {
+                // Enforce SNAPSHOT_CHUNK_SIZE + small overhead for framing
+                let max = crate::constants::SNAPSHOT_CHUNK_SIZE + 64;
+                data.truncate(max);
+            }
+            Message::NewVertex(vertex) => {
+                // Cap transaction count per vertex to prevent excessive
+                // validation CPU from a single message
+                vertex
+                    .transactions
+                    .truncate(crate::constants::VERTEX_MAX_DRAIN);
+            }
+            Message::NatInfo {
+                external_addr,
+                observed_addr,
+            } => {
+                // Bound string fields to prevent memory exhaustion from oversized addresses
+                if let Some(s) = external_addr.as_mut() {
+                    s.truncate(64);
+                }
+                observed_addr.truncate(64);
+            }
+            Message::NatPunchRequest {
+                requester_external_addr,
+                ..
+            } => {
+                requester_external_addr.truncate(64);
+            }
+            Message::NatPunchNotify {
+                requester_external_addr,
+                ..
+            } => {
+                requester_external_addr.truncate(64);
             }
             _ => {}
         }
@@ -231,7 +265,9 @@ pub fn encode_message(msg: &Message) -> Result<Vec<u8>, NetworkError> {
     if payload.len() > crate::constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err(NetworkError::MessageTooLarge);
     }
-    let len = (payload.len() as u32).to_le_bytes();
+    let len = u32::try_from(payload.len())
+        .map_err(|_| NetworkError::MessageTooLarge)?
+        .to_le_bytes();
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len);
     buf.extend_from_slice(&payload);
@@ -843,6 +879,62 @@ mod tests {
         msg.sanitize();
         if let Message::PeersResponse(peers) = &msg {
             assert!(peers.len() <= 1000);
+        }
+    }
+
+    #[test]
+    fn sanitize_nat_info_truncates_long_strings() {
+        let mut msg = Message::NatInfo {
+            external_addr: Some("x".repeat(200)),
+            observed_addr: "y".repeat(200),
+        };
+        msg.sanitize();
+        if let Message::NatInfo {
+            external_addr,
+            observed_addr,
+        } = &msg
+        {
+            assert!(external_addr.as_ref().map_or(0, |s| s.len()) <= 64);
+            assert!(observed_addr.len() <= 64);
+        } else {
+            panic!("expected NatInfo");
+        }
+    }
+
+    #[test]
+    fn sanitize_nat_punch_request_truncates_addr() {
+        let mut msg = Message::NatPunchRequest {
+            target_peer_id: [0u8; 32],
+            requester_external_addr: "z".repeat(200),
+        };
+        msg.sanitize();
+        if let Message::NatPunchRequest {
+            requester_external_addr,
+            ..
+        } = &msg
+        {
+            assert!(requester_external_addr.len() <= 64);
+        } else {
+            panic!("expected NatPunchRequest");
+        }
+    }
+
+    #[test]
+    fn sanitize_snapshot_chunk_truncates_data() {
+        let max = crate::constants::SNAPSHOT_CHUNK_SIZE + 64;
+        let mut msg = Message::SnapshotChunk {
+            chunk_index: 0,
+            total_chunks: 1,
+            data: vec![0u8; max + 1000],
+        };
+        msg.sanitize();
+        if let Message::SnapshotChunk { data, .. } = &msg {
+            assert!(
+                data.len() <= max,
+                "SnapshotChunk data must be capped at SNAPSHOT_CHUNK_SIZE+64"
+            );
+        } else {
+            panic!("expected SnapshotChunk");
         }
     }
 }

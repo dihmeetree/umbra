@@ -201,8 +201,15 @@ pub mod constants {
     pub const MAX_VERTICES_PER_PROPOSER_PER_EPOCH: usize = 100;
     /// Maximum eviction iterations when inserting into a full mempool.
     pub const MAX_MEMPOOL_EVICTIONS: usize = 10;
-    /// Number of peers whose snapshot state_root must agree before importing.
-    pub const SNAPSHOT_QUORUM: usize = 2;
+    /// Number of distinct peers whose snapshot state_root must agree before
+    /// importing. Higher values resist Sybil attacks but require more connected
+    /// peers during initial sync. A syncing node cannot verify validator
+    /// identities (it doesn't have the committee yet), so this quorum relies
+    /// on peer diversity enforced by the P2P layer's per-IP and per-subnet limits.
+    pub const SNAPSHOT_QUORUM: usize = 3;
+    /// Maximum distinct state_roots tracked in snapshot_manifests to prevent
+    /// unbounded memory growth from Sybil peers sending unique roots.
+    pub const MAX_SNAPSHOT_MANIFEST_ROOTS: usize = 16;
     /// Upper bound on snapshot blob size accepted by `deserialize_snapshot` (1 GiB).
     pub const MAX_SNAPSHOT_DESERIALIZE_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -831,6 +838,21 @@ mod tests {
             "SNAPSHOT_CHUNK_SIZE ({}) must be < MAX_NETWORK_MESSAGE_BYTES ({})",
             constants::SNAPSHOT_CHUNK_SIZE,
             constants::MAX_NETWORK_MESSAGE_BYTES
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn constants_fee_below_goldilocks_prime() {
+        // The STARK balance proof represents fees as Goldilocks field elements.
+        // If MAX_TX_FEE >= the Goldilocks prime, Felt::new(fee) would reduce
+        // modulo p, breaking the fee equality check in validate_structure.
+        const GOLDILOCKS_PRIME: u64 = 18_446_744_069_414_584_321;
+        assert!(
+            constants::MAX_TX_FEE < GOLDILOCKS_PRIME,
+            "MAX_TX_FEE ({}) must be below the Goldilocks prime ({})",
+            constants::MAX_TX_FEE,
+            GOLDILOCKS_PRIME
         );
     }
 

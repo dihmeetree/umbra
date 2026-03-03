@@ -79,6 +79,9 @@ impl Signature {
     }
 
     /// Check if this signature has valid sizes for both components.
+    /// Returns `true` if the signature has a valid size — either all-empty
+    /// (representing an absent signature) or exactly the expected component sizes.
+    /// Use [`is_empty`](Self::is_empty) to distinguish absent from present.
     pub fn is_valid_size(&self) -> bool {
         #[cfg(not(feature = "fast-tests"))]
         {

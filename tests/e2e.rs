@@ -1033,7 +1033,8 @@ fn test_validator_full_lifecycle() {
     let stealth_result =
         umbra::crypto::stealth::StealthAddress::generate(&new_kem.public, 0).unwrap();
     let note_data = {
-        let mut d = Vec::with_capacity(40);
+        let mut d = Vec::with_capacity(41);
+        d.push(1u8); // NOTE_VERSION
         d.extend_from_slice(&bond.to_le_bytes());
         d.extend_from_slice(&dereg_blinding_bytes);
         d
