@@ -129,7 +129,7 @@ The network adversary may:
 - **Hello message is plaintext**: the node's KEM public key is revealed before the encrypted channel is established. This leaks peer identity at connection time. A Noise-protocol handshake would mitigate this.
 - **Static KEM keypair**: the node's KEM keypair does not rotate per connection. Compromise of the static KEM secret key allows decryption of all past session transcripts. Periodic rekeying provides post-compromise security (new sessions are protected) but not full forward secrecy.
 - **Peer reputation not persisted**: reputation scores reset on node restart, giving misbehaving peers a clean slate.
-- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls both stem hops can identify the origin. See [privacy-threat-model.md] for the detailed analysis.
+- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls both stem hops can identify the origin. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
 
 ---
 
@@ -181,7 +181,7 @@ No trusted setup is required. The only "setup" is the choice of public parameter
 
 ## 6. Privacy Adversary
 
-This section describes adversary capabilities with respect to transaction privacy. The full analysis is in [privacy-threat-model.md]; this section summarizes the adversary model.
+This section describes adversary capabilities with respect to transaction privacy. The full analysis is in [privacy-threat-model.md](./privacy-threat-model.md); this section summarizes the adversary model.
 
 ### 6.1 Passive Observer (Blockchain Analyst)
 
@@ -281,6 +281,6 @@ The following threats are explicitly out of scope for the current protocol versi
 | **Consensus with >f Byzantine validators** | Provably impossible for any BFT protocol. |
 | **Traffic analysis against a global passive adversary** | Dandelion++ provides partial mitigation but not full unlinkability against a global observer. Requires a mix network or DC-net for full protection. |
 | **Denial of service against the internet** | Physical network infrastructure attacks are out of scope. |
-| **Implementation bugs** | The adversary model assumes a correct implementation. The code undergoes audit (see [PR review history]) but formal verification is not yet performed. |
+| **Implementation bugs** | The adversary model assumes a correct implementation. The code undergoes iterative audit but formal verification is not yet performed. |
 | **Side-channel attacks on cryptographic implementations** | The PQClean reference implementations used by `pqcrypto-*` crates aim for constant-time operation but are not formally verified. |
 | **Trusted setup compromise** | There is no trusted setup; this category does not apply. |

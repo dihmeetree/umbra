@@ -2356,19 +2356,58 @@ mod tests {
         // registered in epoch N cannot join the committee until epoch N+2.
         // This prevents the registration-timing attack: an attacker cannot register
         // validators just before a target epoch to temporarily spike their alpha.
+        //
+        // This test exercises the real apply_transaction_unchecked code path —
+        // not the genesis helper — so a regression in that path will be caught.
         use crate::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS;
+        use crate::crypto::stark::types::BalanceStarkProof;
+        use crate::transaction::TxType;
 
         let val_kp = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
-        let mut validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
-        // Simulate registration at epoch 0 with the delay the state machine applies
-        validator.activation_epoch = COMMITTEE_ELIGIBILITY_DELAY_EPOCHS;
-        let vid = validator.id;
+        let vid = val_kp.public.fingerprint();
+
+        // Build a minimal ValidatorRegister transaction.
+        // apply_transaction_unchecked does not verify STARK proofs, so empty
+        // proof bytes are sufficient. Fee must be >= bond(0) + MIN_TX_FEE.
+        let bond = crate::constants::required_validator_bond(0);
+        let fee = bond + crate::constants::MIN_TX_FEE;
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            fee,
+            chain_id: [0u8; 32],
+            expiry_epoch: 0,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+            tx_type: TxType::ValidatorRegister {
+                signing_key: val_kp.public.clone(),
+                kem_public_key: val_kem.public.clone(),
+            },
+        };
 
         let mut state = ChainState::new();
-        state.register_genesis_validator(validator).unwrap();
+        state
+            .apply_transaction_unchecked(&tx)
+            .expect("ValidatorRegister must succeed");
 
-        // Not eligible at epoch 0 (just registered)
+        // Confirm that apply_transaction_unchecked set the delay, not a
+        // hard-coded value.
+        let registered = state
+            .validators
+            .get(&vid)
+            .expect("validator must be in state after registration");
+        assert_eq!(
+            registered.activation_epoch,
+            state.epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS,
+            "activation_epoch must be state.epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS"
+        );
+
+        // Not eligible at epoch 0 (just registered, delay = 2)
         assert!(
             !state.eligible_validators(0).iter().any(|v| v.id == vid),
             "validator registered at epoch 0 must not be eligible at epoch 0"

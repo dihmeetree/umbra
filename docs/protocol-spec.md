@@ -204,20 +204,31 @@ EncryptedNote = {
 
 **Transaction content hash** (binds all malleable fields):
 ```text
-tx_content_hash = H_concat(
-    [len(inputs)],
-    for each input: nullifier || proof_link,
-    [len(outputs)],
-    for each output:
-        commitment
-        || [len(kem_ciphertext)] || kem_ciphertext
-        || one_time_key
-        || [len(enc_kem_ciphertext)] || enc_kem_ciphertext
-        || [len(ciphertext)] || ciphertext,
-    [fee],
-    timestamp
+tx_content_hash = H_d("umbra.tx_content_hash",
+    chain_id (32 bytes)
+    || expiry_epoch (8 bytes LE)
+    || fee (8 bytes LE)
+    || tx_type_byte [|| tx_type_specific_fields]
+    || input_count (4 bytes LE)
+    || for each input: nullifier (32) || proof_link (32)
+    || output_count (4 bytes LE)
+    || for each output:
+        commitment (32)
+        || one_time_key (32)
+        || len_le32(kem_ciphertext) || kem_ciphertext
+        || len_le32(note_kem_ciphertext) || note_kem_ciphertext
+        || note_nonce (24)
+        || len_le32(note_ciphertext) || note_ciphertext
+        || blake3_binding (32)
+    || message_count (4 bytes LE)
+    || for each message:
+        len_le32(kem_ciphertext) || kem_ciphertext
+        || nonce (24)
+        || len_le32(ciphertext) || ciphertext
 )
 ```
+All length prefixes are 4-byte little-endian u32. The `chain_id` and `expiry_epoch` fields
+bind the hash to the specific chain and epoch window, preventing cross-chain and replay attacks.
 
 ### 4.4 DAG Vertex
 

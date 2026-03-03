@@ -55,9 +55,9 @@ The design philosophy is **defense in depth**:
 | VRF | BLAKE3-based (custom) | 256-bit output | 256 bits | ~128 bits |
 
 All algorithms are implemented via well-audited Rust libraries:
-- `pqcrypto-dilithium` v0.5 (PQClean reference implementation)
+- `pqcrypto-dilithium` v0.5 (PQClean reference implementation; superseded by `pqcrypto-mldsa` — migration tracked in TODO.md)
 - `pqcrypto-sphincsplus` v0.7 (PQClean reference implementation)
-- `pqcrypto-kyber` v0.8 (PQClean reference implementation)
+- `pqcrypto-kyber` v0.8 (PQClean reference implementation; superseded by `pqcrypto-mlkem`, RUSTSEC-2024-0381 — migration tracked in TODO.md)
 - `blake3` v1 (official blake3 crate)
 - `winterfell` v0.13 (Rescue Prime + STARK prover/verifier)
 
