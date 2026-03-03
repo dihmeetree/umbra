@@ -27,6 +27,12 @@ use crate::crypto::stark::verify::{verify_balance_proof, verify_spend_proof};
 use crate::crypto::stealth::StealthAddress;
 use crate::Hash;
 
+/// Maximum ciphertext length for an encrypted output note.
+/// Note plaintext is 41 bytes (1-byte version + 8-byte value + 32-byte blinding);
+/// ChaCha20-Poly1305 adds a 16-byte authentication tag, giving ~57 bytes.
+/// 256 bytes is a generous cap that prevents bloat/DoS attacks.
+pub const MAX_ENCRYPTED_NOTE_CIPHERTEXT_SIZE: usize = 256;
+
 /// A unique transaction identifier (hash of the serialized transaction).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TxId(pub Hash);
@@ -242,11 +248,9 @@ impl Transaction {
             }
         }
 
-        // Bound encrypted note size per output. Note plaintext is 41 bytes
-        // (1-byte version + 8-byte value + 32-byte blinding); with AEAD overhead
-        // the ciphertext is ~57 bytes. 256 bytes is a generous cap that prevents bloat attacks.
+        // Bound encrypted note size per output.
         for output in &self.outputs {
-            if output.encrypted_note.ciphertext.len() > 256 {
+            if output.encrypted_note.ciphertext.len() > MAX_ENCRYPTED_NOTE_CIPHERTEXT_SIZE {
                 return Err(TxValidationError::OutputNoteTooLarge);
             }
         }
@@ -309,7 +313,9 @@ impl Transaction {
                     return Err(TxValidationError::InvalidBondReturn);
                 }
                 // Apply the same encrypted-note ciphertext cap as for regular outputs
-                if bond_return_output.encrypted_note.ciphertext.len() > 256 {
+                if bond_return_output.encrypted_note.ciphertext.len()
+                    > MAX_ENCRYPTED_NOTE_CIPHERTEXT_SIZE
+                {
                     return Err(TxValidationError::OutputNoteTooLarge);
                 }
             }
@@ -1625,8 +1631,8 @@ mod tests {
     #[cfg(feature = "fast-tests")]
     fn validate_structure_rejects_oversized_encrypted_note() {
         let mut tx = make_test_tx();
-        // Bloat the first output's encrypted note ciphertext beyond the 256-byte cap
-        tx.outputs[0].encrypted_note.ciphertext = vec![0u8; 257];
+        // Bloat the first output's encrypted note ciphertext beyond the cap
+        tx.outputs[0].encrypted_note.ciphertext = vec![0u8; MAX_ENCRYPTED_NOTE_CIPHERTEXT_SIZE + 1];
         assert!(
             matches!(
                 tx.validate_structure(0),
@@ -1646,7 +1652,7 @@ mod tests {
             crate::crypto::stealth::StealthAddress::generate(&kp.kem.public, 0).unwrap();
         let mut encrypted_note =
             crate::crypto::encryption::EncryptedPayload::encrypt(&kp.kem.public, b"bond").unwrap();
-        encrypted_note.ciphertext = vec![0u8; 257]; // one byte over the 256-byte cap
+        encrypted_note.ciphertext = vec![0u8; MAX_ENCRYPTED_NOTE_CIPHERTEXT_SIZE + 1];
         tx.tx_type = TxType::ValidatorDeregister {
             validator_id: [0x42; 32],
             auth_signature: Signature {
