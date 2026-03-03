@@ -323,9 +323,9 @@ If a recipient's KEM secret key is compromised, an adversary can:
 
 Compromising the signing key does not additionally compromise transaction privacy (signing keys are used only for validator operations, not for spending UTXOs).
 
-### 10.6 Adversary Controlling Multiple Stem Nodes
+### 10.6 Adversary Controlling the Stem Node
 
-In Dandelion++ with only 2 stem hops, an adversary who controls all peers of the originating node controls the first stem hop. If they also control all peers of the first stem hop, they control both hops and can trivially identify the originator. This is an eclipse attack combined with Dandelion++ correlation.
+In the current single-hop implementation, an adversary who controls all peers of the originating node controls the sole stem hop and can trivially identify the originator. This is an eclipse attack combined with Dandelion++ correlation: if the adversary eclipses node A so that all of A's peers are adversarial, every stem-phase forward goes directly to an adversary who already knows A sent it.
 
 ---
 
