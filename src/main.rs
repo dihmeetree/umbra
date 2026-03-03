@@ -14,7 +14,7 @@
 //!   umbra wallet messages          # show received messages
 
 use clap::{Parser, Subcommand};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use umbra::config::{NatConfig, TlsConfig, WalletTlsConfig};
@@ -255,9 +255,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let listen_addr: SocketAddr =
                 format!("{}:{}", config.node.p2p_host, config.node.p2p_port).parse()?;
             let peers = if config.node.bootstrap_peers.is_empty() {
-                resolve_peers(&umbra::config::default_bootstrap_peers(network))
+                umbra::config::resolve_peers(&umbra::config::default_bootstrap_peers(network))
             } else {
-                resolve_peers(&config.node.bootstrap_peers)
+                umbra::config::resolve_peers(&config.node.bootstrap_peers)
             };
             run_node(
                 cli.data_dir,
@@ -282,12 +282,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let listen_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             let all_peers = if peers.is_empty() {
                 if config.node.bootstrap_peers.is_empty() {
-                    resolve_peers(&umbra::config::default_bootstrap_peers(network))
+                    umbra::config::resolve_peers(&umbra::config::default_bootstrap_peers(network))
                 } else {
-                    resolve_peers(&config.node.bootstrap_peers)
+                    umbra::config::resolve_peers(&config.node.bootstrap_peers)
                 }
             } else {
-                resolve_peers(&peers)
+                umbra::config::resolve_peers(&peers)
             };
             run_node(
                 cli.data_dir,
@@ -306,21 +306,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_wallet_command(action, &cli.data_dir, rpc_addr, wallet_tls).await
         }
     }
-}
-
-/// Resolve peer strings (host:port or ip:port) to socket addresses.
-/// Supports DNS hostnames via `ToSocketAddrs`.
-fn resolve_peers(peers: &[String]) -> Vec<SocketAddr> {
-    peers
-        .iter()
-        .filter_map(|s| match s.to_socket_addrs() {
-            Ok(mut addrs) => addrs.next(),
-            Err(e) => {
-                tracing::warn!(peer = %s, error = %e, "Failed to resolve peer address");
-                None
-            }
-        })
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
