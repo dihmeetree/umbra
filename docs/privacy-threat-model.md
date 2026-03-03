@@ -102,7 +102,7 @@ The commitment itself is a private witness — it never appears in the public in
 The `proof_link` links the `SpendStarkProof` (which verifies nullifier correctness and Merkle membership) to the `BalanceStarkProof` (which verifies amount conservation). This linking is necessary for correctness.
 
 The `proof_link` is computed as:
-```
+```text
 proof_link = RP(commitment, link_nonce)
 ```
 where `link_nonce` is a random value chosen by the prover.
@@ -150,7 +150,7 @@ An observer who sees a nullifier `N` cannot determine which commitment was spent
 
 Each transaction output uses a unique one-time stealth address. The protocol (Kyber-based):
 
-```
+```text
 Sender (Alice) sends to recipient (Bob) who has KEM public key pk_B:
 
 1. Alice encapsulates: (ss, ct) = KEM.Enc(pk_B)
@@ -184,7 +184,7 @@ Recipients must scan all transaction outputs to detect funds sent to them. This 
 ### 6.1 Rescue Prime Commitments
 
 Output values are committed using Rescue Prime:
-```
+```text
 commitment = RP(value, blinding_factor)
 ```
 where `blinding_factor` is a 32-byte random value chosen by the sender.
@@ -223,17 +223,17 @@ Transaction fees are plaintext — validators must be able to evaluate fee rate 
 
 Transactions are broadcast using Dandelion++ to prevent network-level linkability of transactions to their originating node:
 
-```
-Stem phase (2 hops):
-  Node A (originator) → forwards to random peer B
-  Peer B → forwards to random peer C (with random delay 100-500ms)
-  After DANDELION_TIMEOUT_MS (5s) without acknowledgment: C fluffs
+```text
+Stem phase (effectively 1 hop — known limitation):
+  Node A (originator) → forwards to random peer B (with random delay)
+  Peer B immediately fluffs (broadcasts to all peers)
+  After DANDELION_TIMEOUT_MS (5s): A fluffs if no confirmation
 
 Fluff phase:
-  C broadcasts transaction to all peers normally
+  B (or A on timeout) broadcasts transaction to all peers normally
 ```
 
-**Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node (C) or one of the stem nodes (A, B) is the originator.
+**Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node is the originator. However, receiving nodes immediately fluff rather than continuing a stem relay — the current implementation is effectively a single-hop stem. True multi-hop Dandelion++ would require protocol-level changes to propagate stem intent to receiving peers (see adversary-model.md §4.3).
 
 **Limitations**:
 - A global passive adversary who observes all network traffic can correlate timing: if A → B timing is observed shortly before B → C, and then C fluffs, the adversary can infer A is the originator.
@@ -278,9 +278,9 @@ The bond amount is not directly revealed — it is committed in the standard out
 
 ### 9.1 Encrypted Attachments
 
-Transactions may carry up to 16 encrypted messages (up to 1 MiB each), encrypted to a recipient's KEM public key using XChaCha20-Poly1305. All metadata (routing tags, message type) is inside the ciphertext — no plaintext metadata is exposed on-chain.
+Transactions may carry up to `MAX_MESSAGES_PER_TX` (16) encrypted messages per transaction, each with a ciphertext capped at `MAX_MESSAGE_SIZE` (64 KiB), encrypted to a recipient's KEM public key using XChaCha20-Poly1305. All metadata (routing tags, message type) is inside the ciphertext — no plaintext metadata is exposed on-chain.
 
-**Recipient identification**: the message's `EncryptedNote.kem_ciphertext` serves as the recipient indicator. Only the holder of the corresponding KEM secret key can decrypt. An observer cannot determine the recipient without the recipient's secret key.
+**Recipient identification**: the message's `TxMessage.payload.kem_ciphertext` serves as the recipient indicator. Only the holder of the corresponding KEM secret key can decrypt. An observer cannot determine the recipient without the recipient's secret key.
 
 ### 9.2 Timestamp Leakage
 
@@ -304,9 +304,7 @@ If Alice sends a transaction immediately after receiving funds (and no other use
 
 ### 10.3 Amount Correlation
 
-Even without seeing amounts, an adversary may correlate transactions by fee:
-- If Alice consistently uses a fee of exactly 1000 base units, her transactions may be distinguishable from those of other users.
-- No protocol-level countermeasure currently exists for fee-based fingerprinting.
+Even without seeing amounts, an adversary may correlate transactions by fee. Fees in Umbra are derived deterministically from transaction weight (`compute_weight_fee`), so users cannot freely choose arbitrary fee values. This reduces fee-based fingerprinting compared to systems with user-chosen fees, but does not eliminate it: transaction weight correlates with structural properties (number of inputs and outputs, presence of optional fields) that may be user-distinctive. Transactions with unusual structures — such as many inputs or variable-length encrypted notes — may produce distinguishable fee patterns even under the deterministic fee model.
 
 ### 10.4 Graph Analysis with Known Parties
 

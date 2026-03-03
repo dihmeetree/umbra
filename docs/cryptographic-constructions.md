@@ -76,10 +76,15 @@ BLAKE3 is used for all general-purpose hashing. It is a keyed-hash function base
 
 **Domain separation**: all hash calls in Umbra use domain-separated variants:
 ```
-H_d(domain, data) = BLAKE3(domain_bytes || len_4le(data) || data)
-H_concat(parts)   = BLAKE3(len_4le(p1) || p1 || len_4le(p2) || p2 || ...)
+H_d(domain, data) = BLAKE3.new_derive_key(domain)(data)
+                    // BLAKE3 keyed hash: domain is the key derivation context string;
+                    // data is the sole input — no manual length prefix.
+H_concat(parts)   = BLAKE3(len_u64le(p1) || p1 || len_u64le(p2) || p2 || ...)
+                    // standard BLAKE3; each part is prefixed with its 8-byte LE u64 length.
 ```
-Length prefixes are 4-byte little-endian. This prevents cross-context attacks where the same hash input appears in different contexts.
+`H_d` uses BLAKE3's built-in key derivation (`new_derive_key`) for cryptographic domain separation.
+`H_concat` uses 8-byte little-endian length prefixes to prevent cross-context attacks where
+the same concatenated bytes could arise from different part boundaries.
 
 **Reference**: [Aumasson et al., "BLAKE3 is one function, fast everywhere", 2020](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf)
 
@@ -94,7 +99,7 @@ Rescue Prime is an algebraic hash function designed to be efficient inside STARK
 - S-box: `x^7` (forward) and `x^{1/7}` (inverse) — MDS multiplication in between.
 
 **Security argument**:
-- Algebraic degree: the S-box has degree 7; after 7 rounds the overall algebraic degree is 7^7 ≈ 2^6 — high enough to resist Gröbner basis attacks.
+- Algebraic degree: the S-box `x^7` has degree 7; after 7 rounds the overall algebraic degree is 7^7 = 823,543 (≈ 2^19.66) — high enough to resist Gröbner basis attacks.
 - The Goldilocks field characteristic is large (64 bits), resisting small-field attacks.
 - Conjectured ~128-bit preimage resistance.
 
@@ -134,7 +139,7 @@ A signature is valid if and only if BOTH component signatures verify. This AND c
 - Security: based on Module-LWE and Module-SIS problems over module lattices
 - NIST security level: 5 (~256-bit equivalent)
 
-**Quantum resistance**: the Module-LWE problem is believed to be hard for quantum computers. The best known quantum attacks provide no exponential speedup over classical attacks.
+**Quantum resistance**: the Module-LWE problem is believed to be hard for quantum computers. The best-known quantum attacks provide no exponential speedup over classical attacks.
 
 **Reference**: [Ducas et al., "CRYSTALS-Dilithium Algorithm Specifications and Supporting Documentation", NIST PQC Round 3 submission](https://pq-crystals.org/dilithium/)
 
@@ -161,7 +166,7 @@ To prevent cross-protocol signature misuse, all signed messages include a domain
 | Context | Domain | Signed data |
 |---|---|---|
 | BFT vote | `"umbra.vote"` | `H_d("umbra.vote", epoch \|\| round \|\| vertex_id \|\| vote_type)` |
-| Validator deregistration | `"umbra.dereg"` | `H_d("umbra.dereg", chain_id \|\| validator_id)` |
+| Validator deregistration | `"umbra.validator.deregister"` | `H_concat("umbra.validator.deregister" \|\| chain_id \|\| validator_id \|\| tx_content_hash)` |
 | P2P handshake | `"umbra.auth"` | `H_d("umbra.auth", shared_secret \|\| initiator_pk \|\| responder_pk)` |
 
 ---
@@ -230,16 +235,16 @@ Setup: Recipient Bob publishes KEM public key pk_B.
 
 Send (Alice → Bob for output at index i):
   1. (ss, ct) ← KEM.Enc(pk_B)          // Kyber1024 encapsulation
-  2. otk ← H_d("umbra.stealth", ss || i_le4)   // one-time key
+  2. otk ← H_d("umbra.stealth.one_time_key", ss || i_le4)   // one-time key
   3. Output on-chain: { one_time_key = otk, kem_ciphertext = ct }
 
 Scan (Bob):
   4. For each output: ss' ← KEM.Dec(sk_B, ct)
-  5. otk' ← H_d("umbra.stealth", ss' || i_le4)
+  5. otk' ← H_d("umbra.stealth.one_time_key", ss' || i_le4)
   6. If otk' == one_time_key: output belongs to Bob
 
 Spend (Bob):
-  7. spend_auth ← H_d("umbra.spend_auth", ss')
+  7. spend_auth ← H_d("umbra.stealth.spend_auth", ss || signing_key_fingerprint || i_le4)
   8. Build SpendStarkProof using spend_auth and commitment
 ```
 
@@ -564,19 +569,24 @@ All Umbra domain-separated hash calls use ASCII prefixes registered here:
 
 | Domain | Usage |
 |---|---|
-| `"umbra.txid"` | Transaction ID derivation |
-| `"umbra.vertex"` | Vertex ID derivation |
-| `"umbra.epoch"` | Epoch seed derivation |
-| `"umbra.vote"` | BFT vote signing |
-| `"umbra.auth"` | P2P handshake authentication |
-| `"umbra.session"` | P2P session key derivation |
-| `"umbra.stealth"` | Stealth address one-time key |
-| `"umbra.spend_auth"` | Spending authorization key |
-| `"umbra.vrf.output"` | VRF output derivation |
-| `"umbra.vrf.proof"` | VRF proof derivation |
-| `"umbra.dereg"` | Validator deregistration signing |
-| `"umbra.validator"` | Validator ID derivation |
-| `"umbra.null"` | Nullifier derivation domain |
+| `"umbra.txid"` | Transaction ID derivation (`H_d`) |
+| `"umbra.vertex.id"` | Vertex ID derivation (`H_d`) |
+| `"umbra.epoch.seed"` | Epoch seed derivation (`H_concat` prefix) |
+| `"umbra.epoch.genesis"` | Genesis epoch seed (`H_d`) |
+| `"umbra.epoch.combined_mix"` | Combine BFT and DAG VRF outputs during epoch advancement (`H_d`) |
+| `"umbra.vote"` | BFT vote signing (manual prefix in sign data) |
+| `"umbra.p2p.transcript"` | P2P handshake transcript hash (`H_d`) |
+| `"umbra.p2p.init.send"` | P2P initiator→responder session key (`H_d`) |
+| `"umbra.p2p.resp.send"` | P2P responder→initiator session key (`H_d`) |
+| `"umbra.p2p.rekey"` | P2P session rekeying (`H_concat` prefix) |
+| `"umbra.stealth.one_time_key"` | Stealth address one-time key (`H_d`) |
+| `"umbra.stealth.spend_auth"` | Spending authorization key (`H_d`) |
+| `"umbra.vrf.output"` | VRF output derivation (`H_d`) |
+| `"umbra.vrf.proof_commitment"` | VRF proof commitment for anti-grinding (`H_d`) |
+| `"umbra.vrf.input"` | VRF input tagging (`H_concat` prefix) |
+| `"umbra.vrf.epoch_input"` | VRF per-epoch input (`H_concat` prefix) |
+| `"umbra.validator.deregister"` | Validator deregistration signing (`H_concat` prefix) |
+| `"umbra.nullifier_acc"` | Nullifier accumulator chaining (`H_concat` prefix) |
 
 ---
 

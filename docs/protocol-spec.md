@@ -107,7 +107,7 @@ These constants are defined in `src/lib.rs::constants` and are protocol-level �
 | `BFT_QUORUM` | 15 | Fallback quorum (`floor(2*21/3)+1`) |
 | `EPOCH_LENGTH` | 1,000 | Vertices per epoch before rotation |
 | `MAX_PARENTS` | 8 | Maximum parent vertex references |
-| `MAX_PEERS` | 50 | Maximum simultaneous peer connections |
+| `MAX_PEERS` | 64 | Maximum simultaneous peer connections |
 | `MAX_NETWORK_MESSAGE_BYTES` | 16,777,216 | Maximum deserialized message size (16 MiB) |
 | `P2P_PADDING_BUCKET` | 1,024 | Frame padding granularity (bytes) |
 | `DANDELION_STEM_HOPS` | 2 | Dandelion++ stem phase hops |
@@ -126,7 +126,7 @@ where `n` is the current active validator count.
 
 ### 4.1 Hash
 
-```
+```text
 Hash = [u8; 32]   // BLAKE3 output
 ```
 
@@ -135,7 +135,7 @@ All hashes are 32 bytes. Domain separation is mandatory for all protocol hashes 
 ### 4.2 Keys
 
 **Signing key pair** (hybrid post-quantum):
-```
+```text
 SigningPublicKey  = dilithium5_pk (2592 bytes) || sphincs_pk (64 bytes)
 SigningSecretKey  = dilithium5_sk || sphincs_sk   [zeroize-on-drop]
 Signature        = { dilithium: Vec<u8>,          // 4627 bytes
@@ -145,20 +145,20 @@ Signature        = { dilithium: Vec<u8>,          // 4627 bytes
 A signature is valid iff BOTH component signatures verify. This AND composition means breaking either scheme alone is insufficient.
 
 **KEM key pair**:
-```
+```text
 KemPublicKey  = kyber1024_pk   (1568 bytes)
 KemSecretKey  = kyber1024_sk   [zeroize-on-drop]
 KemCiphertext = kyber1024_ct   (1568 bytes)
 ```
 
 **Validator identity**:
-```
+```text
 validator_id = H_d("umbra.validator", dilithium5_pk || sphincs_pk)
 ```
 
 ### 4.3 Transaction
 
-```
+```text
 Transaction = {
     id:       TxId,       // H_d("umbra.txid", serialized fields)
     tx_type:  TxType,
@@ -203,7 +203,7 @@ EncryptedNote = {
 | `Coinbase` | Block reward issuance (committee leader only) |
 
 **Transaction content hash** (binds all malleable fields):
-```
+```text
 tx_content_hash = H_concat(
     [len(inputs)],
     for each input: nullifier || proof_link,
@@ -221,7 +221,7 @@ tx_content_hash = H_concat(
 
 ### 4.4 DAG Vertex
 
-```
+```text
 Vertex = {
     id:           VertexId,            // H of header fields
     parents:      Vec<VertexId>,       // 1..MAX_PARENTS
@@ -237,14 +237,16 @@ Vertex = {
     protocol_version: u32,
 }
 
-VertexId = Hash   // H of (parents, epoch, round, proposer, state_root, protocol_version)
+VertexId = Hash   // H of (parents, epoch, round, proposer_fingerprint, tx_root,
+                  //        presence_byte || vrf_output_value?, state_root, protocol_version)
+                  // timestamp is NOT hashed into the vertex id
 ```
 
 A vertex timestamp is validated on receipt: nodes reject vertices timestamped more than `MAX_VERTEX_TIMESTAMP_DRIFT_SECS` (60 s) into the future.
 
 ### 4.5 BFT Messages
 
-```
+```text
 Vote = {
     voter:      SigningPublicKey,
     vertex_id:  VertexId,
@@ -322,7 +324,7 @@ On receipt, nodes validate:
 Valid transactions enter the fee-priority mempool:
 - Transactions ordered by `fee / estimated_size` (fee rate).
 - Duplicate nullifiers across mempool transactions: lower-fee transaction is evicted.
-- Mempool capacity: configurable; bounded by memory.
+- Hard capacity limits: `MEMPOOL_MAX_TXS = 10,000` transactions or `MEMPOOL_MAX_BYTES = 50 MiB` total serialized size; when either limit is reached, the lowest-fee transaction is evicted.
 
 ### 5.4 Inclusion
 
@@ -339,22 +341,30 @@ A transaction is **final** when the vertex containing it receives a BFT certific
 ### 6.1 Epochs and Committee Selection
 
 **Epoch seed derivation**:
+```text
+combined_vrf_mix = H_d("umbra.epoch.combined_mix", H_concat(bft_vrf_mix, dag_vrf_mix))
+epoch_seed_new   = H_concat("umbra.epoch.seed", epoch_le64, prev_seed, state_root, combined_vrf_mix)
 ```
-epoch_seed = H_d("umbra.epoch", previous_epoch_final_state_root)
-```
+where `bft_vrf_mix` aggregates VRF proof commitments from BFT votes, `dag_vrf_mix` aggregates
+deduplicated VRF output values from finalized vertex proposers, and `epoch_le64` is the
+current epoch number as a little-endian 64-bit integer.
 
 **VRF evaluation**: each active validator `v` with signing key `sk_v` computes:
-```
+```text
 (vrf_output, vrf_proof) = VRF.prove(sk_v, epoch_seed)
 ```
 
 The VRF output is a deterministic pseudorandom 32-byte value. It is verifiable by any party given `pk_v`.
 
-**Committee membership threshold**:
+**Committee membership test**:
+```text
+r = first 8 bytes of vrf_output, interpreted as u64 (little-endian)
+selected if: r * total_validators < COMMITTEE_SIZE * 2^64
+special case: if COMMITTEE_SIZE >= total_validators, all validators are selected
 ```
-threshold = MAX_HASH / COMMITTEE_SIZE * min(n_validators, COMMITTEE_SIZE)
-```
-Validators with `vrf_output < threshold` join the committee, up to `COMMITTEE_SIZE = 21` members. If fewer than `MIN_COMMITTEE_SIZE = 7` qualify, all active validators serve as the committee.
+This selects each validator independently with probability `COMMITTEE_SIZE / total_validators`,
+giving an expected committee of exactly `COMMITTEE_SIZE = 21` members for large validator sets.
+If fewer than `MIN_COMMITTEE_SIZE = 7` are selected, all active validators serve as the committee.
 
 **Properties**:
 - Selection is unpredictable before the epoch seed is revealed.
@@ -369,10 +379,10 @@ Committee members may produce vertices at any time after the epoch starts:
 2. Collect 1 to `MAX_PARENTS` tips from the local DAG view.
 3. Compute the state root after applying all transactions.
 4. Produce the vertex body and sign it:
-   ```
+```text
    vertex_id = H_d("umbra.vertex", parents || epoch || round || proposer_pk || state_root || protocol_version)
    signature = Sign(sk_v, vertex_id)
-   ```
+```
 5. Attach the VRF proof demonstrating committee membership.
 6. Broadcast the vertex to all peers.
 
@@ -389,7 +399,7 @@ Committee members may produce vertices at any time after the epoch starts:
 
 BFT proceeds in rounds within each epoch:
 
-```
+```text
 Phase 1 — PROPOSE:
   Leader broadcasts vertex.
 
@@ -404,7 +414,7 @@ Phase 3 — CERTIFY:
 ```
 
 **Quorum function** (runtime, accounts for variable committee size):
-```
+```text
 dynamic_quorum(k) = floor(2k/3) + 1
 ```
 
@@ -421,7 +431,7 @@ A vertex is **certified** (final) when a `Certificate` containing at least `dyna
 
 Equivocation is when a validator votes for two different vertices in the same epoch and round:
 
-```
+```text
 EquivocationEvidence = { voter_id, epoch, round, vote_a, vote_b }
   where vote_a.vertex_id != vote_b.vertex_id
 ```
@@ -512,7 +522,7 @@ A `ValidatorDeregister` transaction:
 
 All node-to-node connections are encrypted and mutually authenticated. The handshake proceeds over TCP:
 
-```
+```text
 Step 1 — Hello (plaintext):
   Initiator → Responder: Hello { protocol_version, node_id, kem_pk, listen_addr }
   Responder → Initiator: Hello { protocol_version, node_id, kem_pk, listen_addr }
@@ -560,7 +570,7 @@ All messages include a domain-separated BLAKE3 message ID for gossip deduplicati
 
 Nodes maintain two rolling "seen" sets (each capped at 10,000 entries) to deduplicate gossip:
 
-```
+```text
 seen_messages_current: Set<Hash>   // current generation
 seen_messages_previous: Set<Hash>  // previous generation
 ```
@@ -576,7 +586,7 @@ On receiving a message with ID `mid`:
 
 To protect transaction origin privacy, Umbra implements Dandelion++ (F6):
 
-```
+```text
 Stem phase:
   1. New transaction enters stem phase.
   2. Select one random peer as the next hop.
@@ -603,13 +613,13 @@ bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
 ```
 
 **Size limits**:
-- Network messages: rejected if serialized size > `MAX_MESSAGE_SIZE = 65536` bytes.
+- Transaction message ciphertext (`TxMessage.payload.ciphertext`): rejected if > `MAX_MESSAGE_SIZE = 65,536` bytes (64 KiB).
 - Deserialized objects: `deserialize()` rejects inputs > `MAX_NETWORK_MESSAGE_BYTES = 16 MiB`.
 - Snapshot blobs: assembled snapshots may exceed 16 MiB; use `deserialize_snapshot()`.
 
 **Hashing helpers**:
-- `hash_domain(domain: &[u8], data: &[u8]) -> Hash`: `H(domain || len(data) || data)`
-- `hash_concat(parts: &[&[u8]]) -> Hash`: `H(len(p1) || p1 || len(p2) || p2 || ...)`
+- `hash_domain(domain: &[u8], data: &[u8]) -> Hash`: BLAKE3 keyed hash using `domain` as the key derivation context (`new_derive_key`), with `data` as the sole input — no manual length prefix.
+- `hash_concat(parts: &[&[u8]]) -> Hash`: standard BLAKE3 over `len_u64le(p1) || p1 || len_u64le(p2) || p2 || ...` where length prefixes are 8-byte little-endian u64.
 
 ---
 

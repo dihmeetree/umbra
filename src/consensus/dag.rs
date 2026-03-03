@@ -577,8 +577,9 @@ impl Dag {
     /// Aggregate the VRF output values from all finalized vertices in `epoch`.
     ///
     /// Each proposer's VRF output value is deterministic once their vertex is
-    /// finalized — there is no last-revealer problem. Values are sorted before
-    /// hashing so the result is independent of DAG traversal order.
+    /// finalized — there is no last-revealer problem. Values are sorted and
+    /// deduplicated before hashing so the result is independent of DAG traversal
+    /// order and a proposer with multiple vertices contributes exactly once.
     ///
     /// This is combined with the BFT-layer VRF commitment mix at epoch rotation
     /// to produce a two-layer randomness beacon for the next epoch seed.
@@ -591,6 +592,7 @@ impl Dag {
             .filter_map(|v| v.vrf_proof.as_ref().map(|p| p.value))
             .collect();
         values.sort_unstable();
+        values.dedup();
         let mut parts: Vec<&[u8]> = vec![b"umbra.epoch.vrf_mix"];
         for v in &values {
             parts.push(v.as_ref());
@@ -2593,9 +2595,9 @@ mod tests {
 
         let mix_before = dag.epoch_vrf_mix(0);
 
-        // Vertex in epoch 1 (round 1000 = EPOCH_LENGTH) — should not affect epoch 0 mix
-        let mut v1 = make_vertex(vec![v0_id], 1000);
-        // epoch is derived from round: 1000 / EPOCH_LENGTH = 1
+        // Vertex in epoch 1 (round = EPOCH_LENGTH) — should not affect epoch 0 mix
+        let mut v1 = make_vertex(vec![v0_id], crate::constants::EPOCH_LENGTH);
+        // epoch is derived from round: EPOCH_LENGTH / EPOCH_LENGTH = 1
         v1.vrf_proof = Some(vrf1);
         let v1_id = v1.id;
         dag.insert_unchecked(v1).unwrap();
@@ -2605,6 +2607,55 @@ mod tests {
         assert_eq!(
             mix_before, mix_after,
             "epoch 1 vertex must not change epoch 0 vrf_mix"
+        );
+    }
+
+    #[test]
+    fn epoch_vrf_mix_deduplicates_per_proposer() {
+        // A proposer with two finalized vertices in the same epoch has the same
+        // deterministic VRF value for both. After dedup, they contribute exactly
+        // once, so the mix equals the one produced by a DAG with only one vertex
+        // from that proposer.
+        use crate::crypto::keys::SigningKeypair;
+        use crate::crypto::vrf::{EpochSeed, VrfOutput};
+
+        let seed = EpochSeed::genesis();
+        let kp = SigningKeypair::generate();
+        let vrf = VrfOutput::evaluate(&kp, &seed.vrf_input(&kp.public.fingerprint()));
+
+        // DAG with one vertex from the proposer.
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag_one = Dag::new(genesis);
+        let mut v1 = make_vertex(vec![gid], 1);
+        v1.epoch = 0;
+        v1.vrf_proof = Some(vrf.clone());
+        let v1_id = v1.id;
+        dag_one.insert_unchecked(v1).unwrap();
+        dag_one.finalize(&v1_id);
+        let mix_one = dag_one.epoch_vrf_mix(0);
+
+        // DAG with two vertices from the same proposer (same VRF value).
+        let genesis2 = Dag::genesis_vertex();
+        let gid2 = genesis2.id;
+        let mut dag_two = Dag::new(genesis2);
+        let mut va = make_vertex(vec![gid2], 1);
+        va.epoch = 0;
+        va.vrf_proof = Some(vrf.clone());
+        let va_id = va.id;
+        dag_two.insert_unchecked(va).unwrap();
+        dag_two.finalize(&va_id);
+        let mut vb = make_vertex(vec![va_id], 2);
+        vb.epoch = 0;
+        vb.vrf_proof = Some(vrf.clone());
+        let vb_id = vb.id;
+        dag_two.insert_unchecked(vb).unwrap();
+        dag_two.finalize(&vb_id);
+        let mix_two = dag_two.epoch_vrf_mix(0);
+
+        assert_eq!(
+            mix_one, mix_two,
+            "duplicate VRF values must be deduplicated: two vertices from the same proposer must produce the same mix as one"
         );
     }
 }

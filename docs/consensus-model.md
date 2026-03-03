@@ -114,14 +114,17 @@ This is a deliberate design choice to avoid the "rich get richer" dynamic of sta
 
 ### 3.3 Committee Selection via VRF
 
-At the start of each epoch, the epoch seed is computed from the previous epoch's finalized state:
+At the start of each epoch, the epoch seed is computed by combining two independent entropy sources from the previous epoch (see §11.3 for the full construction):
 
-```
-epoch_seed = H_d("umbra.epoch", prev_epoch_state_root)
+```text
+bft_mix  = H(sorted validator_id || proof_commitment pairs from all votes)
+dag_mix  = H(sorted VRF output values from finalized vertex proposers)
+vrf_mix  = H_domain("umbra.epoch.combined_mix", bft_mix || dag_mix)
+epoch_seed = H_d("umbra.epoch.seed", N || prev_seed || state_root || vrf_mix)
 ```
 
 Each active validator `v` with signing key `sk_v` evaluates:
-```
+```text
 (vrf_output_v, vrf_proof_v) = VRF.prove(sk_v, epoch_seed)
 ```
 
@@ -130,11 +133,15 @@ The VRF satisfies:
 - **Verifiability**: `vrf_proof_v` convinces any verifier with `pk_v` that `vrf_output_v` is correct.
 - **Pseudorandomness**: `vrf_output_v` is computationally indistinguishable from random to anyone who does not know `sk_v`.
 
-**Threshold**: validators with `vrf_output_v < threshold` are committee members, where:
+**Selection test**: a validator is a committee member if:
+```text
+r = first 8 bytes of vrf_output_v (little-endian u64)
+selected if: r × N < COMMITTEE_SIZE × 2^64
+special case: if COMMITTEE_SIZE ≥ N, all validators are selected
 ```
-threshold = 2^256 / COMMITTEE_SIZE × min(N, COMMITTEE_SIZE)
-```
-(adjusted to get an expected committee size of exactly `COMMITTEE_SIZE`).
+where `N` is the total number of active validators. This selects each validator
+independently with probability `COMMITTEE_SIZE / N`, giving an expected committee
+of exactly `COMMITTEE_SIZE` members for large validator sets.
 
 **If fewer than `MIN_COMMITTEE_SIZE = 7` qualify**: all active validators form the committee. This ensures liveness even with a small validator set.
 
@@ -291,12 +298,12 @@ After `EPOCH_LENGTH = 1000` finalized vertices, the epoch rotates.
 
 The rotation order is strictly defined to avoid race conditions:
 
-1. **Compute new committee** for epoch `N+1` using the current state root as the new epoch seed.
+1. **Compute new epoch seed** for epoch `N+1` from the combined VRF mix (bft_mix + dag_mix) and state root of epoch `N` (see §11.3), then derive the new committee from that seed.
 2. **Preserve committee history**: store the epoch `N` committee in `committee_history` for cross-epoch equivocation detection.
 3. **Clear epoch caches**: reset vote tables and per-epoch seen sets.
 4. **Activate new committee**: the epoch `N+1` committee begins proposing and voting.
 
-**Critical ordering constraint**: step 1 (new committee computation) must complete before step 3 (cache clearing). Computing the committee requires the old state root, which would be unavailable after clearing.
+**Critical ordering constraint**: step 1 (new epoch seed and committee computation) must complete before step 3 (cache clearing). The VRF mix and state root from epoch `N` are needed to compute the seed and would be unavailable after clearing.
 
 ### 8.3 Cross-Epoch Equivocation
 

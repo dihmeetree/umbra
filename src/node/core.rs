@@ -2182,8 +2182,8 @@ impl Node {
                     //   (deterministic once finalized, no last-revealer problem)
                     let bft_mix = state.bft.vrf_mix_hash();
                     let dag_mix = state.ledger.dag.epoch_vrf_mix(state.bft.epoch);
-                    let vrf_mix =
-                        crate::hash_concat(&[b"umbra.epoch.combined_mix", &bft_mix, &dag_mix]);
+                    let payload = crate::hash_concat(&[&bft_mix, &dag_mix]);
+                    let vrf_mix = crate::hash_domain(b"umbra.epoch.combined_mix", &payload);
                     let (fees, new_seed) = state.ledger.state.advance_epoch_with_vrf_mix(&vrf_mix);
                     tracing::info!(epoch = new_seed.epoch, fees = fees, "Epoch advanced");
 

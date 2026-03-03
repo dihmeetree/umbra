@@ -116,7 +116,7 @@ The network adversary may:
 | Message injection | Session authenticated with Dilithium5; AEAD with per-session keys |
 | Man-in-the-middle | Mutual authentication: both parties sign the KEM handshake transcript |
 | Traffic fingerprinting | Frames padded to `P2P_PADDING_BUCKET = 1024` byte multiples |
-| Transaction linkability | Dandelion++ routing: 2 stem hops before flooding |
+| Transaction linkability | Dandelion++ routing: effectively single-hop stem — receiving nodes immediately fluff; true multi-hop relay requires protocol-level changes (see §4.3) |
 | DoS via message flood | Token bucket rate limiting: 100 msg/s, 200 burst per peer |
 | DoS via large messages | Hard message size cap: 16 MiB deserialization limit |
 | DoS via invalid structs | Structural validation before cryptographic verification |

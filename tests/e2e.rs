@@ -1001,15 +1001,25 @@ fn test_validator_full_lifecycle() {
 
     let vid = new_signing.public.fingerprint();
     assert!(state.is_active_validator(&vid));
-    assert_eq!(state.get_validator(&vid).unwrap().activation_epoch, 1);
+    assert_eq!(
+        state.get_validator(&vid).unwrap().activation_epoch,
+        umbra::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS
+    );
 
-    // --- Phase 2: Advance epoch so validator activates ---
+    // --- Phase 2: Advance epochs so validator activates ---
+    // COMMITTEE_ELIGIBILITY_DELAY_EPOCHS = 2, so must advance twice
     state.advance_epoch();
     assert_eq!(state.epoch(), 1);
-    let eligible = state.eligible_validators(1);
+    assert!(
+        state.eligible_validators(1).iter().all(|v| v.id != vid),
+        "validator must not be eligible after only 1 epoch advance"
+    );
+    state.advance_epoch();
+    assert_eq!(state.epoch(), 2);
+    let eligible = state.eligible_validators(2);
     assert!(
         eligible.iter().any(|v| v.id == vid),
-        "validator should be eligible after activation epoch"
+        "validator should be eligible after COMMITTEE_ELIGIBILITY_DELAY_EPOCHS epochs"
     );
 
     // --- Phase 3: Deregister the validator ---
