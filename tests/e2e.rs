@@ -830,8 +830,8 @@ fn test_validator_registration_e2e() {
     );
     assert_eq!(
         state.get_validator(&vid).unwrap().activation_epoch,
-        1,
-        "activation should be next epoch (current=0, so activation=1)"
+        umbra::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS,
+        "activation should be delayed by COMMITTEE_ELIGIBILITY_DELAY_EPOCHS (current=0, so activation=2)"
     );
     assert_eq!(
         state.validator_bond(&vid),
