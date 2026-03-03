@@ -968,7 +968,7 @@ mod tests {
             assert!(observed_addr.len() <= 64);
             assert!(external_addr
                 .as_ref()
-                .map_or(true, |s| std::str::from_utf8(s.as_bytes()).is_ok()));
+                .is_none_or(|s| std::str::from_utf8(s.as_bytes()).is_ok()));
             assert!(std::str::from_utf8(observed_addr.as_bytes()).is_ok());
         } else {
             panic!("expected NatInfo");
