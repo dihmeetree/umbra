@@ -16,11 +16,18 @@ services:
       - --data-dir
       - /data
       - --genesis-validator
+      - --tls-cert
+      - /certs/server.crt
+      - --tls-key
+      - /certs/server.key
+      - --tls-ca-cert
+      - /certs/ca.crt
     ports:
       - "9742:9742"
       - "9743:9743"
     volumes:
       - validator1-data:/data
+      - ./certs:/certs:ro
 
   validator-2:
     build: .
@@ -41,8 +48,15 @@ services:
       - --genesis-validator
       - --peers
       - "validator-1:9742"
+      - --tls-cert
+      - /certs/server.crt
+      - --tls-key
+      - /certs/server.key
+      - --tls-ca-cert
+      - /certs/ca.crt
     volumes:
       - validator2-data:/data
+      - ./certs:/certs:ro
     depends_on:
       - validator-1
 
@@ -65,8 +79,15 @@ services:
       - --genesis-validator
       - --peers
       - "validator-1:9742"
+      - --tls-cert
+      - /certs/server.crt
+      - --tls-key
+      - /certs/server.key
+      - --tls-ca-cert
+      - /certs/ca.crt
     volumes:
       - validator3-data:/data
+      - ./certs:/certs:ro
     depends_on:
       - validator-1
 

@@ -202,14 +202,16 @@ impl UmbraConfig {
     }
 
     /// Parse bootstrap peers into socket addresses.
+    /// Supports both IP:port and hostname:port (DNS resolution).
     pub fn parse_bootstrap_peers(&self) -> Vec<SocketAddr> {
+        use std::net::ToSocketAddrs;
         self.node
             .bootstrap_peers
             .iter()
-            .filter_map(|s| match s.parse() {
-                Ok(addr) => Some(addr),
+            .filter_map(|s| match s.to_socket_addrs() {
+                Ok(mut addrs) => addrs.next(),
                 Err(_) => {
-                    tracing::warn!(address = %s, "Ignoring unparseable bootstrap peer");
+                    tracing::warn!(address = %s, "Ignoring unresolvable bootstrap peer");
                     None
                 }
             })

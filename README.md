@@ -596,11 +596,24 @@ Umbra supports a separate testnet with its own chain ID, preventing transaction 
 ### Quick Start with Docker
 
 ```bash
-# Start 3 validators + faucet
-docker compose -f docker-compose.testnet.yml up -d
+# Generate TLS certificates (first time only)
+./scripts/generate-certs.sh
+
+# Start 3 validators + faucet (with mTLS)
+docker compose -f docker-compose.testnet.yml up -d --build
 
 # Optional: add Prometheus + Grafana monitoring
-docker compose -f docker-compose.testnet.yml --profile monitoring up -d
+docker compose -f docker-compose.testnet.yml --profile monitoring up -d --build
+
+# Health check (mTLS required)
+curl --cacert certs/ca.crt --cert certs/client.crt --key certs/client.key \
+  https://localhost:9743/health
+```
+
+Or use the launch script which handles everything:
+
+```bash
+./scripts/launch-testnet.sh
 ```
 
 ### Quick Start without Docker

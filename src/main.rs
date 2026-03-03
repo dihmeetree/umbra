@@ -14,7 +14,7 @@
 //!   umbra wallet messages          # show received messages
 
 use clap::{Parser, Subcommand};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use umbra::config::{NatConfig, TlsConfig, WalletTlsConfig};
@@ -94,9 +94,9 @@ enum Command {
         #[arg(long, default_value = "9732")]
         port: u16,
 
-        /// Bootstrap peer addresses (comma-separated).
+        /// Bootstrap peer addresses (comma-separated, supports hostnames).
         #[arg(long, value_delimiter = ',')]
-        peers: Vec<SocketAddr>,
+        peers: Vec<String>,
 
         /// Register as a genesis validator (for bootstrapping a new network).
         #[arg(long)]
@@ -255,12 +255,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let listen_addr: SocketAddr =
                 format!("{}:{}", config.node.p2p_host, config.node.p2p_port).parse()?;
             let peers = if config.node.bootstrap_peers.is_empty() {
-                umbra::config::default_bootstrap_peers(network)
-                    .iter()
-                    .filter_map(|s| s.parse().ok())
-                    .collect()
+                resolve_peers(&umbra::config::default_bootstrap_peers(network))
             } else {
-                config.parse_bootstrap_peers()
+                resolve_peers(&config.node.bootstrap_peers)
             };
             run_node(
                 cli.data_dir,
@@ -284,17 +281,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // CLI flags override config file
             let listen_addr: SocketAddr = format!("{}:{}", host, port).parse()?;
             let all_peers = if peers.is_empty() {
-                let config_peers = config.parse_bootstrap_peers();
-                if config_peers.is_empty() {
-                    umbra::config::default_bootstrap_peers(network)
-                        .iter()
-                        .filter_map(|s| s.parse().ok())
-                        .collect()
+                if config.node.bootstrap_peers.is_empty() {
+                    resolve_peers(&umbra::config::default_bootstrap_peers(network))
                 } else {
-                    config_peers
+                    resolve_peers(&config.node.bootstrap_peers)
                 }
             } else {
-                peers
+                resolve_peers(&peers)
             };
             run_node(
                 cli.data_dir,
@@ -313,6 +306,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_wallet_command(action, &cli.data_dir, rpc_addr, wallet_tls).await
         }
     }
+}
+
+/// Resolve peer strings (host:port or ip:port) to socket addresses.
+/// Supports DNS hostnames via `ToSocketAddrs`.
+fn resolve_peers(peers: &[String]) -> Vec<SocketAddr> {
+    peers
+        .iter()
+        .filter_map(|s| match s.to_socket_addrs() {
+            Ok(mut addrs) => addrs.next(),
+            Err(e) => {
+                tracing::warn!(peer = %s, error = %e, "Failed to resolve peer address");
+                None
+            }
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

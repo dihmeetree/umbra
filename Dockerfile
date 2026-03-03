@@ -16,7 +16,7 @@ RUN mkdir -p src/bin && \
 
 # Copy full source and build
 COPY . .
-RUN touch src/main.rs src/lib.rs && cargo build --release --bin umbra
+RUN touch src/main.rs src/lib.rs && cargo build --release --bin umbra --bin faucet
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -24,6 +24,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/umbra /usr/local/bin/
+COPY --from=builder /build/target/release/faucet /usr/local/bin/
 
 EXPOSE 9732 9733 9742 9743 9744
 

@@ -23,6 +23,7 @@ Thumbs.db
 .env.*
 *.pem
 *.key
+/certs/
 
 # Database files
 *.db
