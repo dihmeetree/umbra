@@ -66,15 +66,16 @@ A novel consensus mechanism that is **neither Proof of Work nor Proof of Stake**
 
 ```
 Epoch N:
-  1. bft_mix  = H(VRF proof commitments from votes in epoch N)  // commit-reveal, anti-grinding
-     dag_mix  = H(VRF output values from finalized vertices in epoch N)  // deterministic, no last-revealer
+  // Seed for epoch N is derived from epoch N-1's finalized data:
+  1. bft_mix    = H(VRF proof commitments from votes in epoch N-1)  // commit-reveal, anti-grinding
+     dag_mix    = H(VRF output values from finalized vertices in epoch N-1)  // no last-revealer
      epoch_seed = H("umbra.epoch.combined_mix" || bft_mix || dag_mix)
   2. Each validator evaluates VRF(key, epoch_seed)
-  3. Validators below threshold join the committee
+  3. Validators passing the membership test join the epoch N committee
   4. Committee members propose vertices containing transactions
   5. Vertices reference 1..8 parent vertices (forming the DAG)
   6. Committee runs BFT: 2/3+1 votes = instant finality
-  7. After 1000 vertices, rotate to epoch N+1
+  7. After 1000 vertices, derive epoch_seed_{N+1} from epoch N's data and rotate
 ```
 
 **Why not PoW?** No energy waste. No mining hardware arms race. Instant finality instead of probabilistic.

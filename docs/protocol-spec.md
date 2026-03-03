@@ -70,7 +70,7 @@ Full nodes maintain the full DAG and state. Light clients receive Merkle proofs 
 | Symbol | Meaning |
 |---|---|
 | `H(x)` | BLAKE3 hash of byte string `x`, producing 32 bytes |
-| `H_d(domain, x)` | Domain-separated BLAKE3: `H(domain \|\| len(x) \|\| x)` |
+| `H_d(domain, x)` | Domain-separated BLAKE3 via `new_derive_key(domain)`: `domain` is the key derivation context; `x` is the sole input; no manual length prefix |
 | `H_concat(x1, x2, ...)` | Multi-part BLAKE3 with length-prefixed inputs |
 | `RP(x)` | Rescue Prime hash over the Goldilocks field (Rp64_256) |
 | `Sign(sk, m)` | Hybrid signature: Dilithium5(sk_d, m) AND SPHINCS+(sk_s, m) |
@@ -391,7 +391,8 @@ Committee members may produce vertices at any time after the epoch starts:
 3. Compute the state root after applying all transactions.
 4. Produce the vertex body and sign it:
 ```text
-   vertex_id = H_d("umbra.vertex", parents || epoch || round || proposer_pk || state_root || protocol_version)
+   vertex_id = H_d("umbra.vertex.id", parents || epoch || round || proposer_fingerprint || tx_root
+                   || presence_byte || vrf_output_value? || state_root || protocol_version)
    signature = Sign(sk_v, vertex_id)
 ```
 5. Attach the VRF proof demonstrating committee membership.
@@ -402,7 +403,7 @@ Committee members may produce vertices at any time after the epoch starts:
 - `1 <= len(parents) <= MAX_PARENTS`.
 - `timestamp` not more than `MAX_VERTEX_TIMESTAMP_DRIFT_SECS` in the future.
 - `signature` verifies under `proposer`.
-- `vrf_proof` verifies and `vrf_output < threshold` (proposer is in committee).
+- `vrf_proof` verifies and proposer passes the committee membership test: `r × total_validators < COMMITTEE_SIZE × 2^64` where `r` is the first 8 bytes of `vrf_output` as a little-endian u64.
 - All included transactions pass structural and cryptographic checks.
 - `state_root` matches the computed root after applying transactions.
 

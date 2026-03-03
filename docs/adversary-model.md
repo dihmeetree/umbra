@@ -129,7 +129,7 @@ The network adversary may:
 - **Hello message is plaintext**: the node's KEM public key is revealed before the encrypted channel is established. This leaks peer identity at connection time. A Noise-protocol handshake would mitigate this.
 - **Static KEM keypair**: the node's KEM keypair does not rotate per connection. Compromise of the static KEM secret key allows decryption of all past session transcripts. Periodic rekeying provides post-compromise security (new sessions are protected) but not full forward secrecy.
 - **Peer reputation not persisted**: reputation scores reset on node restart, giving misbehaving peers a clean slate.
-- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls both stem hops can identify the origin. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
+- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls the stem hop can identify the origin. The current implementation is effectively single-hop — receiving peers immediately fluff rather than forwarding the stem — so only one hop of plausible deniability is provided. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
 
 ---
 

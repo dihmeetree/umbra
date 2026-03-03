@@ -236,9 +236,9 @@ Fluff phase:
 **Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node is the originator. However, receiving nodes immediately fluff rather than continuing a stem relay — the current implementation is effectively a single-hop stem. True multi-hop Dandelion++ would require protocol-level changes to propagate stem intent to receiving peers (see adversary-model.md §4.3).
 
 **Limitations**:
-- A global passive adversary who observes all network traffic can correlate timing: if A → B timing is observed shortly before B → C, and then C fluffs, the adversary can infer A is the originator.
-- The 2-hop stem is a probabilistic mechanism: it provides plausible deniability rather than cryptographic anonymity.
-- An adversary who controls a stem-phase hop (peer B or C) learns the transaction before it is broadcast, but cannot identify A without observing the A → B message.
+- A global passive adversary who observes all network traffic can correlate timing: if A → B timing is observed shortly before B fluffs, the adversary can infer A is the originator.
+- The single-hop stem is a probabilistic mechanism: it provides plausible deniability rather than cryptographic anonymity.
+- An adversary who controls the stem-phase hop (peer B) learns the transaction before it is broadcast, but cannot identify A without observing the A → B message.
 
 ### 7.2 Frame Padding
 
