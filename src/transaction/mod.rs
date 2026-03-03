@@ -1651,7 +1651,7 @@ mod tests {
             validator_id: [0x42; 32],
             auth_signature: Signature {
                 dilithium: vec![0u8; crate::crypto::keys::DILITHIUM5_SIG_BYTES],
-                sphincs: vec![],
+                sphincs: vec![0u8; crate::crypto::keys::SPHINCS_SIG_BYTES],
             },
             bond_return_output: Box::new(TxOutput {
                 commitment: crate::crypto::commitment::Commitment([1u8; 32]),
