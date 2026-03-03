@@ -428,3 +428,92 @@ pub fn trace_length(num_inputs: usize, num_outputs: usize) -> usize {
     }
     len
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winterfell::math::FieldElement;
+
+    #[test]
+    fn trace_length_zero_io() {
+        let len = trace_length(0, 0);
+        assert!(len.is_power_of_two());
+        assert!(len >= HASH_CYCLE);
+    }
+
+    #[test]
+    fn trace_length_one_input_one_output() {
+        // 1 input = 2 blocks, 1 output = 1 block, + 1 padding = 4 blocks = 32 rows
+        let len = trace_length(1, 1);
+        assert!(len.is_power_of_two());
+        assert!(len >= (2 + 1 + 1) * HASH_CYCLE);
+    }
+
+    #[test]
+    fn trace_length_max_io() {
+        let len = trace_length(MAX_IO, MAX_IO);
+        assert!(len.is_power_of_two());
+        assert!(len >= (MAX_IO * 2 + MAX_IO + 1) * HASH_CYCLE);
+    }
+
+    #[test]
+    fn trace_width_constant() {
+        // 12 state + 12 midstate + 1 block_value + 1 net_balance + 59 bits + 1 chain_flag = 86
+        assert_eq!(TRACE_WIDTH, 86);
+    }
+
+    #[test]
+    fn periodic_columns_count() {
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::ZERO; 4]],
+            output_commitments: vec![[Felt::ZERO; 4]],
+            fee: Felt::ZERO,
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let tlen = trace_length(1, 1);
+        let trace_info = winterfell::TraceInfo::new(TRACE_WIDTH, tlen);
+        let air = BalanceAir::new(
+            trace_info,
+            pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        let cols = air.get_periodic_column_values();
+        assert_eq!(cols.len(), NUM_PERIODIC);
+        // Each periodic column should have HASH_CYCLE entries
+        for col in &cols {
+            assert_eq!(col.len(), HASH_CYCLE);
+        }
+    }
+
+    #[test]
+    fn assertions_count_matches_declaration() {
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]],
+            output_commitments: vec![[Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)]],
+            fee: Felt::new(5),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let tlen = trace_length(1, 1);
+        let trace_info = winterfell::TraceInfo::new(TRACE_WIDTH, tlen);
+        let air = BalanceAir::new(
+            trace_info,
+            pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        let assertions = air.get_assertions();
+        // Should be non-empty and match num_assertions from context
+        assert!(!assertions.is_empty());
+        assert_eq!(assertions.len(), air.context().num_assertions());
+    }
+
+    #[test]
+    fn range_bits_and_max_io_prevent_field_overflow() {
+        // Verify that MAX_IO * 2^RANGE_BITS < Goldilocks prime
+        let max_sum = (MAX_IO as u128) * ((1u128 << RANGE_BITS) - 1);
+        let goldilocks: u128 = 18_446_744_069_414_584_321;
+        assert!(
+            max_sum < goldilocks,
+            "MAX_IO * max_range_value must fit in Goldilocks field"
+        );
+    }
+}

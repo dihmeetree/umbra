@@ -420,3 +420,87 @@ pub fn spend_trace_length() -> usize {
     }
     len
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winterfell::math::FieldElement;
+
+    #[test]
+    fn spend_trace_length_is_power_of_two() {
+        let len = spend_trace_length();
+        assert!(len.is_power_of_two());
+    }
+
+    #[test]
+    fn spend_trace_length_has_padding() {
+        let len = spend_trace_length();
+        // Must be strictly more than TOTAL_REAL_BLOCKS * HASH_CYCLE
+        assert!(len > TOTAL_REAL_BLOCKS * HASH_CYCLE);
+    }
+
+    #[test]
+    fn spend_trace_width_constant() {
+        // 12 state + 12 midstate + 1 path_bit + 1 chain_flag + 4 commitment_reg = 30
+        assert_eq!(SPEND_TRACE_WIDTH, 30);
+    }
+
+    #[test]
+    fn merkle_depth_constant() {
+        assert_eq!(MERKLE_DEPTH, 20);
+    }
+
+    #[test]
+    fn total_real_blocks_consistent() {
+        // 1 nullifier + MERKLE_DEPTH merkle + 1 proof_link
+        assert_eq!(TOTAL_REAL_BLOCKS, 1 + MERKLE_DEPTH + 1);
+    }
+
+    #[test]
+    fn spend_periodic_columns_count() {
+        let pub_inputs = SpendPublicInputs {
+            merkle_root: [Felt::ZERO; 4],
+            nullifier: [Felt::ZERO; 4],
+            proof_link: [Felt::ZERO; 4],
+        };
+        let tlen = spend_trace_length();
+        let trace_info = winterfell::TraceInfo::new(SPEND_TRACE_WIDTH, tlen);
+        let air = SpendAir::new(
+            trace_info,
+            pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        let cols = air.get_periodic_column_values();
+        // Should have periodic columns (hash_flag, ARK constants, first_row_flag)
+        // plus trace-length-period binding columns
+        assert!(!cols.is_empty());
+        // First 26 columns should have HASH_CYCLE entries (periodic)
+        for col in cols.iter().take(26) {
+            assert_eq!(col.len(), HASH_CYCLE);
+        }
+    }
+
+    #[test]
+    fn spend_assertions_count_matches_declaration() {
+        let pub_inputs = SpendPublicInputs {
+            merkle_root: [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)],
+            nullifier: [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)],
+            proof_link: [Felt::new(9), Felt::new(10), Felt::new(11), Felt::new(12)],
+        };
+        let tlen = spend_trace_length();
+        let trace_info = winterfell::TraceInfo::new(SPEND_TRACE_WIDTH, tlen);
+        let air = SpendAir::new(
+            trace_info,
+            pub_inputs,
+            crate::crypto::stark::light_proof_options(),
+        );
+        let assertions = air.get_assertions();
+        assert!(!assertions.is_empty());
+        assert_eq!(assertions.len(), air.context().num_assertions());
+    }
+
+    #[test]
+    fn proof_link_block_index_consistent() {
+        assert_eq!(PROOF_LINK_BLOCK, 1 + MERKLE_DEPTH);
+    }
+}

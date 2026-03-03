@@ -88,7 +88,8 @@ impl Signature {
         }
         #[cfg(feature = "fast-tests")]
         {
-            self.dilithium.is_empty() || self.dilithium.len() == DILITHIUM5_SIG_BYTES
+            (self.dilithium.is_empty() && self.sphincs.is_empty())
+                || self.dilithium.len() == DILITHIUM5_SIG_BYTES
         }
     }
 
@@ -242,7 +243,10 @@ impl SigningKeypair {
 }
 
 impl SigningPublicKey {
-    /// Access the raw Dilithium public key bytes.
+    /// Access the raw Dilithium public key bytes (2592 bytes).
+    ///
+    /// Returns only the Dilithium component; use `.sphincs` for the SPHINCS+
+    /// component or `.fingerprint()` for a compact hash of both.
     pub fn as_bytes(&self) -> &[u8] {
         &self.dilithium
     }
@@ -403,13 +407,17 @@ impl KemKeypair {
     }
 
     /// Decapsulate a ciphertext to recover the shared secret.
+    ///
+    /// Known limitation: the intermediate pqcrypto `SharedSecret` is a `Copy`
+    /// type that does not implement `Zeroize`, so its bytes may linger on the
+    /// stack until overwritten. The returned Umbra `SharedSecret` is properly
+    /// zeroized on drop.
     pub fn decapsulate(&self, ciphertext: &KemCiphertext) -> Option<SharedSecret> {
         let sk = kyber1024::SecretKey::from_bytes(&self.secret.0).ok()?;
         let ct = kyber1024::Ciphertext::from_bytes(&ciphertext.0).ok()?;
         let ss = kyber1024::decapsulate(&ct, &sk);
-        let bytes = ss.as_bytes();
         let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes[..32]);
+        arr.copy_from_slice(&ss.as_bytes()[..32]);
         Some(SharedSecret(arr))
     }
 
@@ -432,12 +440,16 @@ impl KemPublicKey {
 
     /// Encapsulate: generate a shared secret and its ciphertext.
     /// Only the holder of the corresponding secret key can decapsulate.
+    ///
+    /// Known limitation: the intermediate pqcrypto `SharedSecret` is a `Copy`
+    /// type that does not implement `Zeroize`, so its bytes may linger on the
+    /// stack until overwritten. The returned Umbra `SharedSecret` is properly
+    /// zeroized on drop.
     pub fn encapsulate(&self) -> Option<(SharedSecret, KemCiphertext)> {
         let pk = kyber1024::PublicKey::from_bytes(&self.0).ok()?;
         let (ss, ct) = kyber1024::encapsulate(&pk);
-        let bytes = ss.as_bytes();
         let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes[..32]);
+        arr.copy_from_slice(&ss.as_bytes()[..32]);
         Some((SharedSecret(arr), KemCiphertext(ct.as_bytes().to_vec())))
     }
 

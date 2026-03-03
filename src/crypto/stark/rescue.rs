@@ -287,4 +287,77 @@ mod tests {
 
         assert_eq!(state_perm, state_rounds);
     }
+
+    #[test]
+    fn domain_separation_cross_function() {
+        // All four hash functions must produce different outputs for identical rate inputs.
+        let a = [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)];
+        let b = [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)];
+
+        let commitment = hash_commitment(a[0], &[a[1], a[2], a[3], b[0]]);
+        let nullifier = hash_nullifier(&a, &b);
+        let proof_link = hash_proof_link(&a, &b);
+        let merge = hash_merge(&a, &b);
+
+        assert_ne!(commitment, nullifier, "commitment == nullifier");
+        assert_ne!(commitment, proof_link, "commitment == proof_link");
+        assert_ne!(commitment, merge, "commitment == merge");
+        assert_ne!(nullifier, proof_link, "nullifier == proof_link");
+        assert_ne!(nullifier, merge, "nullifier == merge");
+        assert_ne!(proof_link, merge, "proof_link == merge");
+    }
+
+    #[test]
+    fn merge_is_not_commutative() {
+        // hash_merge(A, B) != hash_merge(B, A) -- critical for Merkle security
+        let a = [Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)];
+        let b = [Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)];
+        assert_ne!(
+            hash_merge(&a, &b),
+            hash_merge(&b, &a),
+            "merge must not be commutative"
+        );
+    }
+
+    #[test]
+    fn commitment_zero_inputs_nonzero_output() {
+        let result = hash_commitment(Felt::ZERO, &[Felt::ZERO; 4]);
+        assert_ne!(result, [Felt::ZERO; 4]);
+    }
+
+    #[test]
+    fn init_state_domain_tags_are_correct() {
+        let c_state = commitment_init_state(Felt::ZERO, &[Felt::ZERO; 4]);
+        assert_eq!(c_state[0], Felt::new(COMMITMENT_DOMAIN));
+
+        let n_state = nullifier_init_state(&[Felt::ZERO; 4], &[Felt::ZERO; 4]);
+        assert_eq!(n_state[0], Felt::new(NULLIFIER_DOMAIN));
+
+        let m_state = merge_init_state(&[Felt::ZERO; 4], &[Felt::ZERO; 4]);
+        assert_eq!(m_state[0], Felt::new(MERGE_DOMAIN));
+
+        let p_state = proof_link_init_state(&[Felt::ZERO; 4], &[Felt::ZERO; 4]);
+        assert_eq!(p_state[0], Felt::new(PROOF_LINK_DOMAIN));
+    }
+
+    #[test]
+    fn init_state_places_inputs_in_correct_positions() {
+        let a = [Felt::new(10), Felt::new(20), Felt::new(30), Felt::new(40)];
+        let b = [Felt::new(50), Felt::new(60), Felt::new(70), Felt::new(80)];
+
+        // Nullifier: spend_auth in state[4..8], commitment in state[8..12]
+        let state = nullifier_init_state(&a, &b);
+        assert_eq!(&state[4..8], &a);
+        assert_eq!(&state[8..12], &b);
+
+        // Merge: left in state[4..8], right in state[8..12]
+        let state = merge_init_state(&a, &b);
+        assert_eq!(&state[4..8], &a);
+        assert_eq!(&state[8..12], &b);
+
+        // Proof link: commitment in state[4..8], link_nonce in state[8..12]
+        let state = proof_link_init_state(&a, &b);
+        assert_eq!(&state[4..8], &a);
+        assert_eq!(&state[8..12], &b);
+    }
 }

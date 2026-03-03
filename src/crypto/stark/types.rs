@@ -512,6 +512,84 @@ mod tests {
     }
 
     #[test]
+    fn balance_from_bytes_rejects_value_above_goldilocks_prime() {
+        // Craft bytes where a felt value >= Goldilocks prime (2^64 - 2^32 + 1)
+        let goldilocks_prime: u64 = 18_446_744_069_414_584_321;
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes()); // n_in = 1
+                                                     // First digest element = goldilocks_prime (should be rejected)
+        data.extend_from_slice(&goldilocks_prime.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        // n_out = 0, fee, tx_content_hash
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // fee
+        for _ in 0..4 {
+            data.extend_from_slice(&0u64.to_le_bytes()); // tx_content_hash
+        }
+        assert!(
+            BalancePublicInputs::from_bytes(&data).is_none(),
+            "should reject felt value >= Goldilocks prime"
+        );
+    }
+
+    #[test]
+    fn spend_from_bytes_rejects_value_above_goldilocks_prime() {
+        let goldilocks_prime: u64 = 18_446_744_069_414_584_321;
+        let mut data = [0u8; 96];
+        // Set the first 8 bytes to goldilocks_prime
+        data[..8].copy_from_slice(&goldilocks_prime.to_le_bytes());
+        assert!(
+            SpendPublicInputs::from_bytes(&data).is_none(),
+            "should reject felt value >= Goldilocks prime"
+        );
+    }
+
+    #[test]
+    fn balance_from_bytes_accepts_value_just_below_goldilocks_prime() {
+        let just_below: u64 = 18_446_744_069_414_584_320; // p - 1
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[
+                Felt::new(just_below),
+                Felt::new(0),
+                Felt::new(0),
+                Felt::new(0),
+            ]],
+            output_commitments: vec![],
+            fee: Felt::new(0),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let bytes = pub_inputs.to_bytes();
+        let decoded = BalancePublicInputs::from_bytes(&bytes);
+        assert!(decoded.is_some(), "p-1 should be accepted");
+        assert_eq!(
+            decoded.unwrap().input_proof_links[0][0].as_int(),
+            just_below
+        );
+    }
+
+    #[test]
+    fn balance_public_inputs_to_elements_ordering() {
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]],
+            output_commitments: vec![[Felt::new(5), Felt::new(6), Felt::new(7), Felt::new(8)]],
+            fee: Felt::new(99),
+            tx_content_hash: [Felt::new(10), Felt::new(11), Felt::new(12), Felt::new(13)],
+        };
+        let elements = pub_inputs.to_elements();
+        // Expected order: input_proof_links || output_commitments || fee || tx_content_hash
+        assert_eq!(elements[0], Felt::new(1)); // first input proof_link
+        assert_eq!(elements[3], Felt::new(4));
+        assert_eq!(elements[4], Felt::new(5)); // first output commitment
+        assert_eq!(elements[7], Felt::new(8));
+        assert_eq!(elements[8], Felt::new(99)); // fee
+        assert_eq!(elements[9], Felt::new(10)); // tx_content_hash
+        assert_eq!(elements[12], Felt::new(13));
+        assert_eq!(elements.len(), 13);
+    }
+
+    #[test]
     fn balance_public_inputs_num_inputs() {
         let pub_inputs = BalancePublicInputs {
             input_proof_links: vec![

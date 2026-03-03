@@ -389,6 +389,7 @@ pub fn prove_balance(
 mod tests {
     use super::*;
     use winterfell::math::fields::f64::BaseElement as Felt;
+    use winterfell::Trace;
 
     #[test]
     fn build_balance_trace_count_mismatch_error() {
@@ -429,6 +430,105 @@ mod tests {
         // 0 inputs/outputs is a valid edge case for trace building
         let result = build_balance_trace(&witness, &pub_inputs);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_balance_trace_link_nonce_count_mismatch_error() {
+        let witness = BalanceWitness {
+            input_values: vec![100],
+            input_blindings: vec![[Felt::ZERO; 4]],
+            input_link_nonces: vec![], // 0 link nonces but 1 input value
+            output_values: vec![95],
+            output_blindings: vec![[Felt::ZERO; 4]],
+        };
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![[Felt::ZERO; 4]],
+            output_commitments: vec![[Felt::ZERO; 4]],
+            fee: Felt::new(5),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let result = build_balance_trace(&witness, &pub_inputs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_balance_trace_correct_dimensions() {
+        use crate::crypto::stark::balance_air;
+        use crate::crypto::stark::rescue;
+
+        let blinding = [Felt::new(10), Felt::new(20), Felt::new(30), Felt::new(40)];
+        let link_nonce = [Felt::new(50), Felt::new(60), Felt::new(70), Felt::new(80)];
+        let commitment = rescue::hash_commitment(Felt::new(100), &blinding);
+        let proof_link = rescue::hash_proof_link(&commitment, &link_nonce);
+        let out_blinding = [Felt::new(11), Felt::new(21), Felt::new(31), Felt::new(41)];
+        let out_commitment = rescue::hash_commitment(Felt::new(95), &out_blinding);
+
+        let witness = BalanceWitness {
+            input_values: vec![100],
+            input_blindings: vec![blinding],
+            input_link_nonces: vec![link_nonce],
+            output_values: vec![95],
+            output_blindings: vec![out_blinding],
+        };
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![proof_link],
+            output_commitments: vec![out_commitment],
+            fee: Felt::new(5),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let trace = build_balance_trace(&witness, &pub_inputs).unwrap();
+
+        // Width should be TRACE_WIDTH (86)
+        assert_eq!(trace.width(), balance_air::TRACE_WIDTH);
+        // Length should be power-of-2 and match trace_length()
+        assert!(trace.length().is_power_of_two());
+        assert_eq!(trace.length(), balance_air::trace_length(1, 1));
+
+        // Block 0 (input commitment): row 0, column 0 should have COMMITMENT_DOMAIN
+        let commitment_domain = Felt::new(0x636F6D6D69740000);
+        assert_eq!(
+            trace.get(0, 0),
+            commitment_domain,
+            "block 0 capacity should have COMMITMENT_DOMAIN"
+        );
+    }
+
+    #[test]
+    fn build_balance_trace_net_balance_accumulation() {
+        use crate::crypto::stark::rescue;
+
+        let blinding = [Felt::new(1); 4];
+        let link_nonce = [Felt::new(2); 4];
+        let commitment = rescue::hash_commitment(Felt::new(100), &blinding);
+        let proof_link = rescue::hash_proof_link(&commitment, &link_nonce);
+        let out_blinding = [Felt::new(3); 4];
+        let out_commitment = rescue::hash_commitment(Felt::new(95), &out_blinding);
+
+        let witness = BalanceWitness {
+            input_values: vec![100],
+            input_blindings: vec![blinding],
+            input_link_nonces: vec![link_nonce],
+            output_values: vec![95],
+            output_blindings: vec![out_blinding],
+        };
+        let pub_inputs = BalancePublicInputs {
+            input_proof_links: vec![proof_link],
+            output_commitments: vec![out_commitment],
+            fee: Felt::new(5),
+            tx_content_hash: [Felt::ZERO; 4],
+        };
+        let trace = build_balance_trace(&witness, &pub_inputs).unwrap();
+
+        // Column 25 is net_balance. At the start it should be 0.
+        assert_eq!(trace.get(25, 0), Felt::ZERO, "net_balance starts at 0");
+
+        // At the last row, net_balance should equal fee
+        let last_row = trace.length() - 1;
+        assert_eq!(
+            trace.get(25, last_row),
+            Felt::new(5),
+            "net_balance at end should equal fee"
+        );
     }
 
     #[test]

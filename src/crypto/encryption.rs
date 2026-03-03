@@ -98,7 +98,7 @@ impl EncryptedPayload {
         let nonce = random_nonce();
         let mut key = derive_key(&shared_secret, &nonce);
 
-        let padded = pad_plaintext(plaintext)?;
+        let mut padded = pad_plaintext(plaintext)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let xnonce = XNonce::from_slice(&nonce);
         let ciphertext = cipher
@@ -111,6 +111,7 @@ impl EncryptedPayload {
             )
             .ok()?;
         key.zeroize();
+        padded.zeroize();
 
         Some(EncryptedPayload {
             kem_ciphertext: kem_ct,
@@ -126,7 +127,7 @@ impl EncryptedPayload {
 
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let xnonce = XNonce::from_slice(&self.nonce);
-        let padded = cipher
+        let mut padded = cipher
             .decrypt(
                 xnonce,
                 Payload {
@@ -136,7 +137,9 @@ impl EncryptedPayload {
             )
             .ok()?;
         key.zeroize();
-        unpad_plaintext(&padded)
+        let result = unpad_plaintext(&padded);
+        padded.zeroize();
+        result
     }
 
     /// Encrypt with a pre-established shared secret (for stealth address outputs
@@ -154,7 +157,7 @@ impl EncryptedPayload {
         }
         let nonce = random_nonce();
         let mut key = derive_key(shared_secret, &nonce);
-        let padded = pad_plaintext(plaintext)?;
+        let mut padded = pad_plaintext(plaintext)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let xnonce = XNonce::from_slice(&nonce);
         let ciphertext = cipher
@@ -167,6 +170,7 @@ impl EncryptedPayload {
             )
             .ok()?;
         key.zeroize();
+        padded.zeroize();
 
         Some(EncryptedPayload {
             kem_ciphertext,
@@ -180,7 +184,7 @@ impl EncryptedPayload {
         let mut key = derive_key(shared_secret, &self.nonce);
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let xnonce = XNonce::from_slice(&self.nonce);
-        let padded = cipher
+        let mut padded = cipher
             .decrypt(
                 xnonce,
                 Payload {
@@ -190,7 +194,9 @@ impl EncryptedPayload {
             )
             .ok()?;
         key.zeroize();
-        unpad_plaintext(&padded)
+        let result = unpad_plaintext(&padded);
+        padded.zeroize();
+        result
     }
 }
 

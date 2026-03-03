@@ -146,7 +146,9 @@ fn derive_one_time_key(shared_secret: &[u8; 32], output_index: u32) -> Hash {
     let mut data = [0u8; 36];
     data[..32].copy_from_slice(shared_secret);
     data[32..].copy_from_slice(&output_index.to_le_bytes());
-    crate::hash_domain(b"umbra.stealth.one_time_key", &data)
+    let result = crate::hash_domain(b"umbra.stealth.one_time_key", &data);
+    data.zeroize();
+    result
 }
 
 /// Derive the spending authorization key from shared secret + owner's signing key
@@ -168,7 +170,9 @@ pub fn derive_spend_auth(
     data[..32].copy_from_slice(shared_secret);
     data[32..64].copy_from_slice(signing_key_fingerprint);
     data[64..68].copy_from_slice(&output_index.to_le_bytes());
-    crate::hash_domain(b"umbra.stealth.spend_auth", &data)
+    let result = crate::hash_domain(b"umbra.stealth.spend_auth", &data);
+    data.zeroize();
+    result
 }
 
 #[cfg(test)]

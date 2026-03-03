@@ -323,6 +323,7 @@ pub fn prove_spend(
 mod tests {
     use super::*;
     use winterfell::math::fields::f64::BaseElement as Felt;
+    use winterfell::Trace;
 
     fn dummy_spend_witness(depth: usize) -> SpendWitness {
         SpendWitness {
@@ -384,6 +385,61 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("nullifier does not match"));
+    }
+
+    #[test]
+    fn build_spend_trace_domain_tags_in_correct_positions() {
+        use crate::crypto::stark::rescue;
+
+        let witness = dummy_spend_witness(MERKLE_DEPTH);
+        let nullifier = rescue::hash_nullifier(&witness.spend_auth, &witness.commitment);
+        let proof_link = rescue::hash_proof_link(&witness.commitment, &witness.link_nonce);
+
+        // Compute Merkle root from dummy path
+        let mut current = witness.commitment;
+        for (sibling, is_right) in &witness.merkle_path {
+            current = if *is_right {
+                rescue::hash_merge(sibling, &current)
+            } else {
+                rescue::hash_merge(&current, sibling)
+            };
+        }
+
+        let pub_inputs = SpendPublicInputs {
+            merkle_root: current,
+            nullifier,
+            proof_link,
+        };
+        let trace = build_spend_trace(&witness, &pub_inputs).unwrap();
+
+        // Block 0 (nullifier): row 0, column 0 should have NULLIFIER_DOMAIN
+        let nullifier_domain = Felt::new(0x6E756C6C00000000);
+        assert_eq!(
+            trace.get(0, 0),
+            nullifier_domain,
+            "block 0 capacity should have NULLIFIER_DOMAIN"
+        );
+
+        // Block 1 (first Merkle level): row 8, column 0 should have MERGE_DOMAIN
+        let merge_domain = Felt::new(rescue::MERGE_DOMAIN);
+        assert_eq!(
+            trace.get(0, 8),
+            merge_domain,
+            "block 1 capacity should have MERGE_DOMAIN"
+        );
+
+        // Commitment register (columns 26-29) should be constant throughout
+        for row in 0..trace.length() {
+            for i in 0..4 {
+                assert_eq!(
+                    trace.get(REG_COL_START + i, row),
+                    witness.commitment[i],
+                    "commitment register column {} should be constant at row {}",
+                    i,
+                    row
+                );
+            }
+        }
     }
 
     #[test]

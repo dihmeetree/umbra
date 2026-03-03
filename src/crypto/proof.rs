@@ -24,6 +24,10 @@ pub struct MerkleNode {
 }
 
 /// Compute a Merkle root from a leaf and authentication path using Rescue Prime.
+///
+/// Callers should ensure `path.len() == MERKLE_DEPTH` for consensus-critical
+/// verification. The STARK circuit enforces depth 20 independently, but this
+/// function accepts any depth for flexibility in testing and batch tree operations.
 pub fn compute_merkle_root(leaf: &Hash, path: &[MerkleNode]) -> Hash {
     let mut current = hash_to_felts(leaf);
     for node in path {
@@ -35,6 +39,16 @@ pub fn compute_merkle_root(leaf: &Hash, path: &[MerkleNode]) -> Hash {
         };
     }
     felts_to_hash(&current)
+}
+
+/// Compute a Merkle root from a leaf and path, requiring exactly `MERKLE_DEPTH` levels.
+///
+/// Returns `None` if the path length does not match the canonical depth.
+pub fn compute_merkle_root_checked(leaf: &Hash, path: &[MerkleNode]) -> Option<Hash> {
+    if path.len() != MERKLE_DEPTH {
+        return None;
+    }
+    Some(compute_merkle_root(leaf, path))
 }
 
 /// Build a Merkle tree from leaf hashes and return (root, paths).
@@ -77,6 +91,12 @@ pub fn build_merkle_tree(leaves: &[Hash]) -> (Hash, Vec<Vec<MerkleNode>>) {
         let mut idx = i;
         for layer in &all_layers[..all_layers.len() - 1] {
             let sibling_idx = idx ^ 1;
+            debug_assert!(
+                sibling_idx < layer.len(),
+                "sibling index {} out of bounds for layer of length {}",
+                sibling_idx,
+                layer.len()
+            );
             if sibling_idx < layer.len() {
                 path.push(MerkleNode {
                     hash: layer[sibling_idx],
@@ -116,6 +136,12 @@ fn zero_subtree_hashes() -> &'static Vec<Hash> {
 /// Extends the path with zero-subtree siblings on the right side.
 /// This produces a depth-20 canonical root from any shallower tree.
 pub fn pad_merkle_path(path: &[MerkleNode], target_depth: usize) -> Vec<MerkleNode> {
+    debug_assert!(
+        path.len() <= target_depth,
+        "path length {} exceeds target depth {}",
+        path.len(),
+        target_depth
+    );
     let mut padded = path.to_vec();
     let zero_hashes = zero_subtree_hashes();
     let current_depth = padded.len();
@@ -132,6 +158,12 @@ pub fn pad_merkle_path(path: &[MerkleNode], target_depth: usize) -> Vec<MerkleNo
 ///
 /// Extends the root hash through padding levels with zero-subtree hashes.
 pub fn canonical_root(root: &Hash, tree_depth: usize) -> Hash {
+    debug_assert!(
+        tree_depth <= MERKLE_DEPTH,
+        "tree depth {} exceeds MERKLE_DEPTH {}",
+        tree_depth,
+        MERKLE_DEPTH
+    );
     if tree_depth >= MERKLE_DEPTH {
         return *root;
     }
@@ -294,11 +326,37 @@ impl IncrementalMerkleTree {
             count_at_level = count_at_level.div_ceil(2);
         }
 
-        IncrementalMerkleTree {
+        let mut tree = IncrementalMerkleTree {
             num_leaves,
             levels,
             zero_hashes,
+        };
+
+        // Verify internal consistency: recompute parents from leaves up
+        // and check they match the loaded values. This catches storage
+        // corruption that preserves the root but alters internal nodes.
+        if num_leaves > 0 {
+            let mut count = num_leaves;
+            for level in 1..=MERKLE_DEPTH {
+                let parent_count = count.div_ceil(2);
+                for p in 0..parent_count {
+                    let left = tree.get_node(level - 1, p * 2);
+                    let right = tree.get_node(level - 1, p * 2 + 1);
+                    let expected = felts_to_hash(&rescue::hash_merge(
+                        &hash_to_felts(&left),
+                        &hash_to_felts(&right),
+                    ));
+                    let stored = tree.get_node(level, p);
+                    if stored != expected {
+                        // Repair corrupted node
+                        tree.set_node(level, p, expected);
+                    }
+                }
+                count = parent_count;
+            }
         }
+
+        tree
     }
 
     /// Get a node hash (public accessor for persistence).
@@ -840,6 +898,40 @@ mod tests {
         let from_default = IncrementalMerkleTree::default();
         assert_eq!(from_new.root(), from_default.root());
         assert_eq!(from_new.num_leaves(), from_default.num_leaves());
+    }
+
+    #[test]
+    fn compute_merkle_root_checked_correct_depth() {
+        let mut tree = IncrementalMerkleTree::new();
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        tree.append(c.0).unwrap();
+        let path = tree.path(0).unwrap();
+        assert_eq!(path.len(), MERKLE_DEPTH);
+        let root = compute_merkle_root_checked(&c.0, &path);
+        assert!(root.is_some());
+        assert_eq!(root.unwrap(), tree.root());
+    }
+
+    #[test]
+    fn compute_merkle_root_checked_wrong_depth() {
+        let c = Commitment::commit(42, &BlindingFactor::random());
+        let short_path = vec![MerkleNode {
+            hash: [0u8; 32],
+            is_left: false,
+        }];
+        assert!(compute_merkle_root_checked(&c.0, &short_path).is_none());
+        assert!(compute_merkle_root_checked(&c.0, &[]).is_none());
+    }
+
+    #[test]
+    fn tampered_merkle_sibling_produces_different_root() {
+        let leaves: Vec<Hash> = (0..4u64)
+            .map(|i| Commitment::commit(i * 100, &BlindingFactor::from_bytes([i as u8; 32])).0)
+            .collect();
+        let (root, paths) = build_merkle_tree(&leaves);
+        let mut tampered_path = paths[0].clone();
+        tampered_path[0].hash[0] ^= 0xFF;
+        assert_ne!(compute_merkle_root(&leaves[0], &tampered_path), root);
     }
 
     #[test]
