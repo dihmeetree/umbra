@@ -246,7 +246,7 @@ By submitting transactions and observing inclusion patterns, an adversary may in
 
 ### 7.3 Timing Attacks
 
-Umbra uses `constant_time_eq` for all security-sensitive comparisons (signature verification results, nullifier lookups, commitment equality). Variable-time operations on secret data are not present in the current implementation.
+Umbra uses `constant_time_eq` for security-sensitive equality comparisons: VRF output and proof-commitment verification, commitment and nullifier derivation checks, tx-binding and chain-id validation, and stealth address one-time key matching. Data-structure membership lookups — nullifier spent checks (sled `contains_key`) and validator map lookups — are variable-time; these operate on hashed public data rather than secret values and are not protected by `constant_time_eq`.
 
 ---
 

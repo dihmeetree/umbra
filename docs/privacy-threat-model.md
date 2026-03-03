@@ -238,7 +238,7 @@ Fluff phase:
 **Limitations**:
 - A global passive adversary who observes all network traffic can correlate timing: if A → B timing is observed shortly before B fluffs, the adversary can infer A is the originator.
 - The single-hop stem is a probabilistic mechanism: it provides plausible deniability rather than cryptographic anonymity.
-- An adversary who controls the stem-phase hop (peer B) learns the transaction before it is broadcast, but cannot identify A without observing the A → B message.
+- An adversary who controls the stem-phase hop (peer B) directly learns that A is the transaction originator: B receives the transaction over A's authenticated P2P connection and observes the A → B transmission directly. Single-hop Dandelion++ provides no anonymity against an adversarial direct peer.
 
 ### 7.2 Frame Padding
 
