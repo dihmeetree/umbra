@@ -3763,15 +3763,47 @@ mod tests {
         state.slash_validator(&vid).unwrap();
         assert!(state.is_slashed(&vid));
 
-        // Direct re-registration should fail because slashed_validators contains vid
+        // Build a ValidatorRegister tx that attempts to re-register the slashed validator.
+        // validate_transaction should reject with ValidatorSlashed.
+        let bond = crate::constants::VALIDATOR_BASE_BOND;
+        let min_fee = bond + crate::constants::MIN_TX_FEE;
+        let total_input = min_fee + 100;
+        let blinding = BlindingFactor::from_bytes([88u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[88u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(min_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: kp.public.clone(),
+                kem_public_key: kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::ValidatorSlashed)),
+            "slashed validator re-registration should fail, got: {:?}",
+            result
+        );
+
+        // A different validator can still register
         let kp2 = SigningKeypair::generate();
         let kem2 = KemKeypair::generate();
         let v2 = Validator::with_kem(kp2.public.clone(), kem2.public.clone());
-        // register_genesis_validator bypasses validate_transaction, but
-        // slash_validator marks the fingerprint. Verify via is_slashed.
-        // The validate_transaction path checks slashed_validators for re-registration.
-        assert!(state.is_slashed(&vid));
-        // A different validator can still register
         assert!(state.register_genesis_validator(v2).is_ok());
     }
 
@@ -3783,22 +3815,77 @@ mod tests {
         let mut state = ChainState::new();
         // Register exactly MIN_VALIDATORS
         let mut keypairs = Vec::new();
+        let mut kem_keys = Vec::new();
         for _ in 0..crate::constants::MIN_VALIDATORS {
             let kp = SigningKeypair::generate();
             let kem = KemKeypair::generate();
             let v = Validator::with_kem(kp.public.clone(), kem.public.clone());
             state.register_genesis_validator(v).unwrap();
             keypairs.push(kp);
+            kem_keys.push(kem);
         }
         assert_eq!(state.total_validators(), crate::constants::MIN_VALIDATORS);
 
-        // Directly test the TooFewValidators guard: at MIN_VALIDATORS,
-        // the deregister path in validate_transaction checks total_validators() <= MIN_VALIDATORS
-        // We can verify this constraint holds without constructing a full Transaction
-        // (which requires valid STARK proofs). The state correctly has exactly MIN_VALIDATORS.
+        // Build a ValidatorDeregister tx for the first validator.
+        // validate_transaction checks TooFewValidators before auth_signature,
+        // so it should reject before reaching the sig check.
+        let vid = keypairs[0].public.fingerprint();
+        let bond = state.validator_bond(&vid).unwrap_or(0);
+        let bond_blinding = [99u8; 32];
+        let bond_commitment = Commitment::commit(bond, &BlindingFactor::from_bytes(bond_blinding));
+
+        let fee = crate::constants::MIN_TX_FEE;
+        let output_value = 100u64;
+        let total_input = output_value + fee;
+        let blinding = BlindingFactor::from_bytes([77u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[77u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        // Create the stealth address and encrypted note for bond return output
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&kem_keys[0].public, bond as u32)
+                .unwrap();
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt(&kem_keys[0].public, b"bond")
+                .unwrap();
+
+        // Use a properly-sized dummy auth signature (real sig not needed since
+        // TooFewValidators is checked before auth verification)
+        let auth_signature = keypairs[0].sign(b"dummy");
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), output_value)
+            .set_fee(fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorDeregister {
+                validator_id: vid,
+                auth_signature,
+                bond_return_output: Box::new(crate::transaction::TxOutput {
+                    commitment: bond_commitment,
+                    stealth_address: stealth_result.address,
+                    encrypted_note,
+                    blake3_binding: [0u8; 64],
+                }),
+                bond_blinding,
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
         assert!(
-            state.total_validators() <= crate::constants::MIN_VALIDATORS,
-            "at MIN_VALIDATORS, deregistration should be blocked"
+            matches!(result, Err(StateError::TooFewValidators)),
+            "deregistration at MIN_VALIDATORS should fail with TooFewValidators, got: {:?}",
+            result
         );
     }
 

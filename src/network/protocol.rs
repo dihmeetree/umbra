@@ -1001,6 +1001,7 @@ mod tests {
     fn sanitize_truncates_finalized_vertices_response() {
         let kp = SigningKeypair::generate();
         let vrf = crate::crypto::vrf::VrfOutput::evaluate(&kp, b"test");
+        let signature = kp.sign(b"test");
         let vertices: Vec<(u64, Box<crate::consensus::dag::Vertex>)> = (0..1500)
             .map(|i| {
                 let id_bytes = crate::hash_domain(b"test-vtx", &(i as u64).to_le_bytes());
@@ -1015,7 +1016,7 @@ mod tests {
                         transactions: vec![],
                         timestamp: 0,
                         state_root: [0u8; 32],
-                        signature: kp.sign(b"test"),
+                        signature: signature.clone(),
                         vrf_proof: Some(vrf.clone()),
                         protocol_version: crate::constants::PROTOCOL_VERSION_ID,
                     }),

@@ -4595,11 +4595,13 @@ mod tests {
     fn validate_transaction_against_state_delegates() {
         let ns = test_node_state();
         let tx = make_test_tx(99);
-        // Should get WrongChainId because make_test_tx uses constants::chain_id()
-        // but ChainState::new() also uses constants::chain_id(), so chain_id matches.
-        // The tx will fail structural validation instead.
+        // Chain IDs match, but the tx fails structural validation (invalid proof
+        // data from make_test_tx). This verifies the method delegates to ChainState.
         let result = ns.validate_transaction_against_state(&tx);
-        assert!(result.is_err());
+        assert!(
+            result.is_err(),
+            "tx with invalid proof data should be rejected"
+        );
     }
 
     #[test]

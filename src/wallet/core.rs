@@ -2166,8 +2166,7 @@ mod tests {
     #[test]
     fn clear_history_empties() {
         let mut wallet = Wallet::new();
-        // Push a history entry by scanning a transaction
-        let recipient = crate::crypto::keys::FullKeypair::generate();
+        // Build a tx that sends to this wallet so scan_transaction records history
         let tx = crate::transaction::builder::TransactionBuilder::new()
             .add_input(crate::transaction::builder::InputSpec {
                 value: 300,
@@ -2175,11 +2174,14 @@ mod tests {
                 spend_auth: crate::hash_domain(b"test", &[1]),
                 merkle_path: vec![],
             })
-            .add_output(recipient.kem.public.clone(), 100)
+            .add_output(wallet.kem_public_key().clone(), 100)
             .build()
             .unwrap();
         wallet.scan_transaction(&tx);
-        // Even if nothing was claimed, calling clear_history should not panic
+        assert!(
+            !wallet.history.is_empty(),
+            "scan should record a history entry"
+        );
         wallet.clear_history();
         assert!(wallet.history.is_empty());
     }
@@ -2249,7 +2251,15 @@ mod tests {
         // Scan with state should populate commitment_index
         wallet.scan_transaction_with_state(&tx, Some(&state));
 
-        // Check that any claimed outputs have commitment_index set
+        // Verify outputs were actually claimed
+        assert!(
+            !wallet.outputs.is_empty(),
+            "scan should have claimed at least one output"
+        );
+        assert!(
+            wallet.outputs.iter().any(|o| o.commitment_index.is_some()),
+            "at least one output should have commitment_index populated"
+        );
         for output in &wallet.outputs {
             assert!(
                 output.commitment_index.is_some(),
