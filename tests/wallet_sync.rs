@@ -104,14 +104,19 @@ fn setup_node_with_funded_wallet() -> (NodeState, SigningKeypair, Wallet) {
 
 #[test]
 fn test_wallet_sync_picks_up_coinbase() {
-    let (node_state, _signing, _funded_wallet) = setup_node_with_funded_wallet();
+    let (node_state, _signing, mut wallet) = setup_node_with_funded_wallet();
 
-    // Create a fresh wallet and sync it
-    let mut fresh_wallet = Wallet::new();
-    // This wallet has different keys, so won't detect the coinbase
-    // Instead verify that sync runs without error
-    let result = fresh_wallet.sync(&node_state);
-    assert!(result.is_ok());
+    let balance_before = wallet.balance();
+    assert!(balance_before > 0, "funded wallet should have balance");
+
+    // Sync should succeed and preserve the coinbase balance
+    wallet.sync(&node_state).expect("sync should succeed");
+    assert_eq!(
+        wallet.balance(),
+        balance_before,
+        "balance should be preserved after sync"
+    );
+    assert_eq!(wallet.unspent_outputs().len(), 1);
 }
 
 #[test]

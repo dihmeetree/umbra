@@ -195,10 +195,11 @@ fn test_deregister_via_slashing_removes_from_active() {
 }
 
 #[test]
-fn test_max_validators_cap() {
+fn test_batch_validator_registration() {
+    // Verify batch registration works and count is tracked correctly.
+    // MAX_VALIDATORS cap (10,000) enforcement is tested in state.rs unit tests.
     let mut state = umbra::state::ChainState::new();
 
-    // Register a batch and verify they all work
     for _ in 0..10 {
         let signing = SigningKeypair::generate();
         let kem = KemKeypair::generate();
