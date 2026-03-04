@@ -3747,4 +3747,220 @@ mod tests {
         let err = state.add_commitment(commitment).unwrap_err();
         assert!(matches!(err, StateError::DuplicateCommitment));
     }
+
+    #[test]
+    fn slashed_validator_cannot_reregister() {
+        use crate::consensus::bft::Validator;
+        use crate::crypto::keys::{KemKeypair, SigningKeypair};
+
+        let mut state = ChainState::new();
+        // Register and slash a validator
+        let kp = SigningKeypair::generate();
+        let kem = KemKeypair::generate();
+        let v = Validator::with_kem(kp.public.clone(), kem.public.clone());
+        state.register_genesis_validator(v).unwrap();
+        let vid = kp.public.fingerprint();
+        state.slash_validator(&vid).unwrap();
+        assert!(state.is_slashed(&vid));
+
+        // Build a ValidatorRegister tx that attempts to re-register the slashed validator.
+        // validate_transaction should reject with ValidatorSlashed.
+        let bond = crate::constants::VALIDATOR_BASE_BOND;
+        let min_fee = bond + crate::constants::MIN_TX_FEE;
+        let total_input = min_fee + 100;
+        let blinding = BlindingFactor::from_bytes([88u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[88u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .set_fee(min_fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorRegister {
+                signing_key: kp.public.clone(),
+                kem_public_key: kem.public.clone(),
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::ValidatorSlashed)),
+            "slashed validator re-registration should fail, got: {:?}",
+            result
+        );
+
+        // A different validator can still register
+        let kp2 = SigningKeypair::generate();
+        let kem2 = KemKeypair::generate();
+        let v2 = Validator::with_kem(kp2.public.clone(), kem2.public.clone());
+        assert!(state.register_genesis_validator(v2).is_ok());
+    }
+
+    #[test]
+    fn deregister_below_min_validators_rejected() {
+        use crate::consensus::bft::Validator;
+        use crate::crypto::keys::{KemKeypair, SigningKeypair};
+
+        let mut state = ChainState::new();
+        // Register exactly MIN_VALIDATORS
+        let mut keypairs = Vec::new();
+        let mut kem_keys = Vec::new();
+        for _ in 0..crate::constants::MIN_VALIDATORS {
+            let kp = SigningKeypair::generate();
+            let kem = KemKeypair::generate();
+            let v = Validator::with_kem(kp.public.clone(), kem.public.clone());
+            state.register_genesis_validator(v).unwrap();
+            keypairs.push(kp);
+            kem_keys.push(kem);
+        }
+        assert_eq!(state.total_validators(), crate::constants::MIN_VALIDATORS);
+
+        // Build a ValidatorDeregister tx for the first validator.
+        // validate_transaction checks TooFewValidators before auth_signature,
+        // so it should reject before reaching the sig check.
+        let vid = keypairs[0].public.fingerprint();
+        let bond = state.validator_bond(&vid).unwrap_or(0);
+        let bond_blinding = [99u8; 32];
+        let bond_commitment = Commitment::commit(bond, &BlindingFactor::from_bytes(bond_blinding));
+
+        let fee = crate::constants::MIN_TX_FEE;
+        let output_value = 100u64;
+        let total_input = output_value + fee;
+        let blinding = BlindingFactor::from_bytes([77u8; 32]);
+        let spend_auth = crate::hash_domain(b"test.spend_auth", &[77u8]);
+        let commitment = Commitment::commit(total_input, &blinding);
+        state.add_commitment(commitment).unwrap();
+        let index = state.find_commitment(&commitment).unwrap();
+        let merkle_path = state.commitment_path(index).unwrap();
+
+        // Create the stealth address and encrypted note for bond return output
+        let stealth_result =
+            crate::crypto::stealth::StealthAddress::generate(&kem_keys[0].public, 0).unwrap();
+        let encrypted_note =
+            crate::crypto::encryption::EncryptedPayload::encrypt(&kem_keys[0].public, b"bond")
+                .unwrap();
+
+        // Use a properly-sized dummy auth signature (real sig not needed since
+        // TooFewValidators is checked before auth verification)
+        let auth_signature = keypairs[0].sign(b"dummy");
+
+        let recipient = FullKeypair::generate();
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: total_input,
+                blinding,
+                spend_auth,
+                merkle_path,
+            })
+            .add_output(recipient.kem.public.clone(), output_value)
+            .set_fee(fee)
+            .set_tx_type(crate::transaction::TxType::ValidatorDeregister {
+                validator_id: vid,
+                auth_signature,
+                bond_return_output: Box::new(crate::transaction::TxOutput {
+                    commitment: bond_commitment,
+                    stealth_address: stealth_result.address,
+                    encrypted_note,
+                    blake3_binding: [0u8; 64],
+                }),
+                bond_blinding,
+            })
+            .set_proof_options(test_proof_options())
+            .build()
+            .unwrap();
+
+        let result = state.validate_transaction(&tx);
+        assert!(
+            matches!(result, Err(StateError::TooFewValidators)),
+            "deregistration at MIN_VALIDATORS should fail with TooFewValidators, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn clear_sync_dedup_empties_set() {
+        let mut ledger = Ledger::new();
+        // Insert a vertex to populate sync_applied_vertices
+        let genesis = crate::consensus::dag::Dag::genesis_vertex();
+        ledger.sync_applied_vertices.insert(genesis.id);
+        assert!(!ledger.sync_applied_vertices.is_empty());
+
+        ledger.clear_sync_dedup();
+        assert!(ledger.sync_applied_vertices.is_empty());
+    }
+
+    #[test]
+    fn snapshot_import_restore_verifies_state_root() {
+        use crate::node::storage::SledStorage;
+
+        let mut state = ChainState::new();
+        // Add some commitments and nullifiers to make state non-trivial
+        for i in 0..5u64 {
+            let c = Commitment::commit(i * 100, &BlindingFactor::from_bytes([(i as u8) + 1; 32]));
+            state.add_commitment(c).unwrap();
+        }
+        let n1 = crate::crypto::nullifier::Nullifier(crate::hash_domain(b"null", &[1]));
+        let n2 = crate::crypto::nullifier::Nullifier(crate::hash_domain(b"null", &[2]));
+        state.mark_nullifier(n1).unwrap();
+        state.mark_nullifier(n2).unwrap();
+
+        // Register a validator
+        let val_kp = crate::crypto::keys::SigningKeypair::generate();
+        let val_kem = crate::crypto::keys::KemKeypair::generate();
+        let validator = crate::consensus::bft::Validator::with_kem(
+            val_kp.public.clone(),
+            val_kem.public.clone(),
+        );
+        state.register_genesis_validator(validator.clone()).unwrap();
+
+        // Source storage for export — persist all state data
+        let storage1 = SledStorage::open_temporary().unwrap();
+        let depth = crate::crypto::stark::spend_air::MERKLE_DEPTH;
+        for level in 0..=depth {
+            for idx in 0..state.commitment_tree_level_len(level) {
+                let hash = state.commitment_tree_node(level, idx);
+                storage1.put_commitment_level(level, idx, &hash).unwrap();
+            }
+        }
+        storage1.put_nullifier(&n1).unwrap();
+        storage1.put_nullifier(&n2).unwrap();
+        let vid = val_kp.public.fingerprint();
+        let bond = state.validator_bond(&vid).unwrap_or(0);
+        storage1.put_validator(&validator, bond, false).unwrap();
+
+        let original_root = state.state_root();
+        let original_commitment_root = state.commitment_root();
+
+        // Export -> serialize -> deserialize -> import -> restore
+        let snapshot = state.to_snapshot_data(&storage1, 42).unwrap();
+        let bytes = crate::serialize(&snapshot).unwrap();
+        let received: SnapshotData = crate::deserialize_snapshot(&bytes).unwrap();
+
+        let storage2 = SledStorage::open_temporary().unwrap();
+        let meta = import_snapshot_to_storage(&storage2, &received).unwrap();
+
+        let restored = ChainState::restore_from_storage(
+            &storage2,
+            &meta,
+            crate::constants::NetworkId::Mainnet,
+        )
+        .unwrap();
+
+        assert_eq!(restored.commitment_root(), original_commitment_root);
+        assert_eq!(restored.state_root(), original_root);
+        assert_eq!(restored.commitment_count(), 5);
+        assert_eq!(restored.nullifier_count(), 2);
+        assert_eq!(restored.epoch(), 0);
+    }
 }

@@ -996,4 +996,112 @@ mod tests {
             panic!("expected NatPunchRequest");
         }
     }
+
+    #[test]
+    fn sanitize_truncates_finalized_vertices_response() {
+        let kp = SigningKeypair::generate();
+        let vrf = crate::crypto::vrf::VrfOutput::evaluate(&kp, b"test");
+        let signature = kp.sign(b"test");
+        let vertices: Vec<(u64, Box<crate::consensus::dag::Vertex>)> = (0..1500)
+            .map(|i| {
+                let id_bytes = crate::hash_domain(b"test-vtx", &(i as u64).to_le_bytes());
+                (
+                    i as u64,
+                    Box::new(crate::consensus::dag::Vertex {
+                        id: crate::consensus::dag::VertexId(id_bytes),
+                        parents: vec![],
+                        epoch: 0,
+                        round: i as u64,
+                        proposer: kp.public.clone(),
+                        transactions: vec![],
+                        timestamp: 0,
+                        state_root: [0u8; 32],
+                        signature: signature.clone(),
+                        vrf_proof: Some(vrf.clone()),
+                        protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+                    }),
+                )
+            })
+            .collect();
+        let mut msg = Message::FinalizedVerticesResponse {
+            vertices,
+            has_more: false,
+            total_finalized: 1500,
+        };
+        msg.sanitize();
+        if let Message::FinalizedVerticesResponse { vertices, .. } = &msg {
+            assert_eq!(vertices.len(), std::cmp::min(1500, 1000));
+        } else {
+            panic!("expected FinalizedVerticesResponse");
+        }
+    }
+
+    #[test]
+    fn sanitize_truncates_epoch_state_response() {
+        let committee: Vec<crate::Hash> = (0..100)
+            .map(|i| crate::hash_domain(b"test-validator", &(i as u64).to_le_bytes()))
+            .collect();
+        let mut msg = Message::EpochStateResponse {
+            committee,
+            epoch: 0,
+            commitment_root: [0u8; 32],
+            nullifier_count: 0,
+        };
+        msg.sanitize();
+        if let Message::EpochStateResponse { committee, .. } = &msg {
+            assert_eq!(
+                committee.len(),
+                std::cmp::min(100, crate::constants::COMMITTEE_SIZE)
+            );
+        } else {
+            panic!("expected EpochStateResponse");
+        }
+    }
+
+    #[test]
+    fn sanitize_truncates_new_vertex_transactions() {
+        use crate::crypto::stark::types::BalanceStarkProof;
+        use crate::transaction::Transaction;
+
+        let kp = SigningKeypair::generate();
+        let vrf = crate::crypto::vrf::VrfOutput::evaluate(&kp, b"test");
+        let txs: Vec<Transaction> = (0..2000u16)
+            .map(|i| Transaction {
+                inputs: vec![],
+                outputs: vec![],
+                fee: i as u64,
+                chain_id: crate::Hash::default(),
+                expiry_epoch: 0,
+                balance_proof: BalanceStarkProof {
+                    proof_bytes: vec![],
+                    public_inputs_bytes: vec![],
+                },
+                messages: vec![],
+                tx_binding: crate::hash_domain(b"test", &i.to_le_bytes()),
+                tx_type: crate::transaction::TxType::Transfer,
+            })
+            .collect();
+        let mut msg = Message::NewVertex(Box::new(crate::consensus::dag::Vertex {
+            id: crate::consensus::dag::VertexId([0u8; 32]),
+            parents: vec![],
+            epoch: 0,
+            round: 0,
+            proposer: kp.public.clone(),
+            transactions: txs,
+            timestamp: 0,
+            state_root: [0u8; 32],
+            signature: kp.sign(b"test"),
+            vrf_proof: Some(vrf),
+            protocol_version: crate::constants::PROTOCOL_VERSION_ID,
+        }));
+        msg.sanitize();
+        if let Message::NewVertex(v) = &msg {
+            assert_eq!(
+                v.transactions.len(),
+                std::cmp::min(2000, crate::constants::VERTEX_MAX_DRAIN)
+            );
+        } else {
+            panic!("expected NewVertex");
+        }
+    }
 }
