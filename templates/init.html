@@ -14,6 +14,17 @@
   </p>
   <form method="post" action="/init">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div style="margin-bottom: 1rem;">
+      <label for="password" style="display: block; margin-bottom: 0.25rem;">Encryption password (optional):</label>
+      <input type="password" id="password" name="password" autocomplete="new-password" placeholder="Leave empty for no encryption"
+             style="width: 100%; padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border); color: var(--text); border-radius: 4px;">
+      <small style="color: var(--text-dim);">Protects private keys on disk. Required to open wallet later.</small>
+    </div>
+    <div style="margin-bottom: 1rem;">
+      <label for="password_confirm" style="display: block; margin-bottom: 0.25rem;">Confirm encryption password:</label>
+      <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" placeholder="Re-enter password"
+             style="width: 100%; padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border); color: var(--text); border-radius: 4px;">
+    </div>
     <button type="submit">Create Wallet</button>
   </form>
 </div>

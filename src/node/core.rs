@@ -786,6 +786,13 @@ impl Node {
                     self.stem_txs.remove(&tx_hash);
                 }
 
+                // Gossip deduplication -- prevents re-processing and re-gossip of
+                // transactions that were evicted from the mempool.
+                if self.is_seen(&tx_hash) {
+                    return;
+                }
+                self.mark_seen(tx_hash);
+
                 // Skip if we already have this transaction in mempool
                 {
                     let state = self.state.read().await;
@@ -2219,11 +2226,16 @@ impl Node {
                         .collect();
 
                     let new_committee = if total_validators > crate::constants::COMMITTEE_SIZE {
-                        all_active
+                        let mut eligible: Vec<_> = all_active
                             .into_iter()
                             .filter(|v| state.bft.vrf_commitment(&v.id).is_some())
-                            .take(crate::constants::COMMITTEE_SIZE)
-                            .collect()
+                            .collect();
+                        // Sort by validator id for deterministic ordering across
+                        // all nodes. Without this, HashMap iteration order could
+                        // cause different nodes to construct different committees.
+                        eligible.sort_by(|a, b| a.id.cmp(&b.id));
+                        eligible.truncate(crate::constants::COMMITTEE_SIZE);
+                        eligible
                     } else {
                         // Small network: all validators form the committee.
                         all_active
@@ -3055,11 +3067,47 @@ mod tests {
         // Drain the broadcast command
         let _ = cmd_rx.try_recv();
 
-        // Insert same tx again — should be a no-op (already in mempool)
+        // Clear seen_messages so the second delivery bypasses gossip dedup
+        // and actually reaches the mempool duplicate check.
+        node.seen_messages_current.clear();
+        node.seen_messages_prev.clear();
+
+        // Insert same tx again — mempool already has it, should be a no-op
         node.handle_message(from, Message::NewTransaction(tx)).await;
 
-        // No additional broadcast
+        // No additional broadcast (rejected by mempool duplicate check)
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_new_transaction_gossip_dedup() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(42);
+        let tx_id = tx.tx_id();
+        let from = Hash::default();
+
+        // First delivery: accepted and broadcast
+        node.handle_message(from, Message::NewTransaction(tx.clone()))
+            .await;
+        let s = state.read().await;
+        assert!(
+            s.mempool.contains(&tx_id),
+            "tx should be in mempool after first delivery"
+        );
+        drop(s);
+        assert!(cmd_rx.try_recv().is_ok(), "broadcast should have been sent");
+
+        // Second delivery of same tx: is_seen returns true, silently dropped
+        // before reaching mempool or broadcast
+        node.handle_message(from, Message::NewTransaction(tx)).await;
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no broadcast on gossip-deduped tx"
+        );
     }
 
     #[tokio::test]
@@ -3819,6 +3867,71 @@ mod tests {
             }
             _ => panic!("Expected SendTo with GetSnapshotChunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_snapshot_manifest_cap_evicts_low_signal() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let chunk_size = crate::constants::SNAPSHOT_CHUNK_SIZE as u64;
+        let snapshot_size = chunk_size * 2;
+        let total_chunks = 2u32;
+
+        // Fill snapshot_manifests to MAX_SNAPSHOT_MANIFEST_ROOTS distinct roots,
+        // each with exactly 1 peer endorsement.
+        let max_roots = crate::constants::MAX_SNAPSHOT_MANIFEST_ROOTS;
+        for i in 0..max_roots {
+            let mut meta = test_chain_state_meta(1);
+            // Each entry gets a unique state_root
+            meta.state_root = crate::hash_domain(b"test-root", &(i as u64).to_le_bytes());
+            let peer = crate::hash_domain(b"test-peer", &(i as u64).to_le_bytes());
+            node.handle_message(
+                peer,
+                Message::SnapshotManifest {
+                    meta,
+                    total_chunks,
+                    snapshot_size,
+                },
+            )
+            .await;
+        }
+        assert_eq!(
+            node.snapshot_manifests.len(),
+            max_roots,
+            "should have exactly MAX_SNAPSHOT_MANIFEST_ROOTS entries"
+        );
+
+        // Now insert one more with a brand-new state_root. The eviction logic
+        // should remove the entry with the fewest peer endorsements (all have 1,
+        // so any one will be evicted) and accept the new entry.
+        let mut new_meta = test_chain_state_meta(2);
+        new_meta.state_root = crate::hash_domain(b"test-root-new", &[0xFF]);
+        let new_peer = crate::hash_domain(b"test-peer-new", &[0xFF]);
+        node.handle_message(
+            new_peer,
+            Message::SnapshotManifest {
+                meta: new_meta.clone(),
+                total_chunks,
+                snapshot_size,
+            },
+        )
+        .await;
+
+        // The new entry should be accepted
+        assert!(
+            node.snapshot_manifests.contains_key(&new_meta.state_root),
+            "new manifest entry should be present after eviction"
+        );
+        // Size should remain at max_roots (one evicted, one added)
+        assert_eq!(
+            node.snapshot_manifests.len(),
+            max_roots,
+            "map size should stay at MAX_SNAPSHOT_MANIFEST_ROOTS after eviction"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Unlock Wallet - Spectra Wallet{% endblock %}
+{% block content %}
+<h1>Unlock Wallet</h1>
+
+{% if let Some(msg) = flash_error %}
+<div class="flash error">{{ msg }}</div>
+{% endif %}
+
+<div class="card">
+  <p style="margin-bottom: 1rem; color: var(--text-dim);">
+    This wallet is encrypted. Enter the password to unlock it.
+  </p>
+  <form method="post" action="/unlock">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div style="margin-bottom: 1rem;">
+      <label for="password" style="display: block; margin-bottom: 0.25rem;">Password:</label>
+      <input type="password" id="password" name="password" required autofocus
+             autocomplete="current-password"
+             style="width: 100%; padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border); color: var(--text); border-radius: 4px;">
+    </div>
+    <button type="submit">Unlock</button>
+  </form>
+</div>
+{% endblock %}

@@ -266,7 +266,10 @@ impl Wallet {
             .collect();
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
-        let total_available: u64 = candidates.iter().map(|(_, v)| *v).sum();
+        let total_available: u64 = candidates
+            .iter()
+            .try_fold(0u64, |acc, &(_, v)| acc.checked_add(v))
+            .ok_or(WalletError::ArithmeticOverflow)?;
 
         // Phase 1: Try single-UTXO solutions (1 input = 1 STARK proof, cheapest).
         if let Some(result) = Self::try_single_utxo(&candidates, amount, msg_bytes) {
@@ -329,14 +332,16 @@ impl Wallet {
         // candidates is sorted descending. The (k-1) smallest are the last (k-1).
         let base_start = candidates.len() - (k - 1);
         let base = &candidates[base_start..];
-        let base_sum: u64 = base.iter().map(|(_, v)| *v).sum();
+        let base_sum: u64 = base
+            .iter()
+            .try_fold(0u64, |acc, &(_, v)| acc.checked_add(v))?;
         let base_indices: Vec<usize> = base.iter().map(|(idx, _)| *idx).collect();
 
         // Try each remaining candidate (ascending = reverse of descending slice).
         // Pick the smallest that pushes total past needed.
         let remaining = &candidates[..base_start];
         for &(idx, value) in remaining.iter().rev() {
-            let total = base_sum.saturating_add(value);
+            let total = base_sum.checked_add(value)?;
             if total >= needed {
                 let mut indices = base_indices.clone();
                 indices.push(idx);
@@ -386,7 +391,9 @@ impl Wallet {
         }
         builder = builder.add_output(recipient_kem_pk.clone(), amount);
         if num_outputs == 2 {
-            let change = selected_total - total_needed;
+            let change = selected_total
+                .checked_sub(total_needed)
+                .expect("invariant: selected_total >= total_needed");
             builder = builder.add_output(self.keypair.kem.public.clone(), change);
         }
         if let Some(msg_data) = message {
@@ -606,7 +613,9 @@ impl Wallet {
                 merkle_path,
             });
         }
-        let consolidated_amount = total - fee;
+        let consolidated_amount = total
+            .checked_sub(fee)
+            .expect("invariant: total > fee (checked above)");
         builder = builder.add_output(self.keypair.kem.public.clone(), consolidated_amount);
         let tx = builder.build().map_err(WalletError::Build)?;
         let tx_binding = tx.tx_binding;
@@ -699,7 +708,7 @@ pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
     }
     bits.zeroize();
     let expected_checksum = blake3::hash(&entropy).as_bytes()[0];
-    if checksum != expected_checksum {
+    if !crate::constant_time_eq(&[checksum], &[expected_checksum]) {
         entropy.zeroize();
         return Err(WalletError::Recovery("invalid mnemonic checksum".into()));
     }
@@ -1036,9 +1045,7 @@ impl Wallet {
                     "encrypted wallet file truncated".into(),
                 ));
             }
-            let pw = password.ok_or_else(|| {
-                WalletError::Persistence("wallet file is encrypted; password required".into())
-            })?;
+            let pw = password.ok_or(WalletError::PasswordRequired)?;
             let salt: [u8; WALLET_SALT_SIZE] = raw[4..4 + WALLET_SALT_SIZE]
                 .try_into()
                 .map_err(|_| WalletError::Persistence("truncated salt".into()))?;
@@ -1126,6 +1133,8 @@ pub enum WalletError {
     NothingToConsolidate,
     #[error("recovery error: {0}")]
     Recovery(String),
+    #[error("wallet file is encrypted; password required")]
+    PasswordRequired,
 }
 
 #[cfg(test)]
@@ -2144,5 +2153,13 @@ mod tests {
         // Load with no password should fail
         let result = Wallet::load_from_file(&path, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_coins_utxo_sum_overflow() {
+        let half_plus = u64::MAX / 2 + 1;
+        let wallet = wallet_with_utxos(&[half_plus, half_plus]);
+        let err = wallet.select_coins(1000, 0).unwrap_err();
+        assert!(matches!(err, WalletError::ArithmeticOverflow));
     }
 }
