@@ -163,7 +163,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **1203 tests**.
+**~43,000 lines of Rust** across 45 source files with **1207 tests**.
 
 ## Building
 
@@ -539,13 +539,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (1203 tests)
+cargo test                       # Full suite (1207 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1203 tests cover:
+All 1207 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -588,9 +588,9 @@ cargo run --release --bin simulator
 
 ### What It Tests
 
-The simulator runs 6 phases with 41 automated checks:
+The simulator runs 12 phases with 51 automated checks:
 
-1. **Bootstrap Network** — starts 3 validator nodes on localhost with real P2P connections and BFT consensus
+1. **Bootstrap Network** — starts 4 validator nodes on localhost with real P2P connections and BFT consensus
 2. **Genesis Funding** — creates wallets for Alice and Bob, funds each with 10M coins from the genesis coinbase via proper transactions with full zk-STARK proofs
 3. **Normal Traffic** — 5 rounds of Alice/Bob transactions with balance conservation verification after each round
 4. **Chaos Agent (Mallory)** — 25 attack scenarios across 5 categories, each verified to be rejected:
@@ -599,8 +599,14 @@ The simulator runs 6 phases with 41 automated checks:
    - **Validator operations**: insufficient bond, invalid key sizes, zero bond return in deregister
    - **Double-spend & replay**: mempool nullifier conflict, duplicate transaction, cross-chain replay via state validation, state-level double-spend with already-spent nullifier
    - **Timing & resilience**: mempool expiry eviction, no-expiry tx survives eviction
-5. **State Integrity** — verifies chain state is uncorrupted after all attacks
-6. **Monitoring** — checks node health, epoch state, commitment tree, validator set, mempool, and validator health across all nodes
+5. **Fault Tolerance** — shuts down 1 of 4 validators, verifies consensus continues with 3/4, then submits and finalizes a transaction under degraded network
+6. **Encrypted Messages** — Alice sends an encrypted message to Bob, verifies decryption; Bob replies, verifies Alice decrypts the reply
+7. **Concurrent Flood** — submits 5 rapid transactions and verifies all finalize with correct balances
+8. **Double-Spend Race** — submits the same transaction to two different nodes, verifies exactly-once application
+9. **Cross-Node Consistency** — compares finalized vertex counts, state roots, and validator sets across all surviving nodes
+10. **State Sync** — starts a new node from scratch and verifies it begins syncing via the snapshot protocol
+11. **Monitoring** — checks node health, epoch state, commitment tree, validator set, mempool, and validator health across all nodes
+12. **Summary** — colored pass/fail report
 
 All transactions use full-security `default_proof_options()` (not lightweight test proofs). The simulator prints a colored pass/fail summary and exits with code 0 on success.
 
@@ -1034,7 +1040,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1203 tests
+- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1207 tests
 
 ## License
 
