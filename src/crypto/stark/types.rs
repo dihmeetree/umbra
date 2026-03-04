@@ -152,14 +152,13 @@ pub struct SpendStarkProof {
 
 // ── Zeroize helpers for Felt arrays ──
 
-/// Zero a `[Felt; 4]` array using volatile writes to prevent compiler elision.
+/// Zero a `[Felt; 4]` array. Uses `black_box` to prevent the compiler from
+/// eliding the zeroing writes, without requiring `unsafe`.
 fn zeroize_felt_array(arr: &mut [Felt; 4]) {
     for felt in arr.iter_mut() {
-        // SAFETY: Felt is a plain data type; volatile write prevents elision.
-        unsafe {
-            std::ptr::write_volatile(felt, Felt::ZERO);
-        }
+        *felt = Felt::ZERO;
     }
+    std::hint::black_box(arr);
 }
 
 /// Zero all `[Felt; 4]` entries in a Vec, then clear the Vec.

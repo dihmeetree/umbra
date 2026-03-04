@@ -202,7 +202,9 @@ pub mod constants {
     /// Maximum eviction iterations when inserting into a full mempool.
     pub const MAX_MEMPOOL_EVICTIONS: usize = 10;
     /// Number of peers whose snapshot state_root must agree before importing.
-    pub const SNAPSHOT_QUORUM: usize = 2;
+    /// Set to 3 (> f for f=1) to prevent a pair of colluding peers from
+    /// serving a crafted snapshot to a syncing node.
+    pub const SNAPSHOT_QUORUM: usize = 3;
     /// Upper bound on snapshot blob size accepted by `deserialize_snapshot` (1 GiB).
     pub const MAX_SNAPSHOT_DESERIALIZE_BYTES: usize = 1024 * 1024 * 1024;
 

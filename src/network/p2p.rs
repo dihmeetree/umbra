@@ -558,9 +558,10 @@ pub async fn start(config: P2pConfig) -> Result<P2pStartResult, P2pError> {
     })
 }
 
-/// Extract the /16 subnet prefix from an IP address.
-/// Returns the first two octets for IPv4; first two bytes of the first segment
-/// for IPv6 (approximating a /16 bucket).
+/// Extract a subnet prefix from an IP address for diversity limiting.
+/// Returns the first two octets (/16) for IPv4. For IPv6, hashes the
+/// first 6 bytes (/48) into a 2-byte key, since organizations typically
+/// receive /32 or /48 allocations and a /16 prefix is too coarse.
 fn subnet_prefix(ip: IpAddr) -> [u8; 2] {
     match ip {
         IpAddr::V4(v4) => {
@@ -568,9 +569,11 @@ fn subnet_prefix(ip: IpAddr) -> [u8; 2] {
             [octets[0], octets[1]]
         }
         IpAddr::V6(v6) => {
-            let segments = v6.segments();
-            let bytes = segments[0].to_be_bytes();
-            [bytes[0], bytes[1]]
+            let octets = v6.octets();
+            // Hash the first 6 bytes (/48 prefix) into 2 bytes.
+            let h = blake3::hash(&octets[..6]);
+            let hb = h.as_bytes();
+            [hb[0], hb[1]]
         }
     }
 }
@@ -2072,10 +2075,21 @@ mod tests {
     #[test]
     fn subnet_prefix_ipv6() {
         let ip: IpAddr = "::1".parse().unwrap();
-        assert_eq!(subnet_prefix(ip), [0, 0]);
+        let prefix1 = subnet_prefix(ip);
+        // After hashing, the prefix is no longer [0, 0] but should be deterministic
+        assert_eq!(prefix1, subnet_prefix("::1".parse().unwrap()));
 
         let ip2: IpAddr = "2001:db8::1".parse().unwrap();
-        assert_eq!(subnet_prefix(ip2), [0x20, 0x01]);
+        let prefix2 = subnet_prefix(ip2);
+        assert_eq!(prefix2, subnet_prefix("2001:db8::1".parse().unwrap()));
+
+        // Different /48 prefixes should produce different subnet keys
+        let ip3: IpAddr = "2001:db9::1".parse().unwrap();
+        assert_ne!(subnet_prefix(ip2), subnet_prefix(ip3));
+
+        // Same /48 prefix, different host should produce same subnet key
+        let ip4: IpAddr = "2001:db8::2".parse().unwrap();
+        assert_eq!(subnet_prefix(ip2), subnet_prefix(ip4));
     }
 
     #[test]

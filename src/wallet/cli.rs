@@ -7,49 +7,70 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use zeroize::Zeroize;
 
 use super::{TxDirection, Wallet, WalletError};
 use crate::config::WalletTlsConfig;
 use crate::crypto::keys::PublicAddress;
 
+/// A password wrapper that zeroizes on drop to avoid leaving password
+/// material in heap memory after use.
+struct SecurePassword(Option<String>);
+
+impl Drop for SecurePassword {
+    fn drop(&mut self) {
+        if let Some(ref mut pw) = self.0 {
+            pw.zeroize();
+        }
+    }
+}
+
+impl SecurePassword {
+    fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
 /// Prompt for an existing wallet password (hidden input).
 /// Returns None in non-interactive contexts (tests, piped input).
-fn prompt_password() -> Option<String> {
+fn prompt_password() -> SecurePassword {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return None;
+        return SecurePassword(None);
     }
     match rpassword::read_password_from_tty(Some("Wallet password: ")) {
-        Ok(pw) if pw.is_empty() => None,
-        Ok(pw) => Some(pw),
-        Err(_) => None,
+        Ok(pw) if pw.is_empty() => SecurePassword(None),
+        Ok(pw) => SecurePassword(Some(pw)),
+        Err(_) => SecurePassword(None),
     }
 }
 
 /// Prompt for a new wallet password with confirmation (hidden input).
 /// Returns None in non-interactive contexts (tests, piped input).
-fn prompt_new_password() -> Option<String> {
+fn prompt_new_password() -> SecurePassword {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return None;
+        return SecurePassword(None);
     }
     let pw1 = match rpassword::read_password_from_tty(Some("Set wallet password: ")) {
         Ok(pw) => pw,
-        Err(_) => return None,
+        Err(_) => return SecurePassword(None),
     };
     if pw1.is_empty() {
         eprintln!("Warning: empty password, wallet will be stored unencrypted.");
-        return None;
+        return SecurePassword(None);
     }
-    let pw2 = match rpassword::read_password_from_tty(Some("Confirm wallet password: ")) {
+    let mut pw2 = match rpassword::read_password_from_tty(Some("Confirm wallet password: ")) {
         Ok(pw) => pw,
-        Err(_) => return None,
+        Err(_) => return SecurePassword(None),
     };
     if pw1 != pw2 {
+        pw2.zeroize();
         eprintln!("Error: passwords do not match.");
-        return None;
+        return SecurePassword(None);
     }
-    Some(pw1)
+    pw2.zeroize();
+    SecurePassword(Some(pw1))
 }
 
 /// Default wallet file name within data_dir.
@@ -468,6 +489,11 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
 
     let wallet = Wallet::new();
 
+    // Prompt for password BEFORE writing any sensitive data to disk,
+    // so a Ctrl+C abort doesn't leave unencrypted material on disk.
+    let pw = prompt_new_password();
+    wallet.save_to_file(&path, 0, pw.as_deref())?;
+
     // Create recovery backup
     let (mut words, backup) = wallet.create_recovery_backup();
     let recovery_path = data_dir.join("wallet.recovery");
@@ -478,9 +504,6 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&recovery_path, std::fs::Permissions::from_mode(0o600));
     }
-
-    let pw = prompt_new_password();
-    wallet.save_to_file(&path, 0, pw.as_deref())?;
 
     // Export address
     let addr = wallet.address();

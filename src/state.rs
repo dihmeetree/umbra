@@ -100,9 +100,14 @@ pub fn import_snapshot_to_storage(
         .flush()
         .map_err(|e| StateError::StorageError(e.to_string()))?;
 
-    // Clear import flag after successful completion
+    // Clear import flag after successful completion and flush to ensure
+    // the cleared flag is durable (prevents spurious "interrupted import"
+    // errors if the process crashes immediately after).
     storage
         .set_import_in_progress(false)
+        .map_err(|e| StateError::StorageError(e.to_string()))?;
+    storage
+        .flush()
         .map_err(|e| StateError::StorageError(e.to_string()))?;
 
     Ok(snapshot.meta.clone())
@@ -683,7 +688,13 @@ impl ChainState {
     }
 
     /// Add a single commitment to the incremental Merkle tree.
+    ///
+    /// Rejects commitments that already exist in the tree to prevent
+    /// index overwrites and tree pollution from duplicate outputs.
     pub fn add_commitment(&mut self, commitment: Commitment) -> Result<(), StateError> {
+        if self.commitment_index.contains_key(&commitment) {
+            return Err(StateError::DuplicateCommitment);
+        }
         self.commitment_tree
             .append(commitment.0)
             .map_err(StateError::CommitmentTreeFull)?;

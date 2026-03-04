@@ -783,6 +783,13 @@ impl Node {
                     self.stem_txs.remove(&tx_hash);
                 }
 
+                // Gossip deduplication -- prevents re-processing and re-gossip of
+                // transactions that were evicted from the mempool.
+                if self.is_seen(&tx_hash) {
+                    return;
+                }
+                self.mark_seen(tx_hash);
+
                 // Skip if we already have this transaction in mempool
                 {
                     let state = self.state.read().await;
@@ -1721,6 +1728,15 @@ impl Node {
                     // Require SNAPSHOT_QUORUM peers to agree on the same state_root
                     // before trusting a snapshot manifest and downloading it.
                     let state_root = meta.state_root;
+                    // Cap the number of distinct state_root entries to prevent
+                    // memory exhaustion from many unique manifests during sync.
+                    const MAX_MANIFEST_ENTRIES: usize = 256;
+                    if self.snapshot_manifests.len() >= MAX_MANIFEST_ENTRIES
+                        && !self.snapshot_manifests.contains_key(&state_root)
+                    {
+                        tracing::warn!("Snapshot manifest map full, ignoring new state_root");
+                        return;
+                    }
                     let entry = self.snapshot_manifests.entry(state_root).or_default();
                     if !entry.iter().any(|(pid, _, _, _)| *pid == from) {
                         entry.push((from, meta.clone(), total_chunks, snapshot_size));
@@ -2152,11 +2168,16 @@ impl Node {
                         .collect();
 
                     let new_committee = if total_validators > crate::constants::COMMITTEE_SIZE {
-                        all_active
+                        let mut eligible: Vec<_> = all_active
                             .into_iter()
                             .filter(|v| state.bft.vrf_commitment(&v.id).is_some())
-                            .take(crate::constants::COMMITTEE_SIZE)
-                            .collect()
+                            .collect();
+                        // Sort by validator id for deterministic ordering across
+                        // all nodes. Without this, HashMap iteration order could
+                        // cause different nodes to construct different committees.
+                        eligible.sort_by(|a, b| a.id.cmp(&b.id));
+                        eligible.truncate(crate::constants::COMMITTEE_SIZE);
+                        eligible
                     } else {
                         // Small network: all validators form the committee.
                         all_active
@@ -3706,10 +3727,26 @@ mod tests {
             "should still be NeedSync after first manifest"
         );
 
-        // Second manifest from different peer with same state_root: quorum reached
+        // Second manifest from different peer with same state_root
         let peer2 = crate::hash_domain(b"test-peer", &[2]);
         node.handle_message(
             peer2,
+            Message::SnapshotManifest {
+                meta: meta.clone(),
+                total_chunks,
+                snapshot_size,
+            },
+        )
+        .await;
+        assert!(
+            matches!(node.sync_state, SyncState::NeedSync { .. }),
+            "should still be NeedSync after second manifest (quorum is 3)"
+        );
+
+        // Third manifest from yet another peer: quorum reached
+        let peer3 = crate::hash_domain(b"test-peer", &[3]);
+        node.handle_message(
+            peer3,
             Message::SnapshotManifest {
                 meta,
                 total_chunks,

@@ -388,6 +388,15 @@ impl BftState {
             if self.next_round_votes.len() >= max_buffered {
                 return None;
             }
+            // Deduplicate by voter_id to prevent a single committee member from
+            // filling the buffer with repeated valid votes and displacing others.
+            if self
+                .next_round_votes
+                .iter()
+                .any(|v| v.voter_id == vote.voter_id)
+            {
+                return None;
+            }
             // Verify signature before buffering to prevent an attacker from
             // filling the buffer with fake votes that displace legitimate ones.
             if let Some(voter) = self.committee.iter().find(|v| v.id == vote.voter_id) {
@@ -683,6 +692,10 @@ impl BftState {
     /// Used during epoch transitions in `finalize_vertex_inner` where we cannot
     /// call `advance_epoch()` because it resets the round to 0.
     pub fn clear_epoch_caches(&mut self) {
+        debug_assert!(
+            self.equivocations.is_empty(),
+            "equivocations should be processed before clearing epoch caches"
+        );
         self.votes.clear();
         self.certificates.clear();
         self.round_votes.clear();

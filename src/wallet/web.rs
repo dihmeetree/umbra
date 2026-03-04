@@ -19,6 +19,7 @@ use axum::routing::{get, post};
 use axum::{Form, Router};
 use serde::Deserialize;
 use tokio::sync::RwLock;
+use zeroize::Zeroize;
 
 use super::cli as wallet_cli;
 use super::{Wallet, WalletError};
@@ -40,6 +41,9 @@ pub struct WalletWebState {
     wallet_op_lock: Arc<tokio::sync::Mutex<()>>,
     /// CSRF token state: (token_string, created_at). Rotated every hour.
     csrf_state: Arc<RwLock<(String, Instant)>>,
+    /// Wallet encryption password. Stored in memory only while the wallet is
+    /// unlocked. Zeroized when replaced or on server shutdown.
+    wallet_password: Arc<RwLock<Option<String>>>,
 }
 
 /// Maximum age of a CSRF token before automatic rotation.
@@ -59,6 +63,7 @@ impl WalletWebState {
             wallet: Arc::new(RwLock::new(None)),
             wallet_op_lock: Arc::new(tokio::sync::Mutex::new(())),
             csrf_state: Arc::new(RwLock::new((hex::encode(csrf_bytes), Instant::now()))),
+            wallet_password: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -89,6 +94,8 @@ impl WalletWebState {
     }
 
     /// Load or return cached wallet. Returns None if wallet doesn't exist.
+    /// Returns Err with "password required" if the wallet is encrypted and
+    /// no password has been set via the unlock flow.
     async fn load_wallet(&self) -> Result<Option<(Wallet, u64)>, WalletError> {
         let mut cache = self.wallet.write().await;
         if cache.is_some() {
@@ -98,24 +105,36 @@ impl WalletWebState {
         if !path.exists() {
             return Ok(None);
         }
-        let result = tokio::task::spawn_blocking(move || Wallet::load_from_file(&path, None))
-            .await
-            .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))?;
+        let pw = self.wallet_password.read().await.clone();
+        let result =
+            tokio::task::spawn_blocking(move || Wallet::load_from_file(&path, pw.as_deref()))
+                .await
+                .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))?;
         let (wallet, seq) = result?;
         *cache = Some((wallet.clone(), seq));
         Ok(Some((wallet, seq)))
     }
 
-    /// Save wallet to disk and update cache.
+    /// Save wallet to disk and update cache, using the stored password.
     async fn save_wallet(&self, wallet: &Wallet, seq: u64) -> Result<(), WalletError> {
         let path = wallet_cli::wallet_path(&self.data_dir);
         let wallet_clone = wallet.clone();
-        tokio::task::spawn_blocking(move || wallet_clone.save_to_file(&path, seq, None))
+        let pw = self.wallet_password.read().await.clone();
+        tokio::task::spawn_blocking(move || wallet_clone.save_to_file(&path, seq, pw.as_deref()))
             .await
             .map_err(|e| WalletError::Persistence(format!("spawn_blocking failed: {}", e)))??;
         let mut cache = self.wallet.write().await;
         *cache = Some((wallet.clone(), seq));
         Ok(())
+    }
+
+    /// Set the wallet password (for unlock and init flows).
+    async fn set_password(&self, password: Option<String>) {
+        let mut pw = self.wallet_password.write().await;
+        if let Some(ref mut old) = *pw {
+            old.zeroize();
+        }
+        *pw = password;
     }
 
     /// Invalidate the cache (after external changes).
@@ -216,6 +235,14 @@ struct HistoryTemplate {
     entries: Vec<HistoryEntryDisplay>,
 }
 
+#[derive(Template, WebTemplate)]
+#[template(path = "unlock.html")]
+struct UnlockTemplate {
+    active_tab: &'static str,
+    flash_error: Option<String>,
+    csrf_token: String,
+}
+
 fn error_page(msg: impl Into<String>) -> ErrorTemplate {
     ErrorTemplate {
         active_tab: "",
@@ -228,6 +255,18 @@ fn error_page(msg: impl Into<String>) -> ErrorTemplate {
 #[derive(Deserialize)]
 pub struct CsrfForm {
     csrf_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct InitFormWithPassword {
+    csrf_token: String,
+    password: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UnlockForm {
+    csrf_token: String,
+    password: String,
 }
 
 #[derive(Deserialize)]
@@ -264,6 +303,7 @@ pub fn router(state: WalletWebState) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/init", get(init_page).post(init_action))
+        .route("/unlock", get(unlock_page).post(unlock_action))
         .route("/address", get(address_page))
         .route("/address/export", get(address_export))
         .route("/send", get(send_page).post(send_action))
@@ -320,6 +360,9 @@ async fn dashboard(State(state): State<WalletWebState>) -> Response {
     let (wallet, seq) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -367,7 +410,10 @@ async fn init_page(State(state): State<WalletWebState>) -> Response {
     .into_response()
 }
 
-async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfForm>) -> Response {
+async fn init_action(
+    State(state): State<WalletWebState>,
+    Form(form): Form<InitFormWithPassword>,
+) -> Response {
     if !state.validate_csrf(&form.csrf_token).await {
         return InitTemplate {
             active_tab: "",
@@ -391,8 +437,12 @@ async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
         .into_response();
     }
 
+    // Use the password from the form (empty string -> None)
+    let password = form.password.filter(|p| !p.is_empty());
+    let pw_ref = password.as_deref();
+
     let wallet = Wallet::new();
-    if let Err(e) = wallet.save_to_file(&path, 0, None) {
+    if let Err(e) = wallet.save_to_file(&path, 0, pw_ref) {
         return InitTemplate {
             active_tab: "",
             flash_error: Some(format!("Failed to save wallet: {}", e)),
@@ -400,6 +450,9 @@ async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
         }
         .into_response();
     }
+
+    // Store password in session state for subsequent load/save operations
+    state.set_password(password).await;
 
     // Export address file
     let addr = wallet.address();
@@ -415,6 +468,66 @@ async fn init_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
     Redirect::to("/").into_response()
 }
 
+async fn unlock_page(State(state): State<WalletWebState>) -> Response {
+    if !state.wallet_exists() {
+        return Redirect::to("/init").into_response();
+    }
+    UnlockTemplate {
+        active_tab: "",
+        flash_error: None,
+        csrf_token: state.csrf_token().await,
+    }
+    .into_response()
+}
+
+async fn unlock_action(
+    State(state): State<WalletWebState>,
+    Form(form): Form<UnlockForm>,
+) -> Response {
+    if !state.validate_csrf(&form.csrf_token).await {
+        return UnlockTemplate {
+            active_tab: "",
+            flash_error: Some("Invalid CSRF token. Please reload and try again.".into()),
+            csrf_token: state.csrf_token().await,
+        }
+        .into_response();
+    }
+
+    let password = if form.password.is_empty() {
+        None
+    } else {
+        Some(form.password)
+    };
+
+    // Try loading with the provided password to verify it works
+    let path = wallet_cli::wallet_path(&state.data_dir);
+    let pw_clone = password.clone();
+    let result =
+        tokio::task::spawn_blocking(move || Wallet::load_from_file(&path, pw_clone.as_deref()))
+            .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            // Password works -- store it and invalidate cache so next load uses it
+            state.set_password(password).await;
+            state.invalidate_cache().await;
+            Redirect::to("/").into_response()
+        }
+        Ok(Err(e)) => UnlockTemplate {
+            active_tab: "",
+            flash_error: Some(format!("Failed to unlock: {}", e)),
+            csrf_token: state.csrf_token().await,
+        }
+        .into_response(),
+        Err(e) => UnlockTemplate {
+            active_tab: "",
+            flash_error: Some(format!("Internal error: {}", e)),
+            csrf_token: state.csrf_token().await,
+        }
+        .into_response(),
+    }
+}
+
 async fn address_page(State(state): State<WalletWebState>) -> Response {
     if !state.wallet_exists() {
         return Redirect::to("/init").into_response();
@@ -423,6 +536,9 @@ async fn address_page(State(state): State<WalletWebState>) -> Response {
     let (wallet, _) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -453,6 +569,9 @@ async fn address_export(State(state): State<WalletWebState>) -> Response {
     let (wallet, _) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -483,6 +602,9 @@ async fn send_page(State(state): State<WalletWebState>) -> Response {
     let (wallet, _) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -518,6 +640,9 @@ async fn send_action(State(state): State<WalletWebState>, Form(form): Form<SendF
     let (mut wallet, last_seq) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -658,6 +783,9 @@ async fn messages_page(State(state): State<WalletWebState>) -> Response {
     let (wallet, _) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -689,6 +817,9 @@ async fn history_page(State(state): State<WalletWebState>) -> Response {
     let (wallet, _) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 
@@ -735,6 +866,9 @@ async fn scan_action(State(state): State<WalletWebState>, Form(form): Form<CsrfF
     let (mut wallet, last_seq) = match state.load_wallet().await {
         Ok(Some(w)) => w,
         Ok(None) => return Redirect::to("/init").into_response(),
+        Err(ref e) if e.to_string().contains("password required") => {
+            return Redirect::to("/unlock").into_response();
+        }
         Err(e) => return error_page(e.to_string()).into_response(),
     };
 

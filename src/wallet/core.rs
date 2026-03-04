@@ -266,7 +266,10 @@ impl Wallet {
             .collect();
         candidates.sort_by(|a, b| b.1.cmp(&a.1));
 
-        let total_available: u64 = candidates.iter().map(|(_, v)| *v).sum();
+        let total_available: u64 = candidates
+            .iter()
+            .try_fold(0u64, |acc, &(_, v)| acc.checked_add(v))
+            .ok_or(WalletError::ArithmeticOverflow)?;
 
         // Phase 1: Try single-UTXO solutions (1 input = 1 STARK proof, cheapest).
         if let Some(result) = Self::try_single_utxo(&candidates, amount, msg_bytes) {
@@ -329,7 +332,9 @@ impl Wallet {
         // candidates is sorted descending. The (k-1) smallest are the last (k-1).
         let base_start = candidates.len() - (k - 1);
         let base = &candidates[base_start..];
-        let base_sum: u64 = base.iter().map(|(_, v)| *v).sum();
+        let base_sum: u64 = base
+            .iter()
+            .try_fold(0u64, |acc, &(_, v)| acc.checked_add(v))?;
         let base_indices: Vec<usize> = base.iter().map(|(idx, _)| *idx).collect();
 
         // Try each remaining candidate (ascending = reverse of descending slice).
@@ -386,7 +391,9 @@ impl Wallet {
         }
         builder = builder.add_output(recipient_kem_pk.clone(), amount);
         if num_outputs == 2 {
-            let change = selected_total - total_needed;
+            let change = selected_total
+                .checked_sub(total_needed)
+                .expect("invariant: selected_total >= total_needed");
             builder = builder.add_output(self.keypair.kem.public.clone(), change);
         }
         if let Some(msg_data) = message {
@@ -606,7 +613,9 @@ impl Wallet {
                 merkle_path,
             });
         }
-        let consolidated_amount = total - fee;
+        let consolidated_amount = total
+            .checked_sub(fee)
+            .expect("invariant: total > fee (checked above)");
         builder = builder.add_output(self.keypair.kem.public.clone(), consolidated_amount);
         let tx = builder.build().map_err(WalletError::Build)?;
         let tx_binding = tx.tx_binding;
@@ -699,7 +708,7 @@ pub fn words_to_entropy(words: &[String]) -> Result<[u8; 32], WalletError> {
     }
     bits.zeroize();
     let expected_checksum = blake3::hash(&entropy).as_bytes()[0];
-    if checksum != expected_checksum {
+    if !crate::constant_time_eq(&[checksum], &[expected_checksum]) {
         entropy.zeroize();
         return Err(WalletError::Recovery("invalid mnemonic checksum".into()));
     }
