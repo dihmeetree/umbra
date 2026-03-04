@@ -115,7 +115,7 @@ pub fn import_snapshot_to_storage(
 
 /// The full blockchain state.
 ///
-/// # State growth (M8)
+/// # State growth
 ///
 /// The commitment tree and nullifier set grow monotonically. At depth 20 the
 /// commitment tree supports up to 2^20 ≈ 1M outputs. After that, a tree
@@ -138,7 +138,7 @@ pub struct ChainState {
     commitment_tree: IncrementalMerkleTree,
     /// Set of revealed nullifiers (spent outputs) — in-memory cache
     nullifiers: NullifierSet,
-    /// Optional sled-backed nullifier storage for scalability (F12).
+    /// Optional sled-backed nullifier storage for scalability.
     /// When present, new nullifiers are written to both memory and sled,
     /// and `is_spent()` falls back to sled for lookups.
     nullifier_storage: Option<sled::Tree>,
@@ -212,7 +212,7 @@ impl ChainState {
     /// Apply a finalized vertex to the state.
     ///
     /// Uses two-pass validation: first validates all transactions in parallel
-    /// using rayon (F14), then applies them sequentially. Creates a coinbase
+    /// using rayon, then applies them sequentially. Creates a coinbase
     /// output for the vertex proposer containing the block reward plus
     /// transaction fees.
     ///
