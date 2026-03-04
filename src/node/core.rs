@@ -1253,6 +1253,14 @@ impl Node {
                             } else {
                                 u64::MAX
                             };
+                            // After a restart, the DAG is rebuilt fresh (genesis-only)
+                            // while storage retains finalized vertices. In this case,
+                            // DAG parents are unavailable so we must use state-only
+                            // application (same as post-snapshot sync).
+                            let dag_behind = {
+                                let st = self.state.read().await;
+                                (st.ledger.dag.finalized_count() as u64) < our_finalized
+                            };
                             self.sync_rounds = 0;
                             self.sync_peer_last_claimed = 0;
                             self.sync_state = SyncState::Syncing {
@@ -1261,7 +1269,7 @@ impl Node {
                                 target: 0,
                                 target_epoch: peer_epoch,
                                 last_activity: Instant::now(),
-                                post_snapshot: false,
+                                post_snapshot: dag_behind,
                             };
                             let _ = self
                                 .p2p

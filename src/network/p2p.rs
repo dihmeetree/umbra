@@ -484,7 +484,7 @@ enum InternalEvent {
 
 impl P2pHandle {
     /// Create a handle from a raw sender (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fast-tests"))]
     pub fn from_sender(command_tx: mpsc::Sender<P2pCommand>) -> Self {
         P2pHandle { command_tx }
     }
