@@ -1045,9 +1045,7 @@ impl Wallet {
                     "encrypted wallet file truncated".into(),
                 ));
             }
-            let pw = password.ok_or_else(|| {
-                WalletError::Persistence("wallet file is encrypted; password required".into())
-            })?;
+            let pw = password.ok_or(WalletError::PasswordRequired)?;
             let salt: [u8; WALLET_SALT_SIZE] = raw[4..4 + WALLET_SALT_SIZE]
                 .try_into()
                 .map_err(|_| WalletError::Persistence("truncated salt".into()))?;
@@ -1135,6 +1133,8 @@ pub enum WalletError {
     NothingToConsolidate,
     #[error("recovery error: {0}")]
     Recovery(String),
+    #[error("wallet file is encrypted; password required")]
+    PasswordRequired,
 }
 
 #[cfg(test)]
@@ -2151,5 +2151,13 @@ mod tests {
         // Load with no password should fail
         let result = Wallet::load_from_file(&path, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_coins_utxo_sum_overflow() {
+        let half_plus = u64::MAX / 2 + 1;
+        let wallet = wallet_with_utxos(&[half_plus, half_plus]);
+        let err = wallet.select_coins(1000, 0).unwrap_err();
+        assert!(matches!(err, WalletError::ArithmeticOverflow));
     }
 }

@@ -7,70 +7,68 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{TxDirection, Wallet, WalletError};
 use crate::config::WalletTlsConfig;
 use crate::crypto::keys::PublicAddress;
 
-/// A password wrapper that zeroizes on drop to avoid leaving password
-/// material in heap memory after use.
-struct SecurePassword(Option<String>);
-
-impl Drop for SecurePassword {
-    fn drop(&mut self) {
-        if let Some(ref mut pw) = self.0 {
-            pw.zeroize();
-        }
-    }
-}
-
-impl SecurePassword {
-    fn as_deref(&self) -> Option<&str> {
-        self.0.as_deref()
-    }
+/// Extract `Option<&str>` from an `Option<Zeroizing<String>>`.
+fn pw_str(pw: &Option<Zeroizing<String>>) -> Option<&str> {
+    pw.as_ref().map(|s| s.as_str())
 }
 
 /// Prompt for an existing wallet password (hidden input).
 /// Returns None in non-interactive contexts (tests, piped input).
-fn prompt_password() -> SecurePassword {
+fn prompt_password() -> Option<Zeroizing<String>> {
+    if cfg!(test) {
+        return None;
+    }
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return SecurePassword(None);
+        return None;
     }
     match rpassword::read_password_from_tty(Some("Wallet password: ")) {
-        Ok(pw) if pw.is_empty() => SecurePassword(None),
-        Ok(pw) => SecurePassword(Some(pw)),
-        Err(_) => SecurePassword(None),
+        Ok(pw) if pw.is_empty() => None,
+        Ok(pw) => Some(Zeroizing::new(pw)),
+        Err(_) => None,
     }
 }
 
 /// Prompt for a new wallet password with confirmation (hidden input).
 /// Returns None in non-interactive contexts (tests, piped input).
-fn prompt_new_password() -> SecurePassword {
+fn prompt_new_password() -> Option<Zeroizing<String>> {
+    if cfg!(test) {
+        return None;
+    }
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return SecurePassword(None);
+        return None;
     }
-    let pw1 = match rpassword::read_password_from_tty(Some("Set wallet password: ")) {
+    let mut pw1 = match rpassword::read_password_from_tty(Some("Set wallet password: ")) {
         Ok(pw) => pw,
-        Err(_) => return SecurePassword(None),
+        Err(_) => return None,
     };
     if pw1.is_empty() {
+        pw1.zeroize();
         eprintln!("Warning: empty password, wallet will be stored unencrypted.");
-        return SecurePassword(None);
+        return None;
     }
     let mut pw2 = match rpassword::read_password_from_tty(Some("Confirm wallet password: ")) {
         Ok(pw) => pw,
-        Err(_) => return SecurePassword(None),
+        Err(_) => {
+            pw1.zeroize();
+            return None;
+        }
     };
     if pw1 != pw2 {
+        pw1.zeroize();
         pw2.zeroize();
         eprintln!("Error: passwords do not match.");
-        return SecurePassword(None);
+        return None;
     }
     pw2.zeroize();
-    SecurePassword(Some(pw1))
+    Some(Zeroizing::new(pw1))
 }
 
 /// Default wallet file name within data_dir.
@@ -236,7 +234,7 @@ pub fn cmd_init(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let wallet = Wallet::new();
     let pw = prompt_new_password();
-    wallet.save_to_file(&path, 0, pw.as_deref())?;
+    wallet.save_to_file(&path, 0, pw_str(&pw))?;
 
     // Also export address file
     let addr = wallet.address();
@@ -254,7 +252,7 @@ pub fn cmd_init(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 pub fn cmd_address(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (wallet, _) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (wallet, _) = Wallet::load_from_file(&path, pw_str(&pw))?;
     let addr = wallet.address();
     println!("Address ID: {}", hex::encode(&addr.address_id()[..16]));
     println!(
@@ -280,13 +278,13 @@ pub async fn cmd_balance(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw_str(&pw))?;
 
     // Scan for new vertices
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
     // Save updated wallet
-    wallet.save_to_file(&path, scanned_to, pw.as_deref())?;
+    wallet.save_to_file(&path, scanned_to, pw_str(&pw))?;
 
     println!("Balance: {} units", wallet.balance());
     println!(
@@ -306,11 +304,11 @@ pub async fn cmd_scan(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw_str(&pw))?;
 
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
 
-    wallet.save_to_file(&path, scanned_to, pw.as_deref())?;
+    wallet.save_to_file(&path, scanned_to, pw_str(&pw))?;
 
     println!("Scan complete. Scanned to sequence: {}", scanned_to);
     println!("Balance: {} units", wallet.balance());
@@ -335,7 +333,7 @@ pub async fn cmd_send(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw_str(&pw))?;
 
     // Scan chain first to have latest balance
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
@@ -364,7 +362,7 @@ pub async fn cmd_send(
     let result = client.submit_tx(&tx_hex).await?;
 
     // Save wallet (outputs now pending)
-    wallet.save_to_file(&path, scanned_to, pw.as_deref())?;
+    wallet.save_to_file(&path, scanned_to, pw_str(&pw))?;
 
     println!("Transaction submitted!");
     println!("TX ID: {}", result.tx_id);
@@ -382,7 +380,7 @@ pub async fn cmd_send(
 pub fn cmd_messages(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (wallet, _) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (wallet, _) = Wallet::load_from_file(&path, pw_str(&pw))?;
 
     let messages = wallet.received_messages();
     if messages.is_empty() {
@@ -405,7 +403,7 @@ pub fn cmd_messages(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 pub fn cmd_history(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (wallet, _) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (wallet, _) = Wallet::load_from_file(&path, pw_str(&pw))?;
 
     let history = wallet.history();
     if history.is_empty() {
@@ -444,7 +442,7 @@ pub async fn cmd_consolidate(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = wallet_path(data_dir);
     let pw = prompt_password();
-    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw.as_deref())?;
+    let (mut wallet, last_seq) = Wallet::load_from_file(&path, pw_str(&pw))?;
 
     // Scan chain first
     let scanned_to = scan_chain(&mut wallet, last_seq, rpc_addr, wallet_tls).await?;
@@ -469,7 +467,7 @@ pub async fn cmd_consolidate(
     let client = RpcClient::new_maybe_tls(rpc_addr, wallet_tls)?;
     let result = client.submit_tx(&tx_hex).await?;
 
-    wallet.save_to_file(&path, scanned_to, pw.as_deref())?;
+    wallet.save_to_file(&path, scanned_to, pw_str(&pw))?;
 
     println!("Consolidation submitted!");
     println!("TX ID: {}", result.tx_id);
@@ -492,7 +490,7 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
     // Prompt for password BEFORE writing any sensitive data to disk,
     // so a Ctrl+C abort doesn't leave unencrypted material on disk.
     let pw = prompt_new_password();
-    wallet.save_to_file(&path, 0, pw.as_deref())?;
+    wallet.save_to_file(&path, 0, pw_str(&pw))?;
 
     // Create recovery backup
     let (mut words, backup) = wallet.create_recovery_backup();
@@ -577,7 +575,7 @@ pub fn cmd_recover(data_dir: &Path, phrase: &str) -> Result<(), Box<dyn std::err
     let wallet = Wallet::recover_from_backup(&words, &backup)?;
     std::fs::create_dir_all(data_dir)?;
     let pw = prompt_new_password();
-    wallet.save_to_file(&path, 0, pw.as_deref())?;
+    wallet.save_to_file(&path, 0, pw_str(&pw))?;
 
     // Export address
     let addr = wallet.address();
@@ -595,7 +593,7 @@ pub fn cmd_recover(data_dir: &Path, phrase: &str) -> Result<(), Box<dyn std::err
 pub fn cmd_export(data_dir: &Path, file: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let wp = wallet_path(data_dir);
     let pw = prompt_password();
-    let (wallet, _) = Wallet::load_from_file(&wp, pw.as_deref())?;
+    let (wallet, _) = Wallet::load_from_file(&wp, pw_str(&pw))?;
     let addr = wallet.address();
     let addr_bytes = crate::serialize(&addr)?;
     let addr_hex = hex::encode(&addr_bytes);

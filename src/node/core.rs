@@ -1734,8 +1734,21 @@ impl Node {
                     if self.snapshot_manifests.len() >= MAX_MANIFEST_ENTRIES
                         && !self.snapshot_manifests.contains_key(&state_root)
                     {
-                        tracing::warn!("Snapshot manifest map full, ignoring new state_root");
-                        return;
+                        // Evict the entry with the fewest peer endorsements (lowest signal)
+                        // so that newly-seen roots are always considered.
+                        let evict = self
+                            .snapshot_manifests
+                            .iter()
+                            .min_by_key(|(_, v)| v.len())
+                            .map(|(&k, v)| (k, v.len()));
+                        if let Some((evict_root, evict_count)) = evict {
+                            tracing::warn!(
+                                evicted_root = hex::encode(&evict_root[..8]),
+                                evicted_count = evict_count,
+                                "Snapshot manifest map full, evicting lowest-signal entry"
+                            );
+                            self.snapshot_manifests.remove(&evict_root);
+                        }
                     }
                     let entry = self.snapshot_manifests.entry(state_root).or_default();
                     if !entry.iter().any(|(pid, _, _, _)| *pid == from) {
@@ -3001,11 +3014,47 @@ mod tests {
         // Drain the broadcast command
         let _ = cmd_rx.try_recv();
 
-        // Insert same tx again — should be a no-op (already in mempool)
+        // Clear seen_messages so the second delivery bypasses gossip dedup
+        // and actually reaches the mempool duplicate check.
+        node.seen_messages_current.clear();
+        node.seen_messages_prev.clear();
+
+        // Insert same tx again — mempool already has it, should be a no-op
         node.handle_message(from, Message::NewTransaction(tx)).await;
 
-        // No additional broadcast
+        // No additional broadcast (rejected by mempool duplicate check)
         assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_new_transaction_gossip_dedup() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(42);
+        let tx_id = tx.tx_id();
+        let from = Hash::default();
+
+        // First delivery: accepted and broadcast
+        node.handle_message(from, Message::NewTransaction(tx.clone()))
+            .await;
+        let s = state.read().await;
+        assert!(
+            s.mempool.contains(&tx_id),
+            "tx should be in mempool after first delivery"
+        );
+        drop(s);
+        assert!(cmd_rx.try_recv().is_ok(), "broadcast should have been sent");
+
+        // Second delivery of same tx: is_seen returns true, silently dropped
+        // before reaching mempool or broadcast
+        node.handle_message(from, Message::NewTransaction(tx)).await;
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no broadcast on gossip-deduped tx"
+        );
     }
 
     #[tokio::test]
@@ -3765,6 +3814,71 @@ mod tests {
             }
             _ => panic!("Expected SendTo with GetSnapshotChunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_snapshot_manifest_cap_evicts_low_signal() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+        node.sync_state = SyncState::NeedSync { our_finalized: 0 };
+
+        let chunk_size = crate::constants::SNAPSHOT_CHUNK_SIZE as u64;
+        let snapshot_size = chunk_size * 2;
+        let total_chunks = 2u32;
+
+        // Fill snapshot_manifests to MAX_MANIFEST_ENTRIES (256) distinct roots,
+        // each with exactly 1 peer endorsement.
+        const MAX_MANIFEST_ENTRIES: usize = 256;
+        for i in 0..MAX_MANIFEST_ENTRIES {
+            let mut meta = test_chain_state_meta(1);
+            // Each entry gets a unique state_root
+            meta.state_root = crate::hash_domain(b"test-root", &(i as u64).to_le_bytes());
+            let peer = crate::hash_domain(b"test-peer", &(i as u64).to_le_bytes());
+            node.handle_message(
+                peer,
+                Message::SnapshotManifest {
+                    meta,
+                    total_chunks,
+                    snapshot_size,
+                },
+            )
+            .await;
+        }
+        assert_eq!(
+            node.snapshot_manifests.len(),
+            MAX_MANIFEST_ENTRIES,
+            "should have exactly MAX_MANIFEST_ENTRIES entries"
+        );
+
+        // Now insert one more with a brand-new state_root. The eviction logic
+        // should remove the entry with the fewest peer endorsements (all have 1,
+        // so any one will be evicted) and accept the new entry.
+        let mut new_meta = test_chain_state_meta(2);
+        new_meta.state_root = crate::hash_domain(b"test-root-new", &[0xFF]);
+        let new_peer = crate::hash_domain(b"test-peer-new", &[0xFF]);
+        node.handle_message(
+            new_peer,
+            Message::SnapshotManifest {
+                meta: new_meta.clone(),
+                total_chunks,
+                snapshot_size,
+            },
+        )
+        .await;
+
+        // The new entry should be accepted
+        assert!(
+            node.snapshot_manifests.contains_key(&new_meta.state_root),
+            "new manifest entry should be present after eviction"
+        );
+        // Size should remain at MAX_MANIFEST_ENTRIES (one evicted, one added)
+        assert_eq!(
+            node.snapshot_manifests.len(),
+            MAX_MANIFEST_ENTRIES,
+            "map size should stay at MAX_MANIFEST_ENTRIES after eviction"
+        );
     }
 
     #[tokio::test]

@@ -3647,4 +3647,13 @@ mod tests {
         let second = ledger.apply_vertex_state_only(&genesis);
         assert!(second.unwrap().is_none());
     }
+
+    #[test]
+    fn add_commitment_rejects_duplicate() {
+        let mut state = ChainState::new();
+        let commitment = Commitment::commit(42, &BlindingFactor::from_bytes([7u8; 32]));
+        state.add_commitment(commitment).unwrap();
+        let err = state.add_commitment(commitment).unwrap_err();
+        assert!(matches!(err, StateError::DuplicateCommitment));
+    }
 }

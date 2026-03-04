@@ -570,10 +570,9 @@ fn subnet_prefix(ip: IpAddr) -> [u8; 2] {
         }
         IpAddr::V6(v6) => {
             let octets = v6.octets();
-            // Hash the first 6 bytes (/48 prefix) into 2 bytes.
-            let h = blake3::hash(&octets[..6]);
-            let hb = h.as_bytes();
-            [hb[0], hb[1]]
+            // Hash the first 6 bytes (/48 prefix) into 2 bytes using domain-separated hashing.
+            let h = crate::hash_domain(b"umbra.subnet_key", &octets[..6]);
+            [h[0], h[1]]
         }
     }
 }

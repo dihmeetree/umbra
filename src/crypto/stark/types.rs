@@ -55,8 +55,8 @@ impl BalancePublicInputs {
 /// Witness data for the balance proof (known only to prover).
 ///
 /// Debug is intentionally not derived to prevent accidental logging of secret values.
-/// Secret data is zeroed on drop via a manual `Drop` implementation using volatile
-/// writes to prevent compiler elision.
+/// Secret data is zeroed on drop via a manual `Drop` implementation using
+/// `write_volatile` and a compiler fence to guarantee zeroing writes are not elided.
 pub struct BalanceWitness {
     /// Input amounts
     pub input_values: Vec<u64>,
@@ -112,8 +112,8 @@ pub struct SpendPublicInputs {
 /// Witness data for the spend proof (known only to prover).
 ///
 /// Debug is intentionally not derived to prevent accidental logging of secret values.
-/// Secret data is zeroed on drop via a manual `Drop` implementation using volatile
-/// writes to prevent compiler elision.
+/// Secret data is zeroed on drop via a manual `Drop` implementation using
+/// `write_volatile` and a compiler fence to guarantee zeroing writes are not elided.
 pub struct SpendWitness {
     /// The spend authorization key (secret)
     pub spend_auth: [Felt; 4],
@@ -152,13 +152,24 @@ pub struct SpendStarkProof {
 
 // ── Zeroize helpers for Felt arrays ──
 
-/// Zero a `[Felt; 4]` array. Uses `black_box` to prevent the compiler from
-/// eliding the zeroing writes, without requiring `unsafe`.
+/// Zero a `[Felt; 4]` array. Uses `write_volatile` to perform each zeroing
+/// write as a volatile store, followed by a `compiler_fence(SeqCst)` to
+/// guarantee the writes are not elided or reordered by the compiler. This is
+/// the same strategy the `zeroize` crate uses internally and provides a
+/// hard guarantee unlike `black_box` which is documented as best-effort.
 fn zeroize_felt_array(arr: &mut [Felt; 4]) {
+    use std::sync::atomic::{compiler_fence, Ordering};
     for felt in arr.iter_mut() {
-        *felt = Felt::ZERO;
+        // SAFETY: `felt` is a valid, aligned, dereferenceable pointer to a `Felt`
+        // that we have exclusive (`&mut`) access to. `Felt` (Goldilocks
+        // `BaseElement`) is a `#[repr(transparent)]` wrapper around `u64` and
+        // is `Copy`, so writing `Felt::ZERO` is safe and does not drop the
+        // previous value.
+        unsafe {
+            std::ptr::write_volatile(felt as *mut Felt, Felt::ZERO);
+        }
     }
-    std::hint::black_box(arr);
+    compiler_fence(Ordering::SeqCst);
 }
 
 /// Zero all `[Felt; 4]` entries in a Vec, then clear the Vec.
