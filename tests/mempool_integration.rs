@@ -39,8 +39,8 @@ fn make_tx_with_inputs(seed: u8, num_inputs: usize) -> Transaction {
         let input_seed = [seed, i as u8];
         builder = builder.add_input(InputSpec {
             value: per_input,
-            blinding: BlindingFactor::from_bytes(hash_domain(b"test.blinding", &input_seed)),
-            spend_auth: hash_domain(b"test.spend_auth", &input_seed),
+            blinding: BlindingFactor::from_bytes(hash_domain(b"umbra.blinding", &input_seed)),
+            spend_auth: hash_domain(b"umbra.spend_auth", &input_seed),
             merkle_path: vec![],
         });
     }
@@ -70,7 +70,7 @@ fn make_tx_with_expiry(seed: u8, expiry: u64) -> Transaction {
         .add_input(InputSpec {
             value: input_value,
             blinding: BlindingFactor::from_bytes([seed; 32]),
-            spend_auth: hash_domain(b"test.spend_auth", &[seed]),
+            spend_auth: hash_domain(b"umbra.spend_auth", &[seed]),
             merkle_path: vec![],
         })
         .add_output(recipient.kem.public.clone(), input_value - fee)
