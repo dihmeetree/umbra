@@ -134,8 +134,12 @@ fn test_epoch_seed_deterministic() {
 fn test_committee_fallback_small_set() {
     let mut state = ChainState::new();
 
-    // Register fewer than MIN_COMMITTEE_SIZE validators
-    let count = constants::MIN_COMMITTEE_SIZE.min(4);
+    // Register strictly fewer than MIN_COMMITTEE_SIZE validators
+    let count = constants::MIN_COMMITTEE_SIZE.saturating_sub(1).min(4);
+    assert!(
+        count < constants::MIN_COMMITTEE_SIZE,
+        "test requires count < MIN_COMMITTEE_SIZE"
+    );
     for _ in 0..count {
         register_genesis_validator(&mut state);
     }

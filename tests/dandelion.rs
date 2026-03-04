@@ -49,13 +49,14 @@ fn make_test_tx(seed: u8) -> Transaction {
         .unwrap()
 }
 
-fn make_p2p_config(chain_id: umbra::Hash) -> P2pConfig {
+fn make_p2p_config(chain_id: umbra::Hash) -> (P2pConfig, umbra::Hash) {
     let signing = SigningKeypair::generate();
     let kem = KemKeypair::generate();
-    P2pConfig {
+    let peer_id = signing.public.fingerprint();
+    let config = P2pConfig {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         max_peers: 10,
-        our_peer_id: signing.public.fingerprint(),
+        our_peer_id: peer_id,
         our_public_key: signing.public.clone(),
         listen_port: 0,
         our_kem_keypair: kem,
@@ -63,7 +64,8 @@ fn make_p2p_config(chain_id: umbra::Hash) -> P2pConfig {
         external_addr: None,
         initial_bans: vec![],
         chain_id,
-    }
+    };
+    (config, peer_id)
 }
 
 async fn wait_for_peer_connected(
@@ -107,8 +109,8 @@ async fn test_transaction_propagation_between_peers() {
     // via the P2P layer (basic propagation, not Dandelion-specific).
     let chain_id = constants::chain_id();
 
-    let config_a = make_p2p_config(chain_id);
-    let config_b = make_p2p_config(chain_id);
+    let (config_a, _) = make_p2p_config(chain_id);
+    let (config_b, _) = make_p2p_config(chain_id);
 
     let result_a = p2p::start(config_a).await.unwrap();
     let result_b = p2p::start(config_b).await.unwrap();
@@ -146,9 +148,9 @@ async fn test_broadcast_reaches_all_peers() {
     // This tests the "fluff" phase behavior (all peers get the tx).
     let chain_id = constants::chain_id();
 
-    let config_a = make_p2p_config(chain_id);
-    let config_b = make_p2p_config(chain_id);
-    let config_c = make_p2p_config(chain_id);
+    let (config_a, _) = make_p2p_config(chain_id);
+    let (config_b, _) = make_p2p_config(chain_id);
+    let (config_c, _) = make_p2p_config(chain_id);
 
     let result_a = p2p::start(config_a).await.unwrap();
     let result_b = p2p::start(config_b).await.unwrap();
@@ -191,9 +193,9 @@ async fn test_unicast_reaches_only_target() {
     // This models stem-phase behavior (single peer relay).
     let chain_id = constants::chain_id();
 
-    let config_a = make_p2p_config(chain_id);
-    let config_b = make_p2p_config(chain_id);
-    let config_c = make_p2p_config(chain_id);
+    let (config_a, _) = make_p2p_config(chain_id);
+    let (config_b, expected_b_id) = make_p2p_config(chain_id);
+    let (config_c, _) = make_p2p_config(chain_id);
 
     let result_a = p2p::start(config_a).await.unwrap();
     let result_b = p2p::start(config_b).await.unwrap();
@@ -206,8 +208,11 @@ async fn test_unicast_reaches_only_target() {
     result_a.handle.connect(result_b.local_addr).await.unwrap();
     result_a.handle.connect(result_c.local_addr).await.unwrap();
 
-    let peer_b_id = wait_for_peer_connected(&mut events_a).await.unwrap();
-    wait_for_peer_connected(&mut events_a).await; // C connected
+    // Consume both PeerConnected events and deterministically identify B
+    let id1 = wait_for_peer_connected(&mut events_a).await.unwrap();
+    let id2 = wait_for_peer_connected(&mut events_a).await.unwrap();
+    let peer_b_id = if id1 == expected_b_id { id1 } else { id2 };
+    assert_eq!(peer_b_id, expected_b_id, "should identify B's peer ID");
     wait_for_peer_connected(&mut events_b).await;
     wait_for_peer_connected(&mut events_c).await;
 
@@ -240,8 +245,8 @@ async fn test_transaction_message_integrity() {
     // Verify the encrypted P2P transport preserves transaction integrity
     let chain_id = constants::chain_id();
 
-    let config_a = make_p2p_config(chain_id);
-    let config_b = make_p2p_config(chain_id);
+    let (config_a, _) = make_p2p_config(chain_id);
+    let (config_b, _) = make_p2p_config(chain_id);
 
     let result_a = p2p::start(config_a).await.unwrap();
     let result_b = p2p::start(config_b).await.unwrap();

@@ -85,6 +85,7 @@ fn test_bft_vote_wrong_chain_id() {
     );
 
     // Correct chain_id votes form a certificate
+    let mut cert = None;
     for i in 0..3 {
         let sign_data = vote_sign_data(
             &vertex_id,
@@ -103,8 +104,14 @@ fn test_bft_vote_wrong_chain_id() {
             signature: sig,
             vrf_proof: None,
         };
-        let _ = mainnet_bft.receive_vote(vote);
+        if let Some(c) = mainnet_bft.receive_vote(vote) {
+            cert = Some(c);
+        }
     }
+    assert!(
+        cert.is_some(),
+        "3 correct-chain votes should produce a certificate"
+    );
 }
 
 #[test]

@@ -210,17 +210,15 @@ fn test_wallet_change_output_tracking() {
     let bob = FullKeypair::generate();
     let send_amount = 1000u64;
 
-    let result =
-        alice.build_transaction_with_state(&bob.kem.public, send_amount, None, Some(&state));
+    let tx = alice
+        .build_transaction_with_state(&bob.kem.public, send_amount, None, Some(&state))
+        .expect("build_transaction_with_state should succeed with funded wallet");
 
-    if let Ok(tx) = result {
-        // Alice should have 2 outputs: one for Bob, one change for herself
-        assert!(
-            tx.outputs.len() >= 2,
-            "tx should have at least 2 outputs (recipient + change)"
-        );
-    }
-    // If build fails (not enough confirmed outputs), that's also valid
+    // Alice should have 2 outputs: one for Bob, one change for herself
+    assert!(
+        tx.outputs.len() >= 2,
+        "tx should have at least 2 outputs (recipient + change)"
+    );
 }
 
 // ── Group B: Medium tests (1 STARK proof) ────────────────────────────────
@@ -245,15 +243,9 @@ fn test_wallet_send_and_scan_recipient() {
     let mut bob = Wallet::new();
     let send_amount = 1000u64;
 
-    let tx = match alice.build_transaction_with_state(
-        bob.kem_public_key(),
-        send_amount,
-        None,
-        Some(&state),
-    ) {
-        Ok(tx) => tx,
-        Err(_) => return, // Not enough confirmed outputs — skip
-    };
+    let tx = alice
+        .build_transaction_with_state(bob.kem_public_key(), send_amount, None, Some(&state))
+        .expect("build_transaction_with_state should succeed with funded wallet");
 
     // Create vertex and apply
     let genesis_id = VertexId([0u8; 32]);
@@ -290,15 +282,14 @@ fn test_wallet_encrypted_message_scan() {
     let mut bob = Wallet::new();
     let message = b"Hello from Alice".to_vec();
 
-    let tx = match alice.build_transaction_with_state(
-        bob.kem_public_key(),
-        1000,
-        Some(message.clone()),
-        Some(&state),
-    ) {
-        Ok(tx) => tx,
-        Err(_) => return, // Not enough confirmed outputs — skip
-    };
+    let tx = alice
+        .build_transaction_with_state(
+            bob.kem_public_key(),
+            1000,
+            Some(message.clone()),
+            Some(&state),
+        )
+        .expect("build_transaction_with_state should succeed with funded wallet");
 
     // Bob scans and checks messages
     bob.scan_transaction_with_state(&tx, Some(&state));

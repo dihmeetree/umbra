@@ -263,12 +263,18 @@ async fn test_broadcast() {
         .await
         .unwrap();
 
-    // Both B and C should receive it
+    // Both B and C should receive GetTips
     let msg_b = wait_for_message(&mut events_b).await;
     let msg_c = wait_for_message(&mut events_c).await;
 
-    assert!(msg_b.is_some(), "B should receive broadcast");
-    assert!(msg_c.is_some(), "C should receive broadcast");
+    assert!(
+        matches!(msg_b.as_deref(), Some(Message::GetTips)),
+        "B should receive GetTips broadcast"
+    );
+    assert!(
+        matches!(msg_c.as_deref(), Some(Message::GetTips)),
+        "C should receive GetTips broadcast"
+    );
 
     result_a.handle.shutdown().await.ok();
     result_b.handle.shutdown().await.ok();
