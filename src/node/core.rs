@@ -110,6 +110,16 @@ impl NodeState {
         self.ledger.state.total_validators()
     }
 
+    /// IDs of all active validators.
+    pub fn active_validator_ids(&self) -> Vec<Hash> {
+        self.ledger
+            .state
+            .active_validators()
+            .iter()
+            .map(|v| v.id)
+            .collect()
+    }
+
     /// Current mempool size (pending transaction count).
     pub fn mempool_len(&self) -> usize {
         self.mempool.len()
@@ -418,6 +428,7 @@ impl Node {
 
         // Genesis validator bootstrap
         let mut our_vrf_output = None;
+        let restored_finalized = storage.finalized_vertex_count()?;
         if config.genesis_validator {
             let validator = Validator::with_kem(
                 config.keypair.public.clone(),
@@ -452,62 +463,82 @@ impl Node {
                 tracing::info!(epoch = 0, "Not selected for committee");
             }
 
-            // Store genesis vertex in finalized index (sequence 0)
-            // so that subsequent finalized vertices start at index 1.
-            let genesis_vid = crate::consensus::dag::Dag::genesis_vertex_for_network(network).id;
-            storage
-                .put_finalized_vertex_index(0, &genesis_vid)
-                .unwrap_or_else(
-                    |e| tracing::warn!(error = %e, "Failed to persist genesis vertex index"),
-                );
+            if restored_finalized == 0 {
+                // Fresh start: set up genesis vertex, coinbase, and storage
+                let genesis_vid =
+                    crate::consensus::dag::Dag::genesis_vertex_for_network(network).id;
+                storage
+                    .put_finalized_vertex_index(0, &genesis_vid)
+                    .unwrap_or_else(
+                        |e| tracing::warn!(error = %e, "Failed to persist genesis vertex index"),
+                    );
 
-            // Create genesis coinbase (initial coin distribution)
-            if let Some(genesis_cb) = ledger
-                .state
-                .create_genesis_coinbase(&config.kem_keypair.public)
-            {
-                storage.put_coinbase_output(0, &genesis_cb).unwrap_or_else(
-                    |e| tracing::warn!(error = %e, "Failed to persist genesis coinbase"),
-                );
-                tracing::info!(
-                    amount = crate::constants::GENESIS_MINT,
-                    "Genesis coinbase minted"
-                );
-            }
-
-            // Persist validator to storage
-            storage
-                .put_validator(
-                    &Validator::with_kem(
-                        config.keypair.public.clone(),
-                        config.kem_keypair.public.clone(),
-                    ),
-                    crate::constants::VALIDATOR_BASE_BOND,
-                    false,
-                )
-                .unwrap_or_else(|e| tracing::warn!(error = %e, "Failed to persist validator"));
-
-            // Persist commitment tree nodes from genesis coinbase
-            for level in 0..=MERKLE_DEPTH {
-                for idx in 0..ledger.state.commitment_tree_level_len(level) {
-                    let hash = ledger.state.commitment_tree_node(level, idx);
-                    let _ = storage.put_commitment_level(level, idx, &hash);
+                if let Some(genesis_cb) = ledger
+                    .state
+                    .create_genesis_coinbase(&config.kem_keypair.public)
+                {
+                    storage.put_coinbase_output(0, &genesis_cb).unwrap_or_else(
+                        |e| tracing::warn!(error = %e, "Failed to persist genesis coinbase"),
+                    );
+                    tracing::info!(
+                        amount = crate::constants::GENESIS_MINT,
+                        "Genesis coinbase minted"
+                    );
                 }
+
+                storage
+                    .put_validator(
+                        &Validator::with_kem(
+                            config.keypair.public.clone(),
+                            config.kem_keypair.public.clone(),
+                        ),
+                        crate::constants::VALIDATOR_BASE_BOND,
+                        false,
+                    )
+                    .unwrap_or_else(|e| tracing::warn!(error = %e, "Failed to persist validator"));
+
+                for level in 0..=MERKLE_DEPTH {
+                    for idx in 0..ledger.state.commitment_tree_level_len(level) {
+                        let hash = ledger.state.commitment_tree_node(level, idx);
+                        let _ = storage.put_commitment_level(level, idx, &hash);
+                    }
+                }
+
+                let fc = storage.finalized_vertex_count().unwrap_or(0);
+                let meta = ledger.state.to_chain_state_meta(fc);
+                let _ = storage.put_chain_state_meta(&meta);
+                let _ = storage.flush();
+
+                // Advance past genesis round 0
+                bft.advance_round();
+                ledger.dag.advance_round();
+
+                tracing::info!("Registered as genesis validator (fresh start)");
+            } else {
+                // Restored from storage: advance BFT/DAG rounds past the
+                // highest finalized vertex's round so new proposals are valid.
+                // Rounds can advance without finalization, so we derive the
+                // target from the actual vertex round, not the finalized count.
+                let target_round = if restored_finalized > 0 {
+                    let last_vertices = storage
+                        .get_finalized_vertices_after(restored_finalized.saturating_sub(1), 1)?;
+                    last_vertices
+                        .last()
+                        .map(|(_, v)| v.round + 1)
+                        .unwrap_or(restored_finalized + 1)
+                } else {
+                    1
+                };
+                for _ in 0..target_round {
+                    bft.advance_round();
+                    ledger.dag.advance_round();
+                }
+                tracing::info!(
+                    restored_finalized = restored_finalized,
+                    round = target_round,
+                    "Resumed genesis validator from storage"
+                );
             }
-
-            // Persist chain state meta after genesis setup
-            let fc = storage.finalized_vertex_count().unwrap_or(0);
-            let meta = ledger.state.to_chain_state_meta(fc);
-            let _ = storage.put_chain_state_meta(&meta);
-            let _ = storage.flush();
-
-            // Advance BFT and DAG rounds past genesis (round 0 is settled).
-            // This allows the first vertex proposal at round 1 to be accepted
-            // by receive_vote (which checks vote.round == bft.round).
-            bft.advance_round();
-            ledger.dag.advance_round();
-
-            tracing::info!("Registered as genesis validator");
         }
 
         // Record our finalized count before storage is moved into NodeState
