@@ -35,6 +35,10 @@ const SEEN_MESSAGES_CAPACITY: usize = 10_000;
 /// Maximum number of sync batch rounds before giving up on the current peer.
 const MAX_SYNC_ROUNDS: u64 = 1000;
 
+/// Maximum number of distinct state_root entries in the snapshot manifest map
+/// to prevent memory exhaustion from many unique manifests during sync.
+const MAX_MANIFEST_ENTRIES: usize = 256;
+
 /// Shared node state accessible from RPC handlers.
 pub struct NodeState {
     pub ledger: Ledger,
@@ -1728,9 +1732,6 @@ impl Node {
                     // Require SNAPSHOT_QUORUM peers to agree on the same state_root
                     // before trusting a snapshot manifest and downloading it.
                     let state_root = meta.state_root;
-                    // Cap the number of distinct state_root entries to prevent
-                    // memory exhaustion from many unique manifests during sync.
-                    const MAX_MANIFEST_ENTRIES: usize = 256;
                     if self.snapshot_manifests.len() >= MAX_MANIFEST_ENTRIES
                         && !self.snapshot_manifests.contains_key(&state_root)
                     {
@@ -3830,7 +3831,6 @@ mod tests {
 
         // Fill snapshot_manifests to MAX_MANIFEST_ENTRIES (256) distinct roots,
         // each with exactly 1 peer endorsement.
-        const MAX_MANIFEST_ENTRIES: usize = 256;
         for i in 0..MAX_MANIFEST_ENTRIES {
             let mut meta = test_chain_state_meta(1);
             // Each entry gets a unique state_root

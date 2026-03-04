@@ -137,12 +137,11 @@ impl WalletWebState {
     }
 
     /// Set the wallet password (for unlock and init flows).
-    /// The password is wrapped in `Arc<Zeroizing<String>>` so only Arc clones
-    /// occur at use sites, and the underlying bytes are wiped when the last
-    /// reference is dropped.
-    async fn set_password(&self, password: Option<String>) {
+    /// Accepts `Arc<Zeroizing<String>>` directly so callers never create
+    /// plaintext copies — only Arc clones occur at use sites.
+    async fn set_password(&self, password: Option<Arc<Zeroizing<String>>>) {
         let mut pw = self.wallet_password.write().await;
-        *pw = password.map(|p| Arc::new(Zeroizing::new(p)));
+        *pw = password;
     }
 
     /// Invalidate the cache (after external changes).
@@ -457,7 +456,9 @@ async fn init_action(
 
     // Validate password confirmation
     match (&raw_pw, &raw_confirm) {
-        (Some(pw), Some(confirm)) if pw != confirm => {
+        (Some(pw), Some(confirm))
+            if !crate::constant_time_eq(pw.as_bytes(), confirm.as_bytes()) =>
+        {
             return InitTemplate {
                 active_tab: "",
                 flash_error: Some("Passwords do not match.".into()),
@@ -508,9 +509,7 @@ async fn init_action(
     };
 
     // Store password in session state for subsequent load/save operations
-    state
-        .set_password(password.as_ref().map(|p| p.as_str().to_owned()))
-        .await;
+    state.set_password(password.clone()).await;
 
     // Export address file
     let addr = wallet.address();
@@ -568,9 +567,7 @@ async fn unlock_action(
     match result {
         Ok(Ok(_)) => {
             // Password works -- store it and invalidate cache so next load uses it
-            state
-                .set_password(password.as_ref().map(|p| p.as_str().to_owned()))
-                .await;
+            state.set_password(password.clone()).await;
             state.invalidate_cache().await;
             Redirect::to("/").into_response()
         }
