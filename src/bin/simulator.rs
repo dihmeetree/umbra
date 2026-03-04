@@ -821,10 +821,10 @@ async fn async_main() {
                         initial_count
                     );
                     println!("    (snapshot sync requires multi-step handshake; may need longer network lifetime)");
-                    results.push(TestResult::pass(
-                        "State Sync: node initialized",
+                    results.push(TestResult::fail(
+                        "State Sync: node sync progress",
                         &format!(
-                            "node started but snapshot sync incomplete ({}/{} in 30s, initial={}, known limitation)",
+                            "no progress after 30s ({}/{} vertices, initial={})",
                             final_count, reference_count, initial_count
                         ),
                     ));
@@ -2359,8 +2359,14 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
             commitment_counts.push(s.commitment_count());
         }
 
-        // All nodes should agree on epoch
-        let majority_epoch = epochs[0];
+        // All nodes should agree on epoch — use statistical mode as reference
+        let majority_epoch = {
+            let mut counts = std::collections::HashMap::new();
+            for &e in &epochs {
+                *counts.entry(e).or_insert(0u32) += 1;
+            }
+            counts.into_iter().max_by_key(|&(_, c)| c).unwrap().0
+        };
         let epoch_mismatch: Vec<_> = epochs
             .iter()
             .enumerate()
@@ -2380,7 +2386,7 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
             results.push(TestResult::fail(
                 "Epoch State",
                 &format!(
-                    "epoch mismatch: expected {}, divergent: {}",
+                    "epoch mismatch: majority={}, divergent: {}",
                     majority_epoch,
                     epoch_mismatch.join(", ")
                 ),
