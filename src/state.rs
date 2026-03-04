@@ -616,13 +616,15 @@ impl ChainState {
                 if let Some(existing) = self.validators.get_mut(&vid) {
                     // Re-registration of a previously deregistered validator
                     existing.active = true;
-                    existing.activation_epoch = self.epoch + 1;
+                    existing.activation_epoch =
+                        self.epoch + crate::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS;
                     existing.kem_public_key = Some(kem_public_key.clone());
                 } else {
                     // New registration
                     let mut validator =
                         Validator::with_kem(signing_key.clone(), kem_public_key.clone());
-                    validator.activation_epoch = self.epoch + 1;
+                    validator.activation_epoch =
+                        self.epoch + crate::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS;
                     self.register_validator(validator)?;
                 }
 
@@ -1061,9 +1063,11 @@ impl ChainState {
         BlindingFactor::from_bytes(hash)
     }
 
-    /// Encode coinbase note data (same 40-byte format as transaction builder).
+    /// Encode coinbase note data (same 41-byte format as transaction builder).
     fn encode_coinbase_note(value: u64, blinding: &BlindingFactor) -> Vec<u8> {
-        let mut data = Vec::with_capacity(40);
+        // Note format: [1-byte version][8-byte LE value][32-byte blinding]
+        let mut data = Vec::with_capacity(41);
+        data.push(1u8); // NOTE_VERSION
         data.extend_from_slice(&value.to_le_bytes());
         data.extend_from_slice(&blinding.0);
         data
@@ -1652,7 +1656,8 @@ mod tests {
         let commitment = Commitment::commit(100, &blinding);
         let stealth_result =
             crate::crypto::stealth::StealthAddress::generate(&recipient.kem.public, 0).unwrap();
-        let note_data = vec![0u8; 40];
+        let mut note_data = vec![0u8; 41];
+        note_data[0] = 1u8; // NOTE_VERSION
         let encrypted_note =
             crate::crypto::encryption::EncryptedPayload::encrypt_with_shared_secret(
                 &stealth_result.shared_secret,
@@ -2322,8 +2327,10 @@ mod tests {
     fn eligible_validators_respects_activation_epoch() {
         let mut state = ChainState::new();
 
-        // Register a validator at epoch 0 with activation_epoch = 1
-        // (simulating what apply_transaction_unchecked does: activation_epoch = self.epoch + 1)
+        // Register a validator directly with activation_epoch = 1 to test the
+        // eligible_validators filter in isolation. Note: apply_transaction_unchecked
+        // now sets activation_epoch = epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS (2),
+        // not epoch + 1; this test exercises the filter logic with a hand-crafted value.
         let val_kp = SigningKeypair::generate();
         let val_kem = KemKeypair::generate();
         let mut validator = Validator::with_kem(val_kp.public.clone(), val_kem.public.clone());
@@ -2350,6 +2357,90 @@ mod tests {
         assert!(
             eligible_5.iter().any(|v| v.id == vid),
             "validator with activation_epoch=1 SHOULD be eligible at epoch 5"
+        );
+    }
+
+    #[test]
+    fn registration_timing_attack_prevented() {
+        // Verifies that apply_transaction_unchecked sets activation_epoch to
+        // epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS (currently 2), so a validator
+        // registered in epoch N cannot join the committee until epoch N+2.
+        // This prevents the registration-timing attack: an attacker cannot register
+        // validators just before a target epoch to temporarily spike their alpha.
+        //
+        // This test exercises the real apply_transaction_unchecked code path —
+        // not the genesis helper — so a regression in that path will be caught.
+        use crate::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS;
+        use crate::crypto::stark::types::BalanceStarkProof;
+        use crate::transaction::TxType;
+
+        let val_kp = SigningKeypair::generate();
+        let val_kem = KemKeypair::generate();
+        let vid = val_kp.public.fingerprint();
+
+        // Build a minimal ValidatorRegister transaction.
+        // apply_transaction_unchecked does not verify STARK proofs, so empty
+        // proof bytes are sufficient. Fee must be >= bond(0) + MIN_TX_FEE.
+        let bond = crate::constants::required_validator_bond(0);
+        let fee = bond + crate::constants::MIN_TX_FEE;
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            fee,
+            chain_id: [0u8; 32],
+            expiry_epoch: 0,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+            tx_type: TxType::ValidatorRegister {
+                signing_key: val_kp.public.clone(),
+                kem_public_key: val_kem.public.clone(),
+            },
+        };
+
+        let mut state = ChainState::new();
+        state
+            .apply_transaction_unchecked(&tx)
+            .expect("ValidatorRegister must succeed");
+
+        // Confirm that apply_transaction_unchecked set the delay, not a
+        // hard-coded value.
+        let registered = state
+            .validators
+            .get(&vid)
+            .expect("validator must be in state after registration");
+        assert_eq!(
+            registered.activation_epoch,
+            state.epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS,
+            "activation_epoch must be state.epoch + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS"
+        );
+
+        // Not eligible at epoch 0 (just registered, delay = 2)
+        assert!(
+            !state.eligible_validators(0).iter().any(|v| v.id == vid),
+            "validator registered at epoch 0 must not be eligible at epoch 0"
+        );
+        // Not eligible at epoch 1 (one epoch elapsed, delay is 2)
+        assert!(
+            !state.eligible_validators(1).iter().any(|v| v.id == vid),
+            "validator registered at epoch 0 must not be eligible at epoch 1"
+        );
+        // Eligible at epoch COMMITTEE_ELIGIBILITY_DELAY_EPOCHS
+        assert!(
+            state
+                .eligible_validators(COMMITTEE_ELIGIBILITY_DELAY_EPOCHS)
+                .iter()
+                .any(|v| v.id == vid),
+            "validator registered at epoch 0 SHOULD be eligible at epoch {}",
+            COMMITTEE_ELIGIBILITY_DELAY_EPOCHS
+        );
+        // Still eligible later
+        assert!(
+            state.eligible_validators(10).iter().any(|v| v.id == vid),
+            "validator should remain eligible well after activation epoch"
         );
     }
 

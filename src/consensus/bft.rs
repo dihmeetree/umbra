@@ -67,7 +67,7 @@ pub struct Validator {
     /// Whether currently active (bonded)
     pub active: bool,
     /// Epoch in which this validator becomes eligible for committee selection.
-    /// Validators registered in epoch N have activation_epoch = N+1.
+    /// Validators registered in epoch N have activation_epoch = N + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS.
     /// Genesis validators have activation_epoch = 0.
     #[serde(default)]
     pub activation_epoch: u64,

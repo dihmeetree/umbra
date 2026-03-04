@@ -9,6 +9,17 @@ Umbra is a post-quantum private cryptocurrency with zk-STARKs and DAG-BFT consen
 > This project is under active development and is considered experimental. Features may change, and not all functionality is production-ready.
 > If you discover bugs, security vulnerabilities, or have feature requests, please open an issue on [GitHub](https://github.com/dihmeetree/umbra/issues).
 
+## Documentation
+
+| Document | Description |
+|---|---|
+| [Protocol Specification](docs/protocol-spec.md) | Wire-level data structures, transaction lifecycle, DAG-BFT protocol, state transitions, RPC API |
+| [Consensus Model](docs/consensus-model.md) | Formal PoVP consensus specification, epoch seed construction, committee capture probability analysis |
+| [Adversary Model](docs/adversary-model.md) | Adversary assumptions and trust boundaries for consensus, network, cryptographic, and privacy layers |
+| [Privacy Threat Model](docs/privacy-threat-model.md) | Privacy goals, on-chain visibility analysis, sender/receiver/amount privacy, network-layer privacy |
+| [Cryptographic Constructions](docs/cryptographic-constructions.md) | All primitives with parameters, STARK circuit layouts, session key protocol, domain separation registry |
+| [Testnet Guide](docs/testnet.md) | Validator setup, wallet usage, Docker deployment, monitoring, and troubleshooting |
+
 ## Key Features
 
 ### Full Zero-Knowledge Privacy
@@ -55,13 +66,16 @@ A novel consensus mechanism that is **neither Proof of Work nor Proof of Stake**
 
 ```
 Epoch N:
-  1. epoch_seed = H(previous_epoch_final_state)
+  // Seed for epoch N is derived from epoch N-1's finalized data:
+  1. bft_mix    = H(VRF proof commitments from votes in epoch N-1)  // commit-reveal, anti-grinding
+     dag_mix    = H(VRF output values from finalized vertices in epoch N-1)  // no last-revealer
+     epoch_seed = H("umbra.epoch.combined_mix" || bft_mix || dag_mix)
   2. Each validator evaluates VRF(key, epoch_seed)
-  3. Validators below threshold join the committee
+  3. Validators passing the membership test join the epoch N committee
   4. Committee members propose vertices containing transactions
   5. Vertices reference 1..8 parent vertices (forming the DAG)
   6. Committee runs BFT: 2/3+1 votes = instant finality
-  7. After 1000 vertices, rotate to epoch N+1
+  7. After 1000 vertices, derive epoch_seed_{N+1} from epoch N's data and rotate
 ```
 
 **Why not PoW?** No energy waste. No mining hardware arms race. Instant finality instead of probabilistic.
@@ -149,7 +163,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **1149 tests**.
+**~35,000 lines of Rust** across 45 source files with **1175 tests**.
 
 ## Building
 
@@ -507,7 +521,7 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 - **Active consensus participation** — when selected for the committee via VRF, the node proposes vertices (draining high-fee transactions from the mempool) and casts BFT votes on incoming vertices
 - **Liveness guarantee** — vertices are proposed even when the mempool is empty, ensuring epoch advancement and coinbase emission regardless of transaction volume
 - **Two-phase vertex flow** — vertices are first inserted into the DAG (unfinalized), then finalized after receiving a BFT quorum certificate. Finalization applies transactions to state, creates a coinbase output for the proposer, purges conflicting mempool entries, persists to storage, and slashes equivocators
-- **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances with a new VRF seed derived from the state root. Newly registered validators activate in the next epoch (activation delay prevents mid-epoch committee manipulation)
+- **Epoch management** — after `EPOCH_LENGTH` finalized vertices, the epoch advances. The new VRF seed combines two independent entropy sources: BFT-layer VRF proof commitments from votes (commit-reveal, anti-grinding) and proposer VRF output values from finalized DAG vertices (deterministic once finalized, no last-revealer problem). Newly registered validators must wait `COMMITTEE_ELIGIBILITY_DELAY_EPOCHS` (2) epochs before becoming committee-eligible, preventing registration-timing attacks
 - **State persistence** — every finalized vertex persists its transactions, nullifiers, Merkle tree nodes, finalized index, coinbase output, validators, and a `ChainStateMeta` snapshot to storage, then flushes. On restart the full chain state (Merkle tree, nullifier set, validators, epoch state, total minted) is restored from the snapshot
 - **Graceful shutdown** — accepts a `CancellationToken`; Ctrl-C triggers clean shutdown (flush storage, shutdown P2P, log exit)
 - **Dandelion++ transaction relay** — new transactions enter a stem phase (forwarded to one random peer for `DANDELION_STEM_HOPS` hops), then fluff (broadcast to all) after hops exhaust or `DANDELION_TIMEOUT_MS` expires, providing sender anonymity
@@ -525,13 +539,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (1149 tests)
+cargo test                       # Full suite (1175 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1149 tests cover:
+All 1175 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -849,6 +863,7 @@ All transaction validity is verified via zk-STARKs:
 - **Vertex signature verification** — every DAG vertex must carry a valid hybrid signature (Dilithium5 + SPHINCS+) from its proposer; unsigned vertices are rejected at insertion time
 - **Full transaction validation on apply** — `apply_transaction()` calls `validate_structure()` before any state mutation, verifying all zk-STARK proofs (balance + spend) and structural integrity
 - **VRF anti-grinding** — VRF outputs include a `proof_commitment` (hash of the proof) enabling a commit-reveal scheme that prevents validators from grinding on epoch seeds
+- **Two-layer epoch seed** — the epoch VRF seed combines BFT-layer VRF proof commitments from votes (`bft_mix`, commit-reveal anti-grinding) with proposer VRF output values aggregated from finalized DAG vertices (`dag_mix`). DAG vertex values are deterministic once finalized, so there is no last-revealer problem; the combined seed `H("umbra.epoch.combined_mix" || bft_mix || dag_mix)` requires an attacker to corrupt both independent layers simultaneously
 - **Plaintext size limits** — `encrypt_with_shared_secret` rejects plaintexts exceeding `MAX_ENCRYPT_PLAINTEXT`, preventing memory exhaustion attacks
 - **Secure memory clearing** — all secret key material (`SigningSecretKey`, `KemSecretKey`, `SharedSecret`, `BlindingFactor`, `StealthSpendInfo`, `BalanceWitness`, `SpendWitness`) is zeroized on drop via the `zeroize` crate and volatile writes; derived AEAD keys are explicitly zeroized after use
 - **Vote round validation** — BFT `receive_vote()` rejects votes for rounds other than the current round, preventing future-round injection attacks
@@ -900,7 +915,7 @@ All transaction validity is verified via zk-STARKs:
 - **Sync timeout and peer cooldown** — sync requests that receive no response within `SYNC_REQUEST_TIMEOUT_MS` trigger a fallback to another peer; failed peers are placed on a 60-second cooldown to prevent retry storms
 - **Fork resolution / view change** — if no vertex is finalized for a configurable timeout or peers report rounds significantly ahead, the node proactively requests tips and missing vertices to rejoin consensus
 - **P2P network isolation** — the Hello handshake includes `chain_id`, validated with constant-time comparison; peers on different networks (testnet vs mainnet) are rejected immediately, preventing cross-network state pollution
-- **Epoch committee activation delay** — newly registered validators only become eligible for committee selection in the epoch after registration, preventing mid-epoch committee manipulation
+- **Registration timing attack mitigation** — validators must wait `COMMITTEE_ELIGIBILITY_DELAY_EPOCHS` (2) full epochs after registration before becoming committee-eligible. A 1-epoch delay is insufficient because an attacker could register just before a target epoch, transiently spike their committee fraction α, then deregister. The 2-epoch delay ensures the registration is visible for a full epoch before any eligibility is granted
 - **Mempool expiry eviction** — transactions past their `expiry_epoch` are periodically removed from the mempool, preventing stale transaction accumulation
 - **Liveness guarantee** — empty vertices (no transactions) are proposed when the mempool is empty, ensuring epochs advance and coinbase emission continues
 - **Inbound connection timeout** — P2P inbound handshakes are wrapped in a configurable timeout (`PEER_CONNECT_TIMEOUT_MS`), preventing slowloris-style connection exhaustion
@@ -998,13 +1013,28 @@ All transaction validity is verified via zk-STARKs:
 - **Merkle depth validation** — `compute_merkle_root_checked` validates that path length equals `MERKLE_DEPTH` before computing, preventing silent root computation with incorrect path lengths; debug assertions guard `pad_merkle_path`, `canonical_root`, and `build_merkle_tree` sibling skip against invariant violations
 - **Incremental Merkle restore consistency** — `IncrementalMerkleTree::restore()` recomputes parent nodes from leaves upward and repairs any inconsistencies, preventing corrupted storage data from silently propagating into the live tree
 - **Fast-tests signature validation** — `Signature::is_valid_size` under `fast-tests` requires both Dilithium and SPHINCS+ components to be empty or present, preventing acceptance of half-populated test signatures
+- **Ban expiry safety** — `checked_duration_since` replaces `duration_since` when computing ban remainders, eliminating a panic if the ban timestamp expires between the guard check and duration computation
+- **Snapshot Sybil resistance** — `SNAPSHOT_QUORUM` raised from 2 to 3 and `snapshot_manifests` capped at `MAX_SNAPSHOT_MANIFEST_ROOTS = 16` entries, requiring more peer agreement and bounding memory use from Sybil peers sending unique state roots
+- **Sync dedup cleared on completion** — `clear_sync_dedup()` is now called when vertex sync completes, freeing the deduplication set that previously grew unbounded for the node lifetime
+- **Constant-time peer identity** — peer_id vs public key fingerprint comparisons in both inbound and outbound handshake paths now use `constant_time_eq`, consistent with all other identity comparisons
+- **View-change rate limiting** — `last_finalized_time` is reset after advancing the BFT round on staleness detection, preventing rapid repeated round advancement when the leader is unresponsive
+- **Mempool recovery on vertex failure** — transactions drained from the mempool before vertex insertion are returned to the mempool if insertion fails, preventing silent loss of pending transactions
+- **Bond return output binding** — `hash_tx_type_into` for `ValidatorDeregister` now includes `kem_ciphertext` and `encrypted_note` fields of the bond return output in the content hash, closing a narrow malleability window for encrypted note substitution
+- **Zero chain_id rejection** — `validate_structure` rejects transactions with an all-zero chain_id as an early filter before expensive STARK verification
+- **Encrypted note size cap** — `validate_structure` enforces a 256-byte cap on per-output encrypted note ciphertexts, preventing bloat attacks via hand-crafted transactions
+- **Versioned note encoding** — transaction note encoding now includes a 1-byte version prefix (layout: `[version][8-byte LE value][32-byte blinding]`), enabling forward-compatible format changes and explicitly rejecting unversioned legacy notes
+- **GetSnapshot rate limiting** — manifest responses are rate-limited to one per peer per 5 seconds with bounded per-peer tracking, preventing repeated snapshot serialization triggered by a single peer
+- **NatInfo field bounds** — `sanitize()` truncates `NatInfo`, `NatPunchRequest`, and `NatPunchNotify` string address fields to 64 bytes, preventing memory exhaustion from oversized address strings
+- **Sanitize SnapshotChunk and NewVertex** — `sanitize()` now caps `SnapshotChunk.data` at `SNAPSHOT_CHUNK_SIZE + 64` bytes and `NewVertex.transactions` at `VERTEX_MAX_DRAIN` entries, bounding validation CPU from a single large message
+- **Safe u32 casts** — `encode_message` and `write_encrypted` use `u32::try_from` instead of `as u32` for length fields, returning errors on overflow rather than silently truncating
+- **pad_to_bucket minimum** — `pad_to_bucket(0)` now returns one full bucket instead of zero, ensuring encrypted frames always contain at least one padding bucket
 
 ## Production Roadmap
 
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — planned independent cryptographic protocol review and penetration testing; five internal audits have been completed, addressing 75+ findings across all severity levels and expanding test coverage from 226 to 1149 tests
+- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1175 tests
 
 ## License
 

@@ -573,6 +573,32 @@ impl Dag {
         }
         result
     }
+
+    /// Aggregate the VRF output values from all finalized vertices in `epoch`.
+    ///
+    /// Each proposer's VRF output value is deterministic once their vertex is
+    /// finalized — there is no last-revealer problem. Values are sorted and
+    /// deduplicated before hashing so the result is independent of DAG traversal
+    /// order and a proposer with multiple vertices contributes exactly once.
+    ///
+    /// This is combined with the BFT-layer VRF commitment mix at epoch rotation
+    /// to produce a two-layer randomness beacon for the next epoch seed.
+    pub fn epoch_vrf_mix(&self, epoch: u64) -> crate::Hash {
+        let mut values: Vec<crate::Hash> = self
+            .finalized_order()
+            .into_iter()
+            .filter_map(|vid| self.vertices.get(&vid))
+            .filter(|v| v.epoch == epoch)
+            .filter_map(|v| v.vrf_proof.as_ref().map(|p| p.value))
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+        let mut parts: Vec<&[u8]> = vec![b"umbra.epoch.vrf_mix"];
+        for v in &values {
+            parts.push(v.as_ref());
+        }
+        crate::hash_concat(&parts)
+    }
 }
 
 /// Errors related to DAG vertices.
@@ -2447,5 +2473,189 @@ mod tests {
         let pruned = dag.prune_finalized(1);
         assert!(pruned >= 2);
         assert!(dag.get(&v1_id).is_none());
+    }
+
+    #[test]
+    fn epoch_vrf_mix_empty() {
+        // A DAG with only the genesis vertex (vrf_proof = None) should produce a
+        // consistent hash that is the same across two calls.
+        let genesis = Dag::genesis_vertex();
+        let dag = Dag::new(genesis);
+
+        let mix1 = dag.epoch_vrf_mix(0);
+        let mix2 = dag.epoch_vrf_mix(0);
+        assert_eq!(mix1, mix2, "epoch_vrf_mix must be deterministic");
+    }
+
+    #[test]
+    fn epoch_vrf_mix_aggregates_proposer_values() {
+        use crate::crypto::keys::SigningKeypair;
+        use crate::crypto::vrf::{EpochSeed, VrfOutput};
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let seed = EpochSeed::genesis();
+
+        // Build two vertices with distinct VRF proofs.
+        let kp_a = SigningKeypair::generate();
+        let vrf_a = VrfOutput::evaluate(&kp_a, &seed.vrf_input(&kp_a.public.fingerprint()));
+
+        let kp_b = SigningKeypair::generate();
+        let vrf_b = VrfOutput::evaluate(&kp_b, &seed.vrf_input(&kp_b.public.fingerprint()));
+
+        let mut v1 = make_vertex(vec![gid], 1);
+        v1.epoch = 0;
+        v1.vrf_proof = Some(vrf_a.clone());
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+        dag.finalize(&v1_id);
+
+        let mut v2 = make_vertex(vec![v1_id], 2);
+        v2.epoch = 0;
+        v2.vrf_proof = Some(vrf_b.clone());
+        let v2_id = v2.id;
+        dag.insert_unchecked(v2).unwrap();
+        dag.finalize(&v2_id);
+
+        let mix = dag.epoch_vrf_mix(0);
+
+        // Mix must differ from either individual VRF value.
+        assert_ne!(mix, vrf_a.value, "mix must not equal a single VRF value");
+        assert_ne!(mix, vrf_b.value, "mix must not equal a single VRF value");
+
+        // A DAG with only one of the two vertices produces a different mix.
+        let genesis2 = Dag::genesis_vertex();
+        let gid2 = genesis2.id;
+        let mut dag2 = Dag::new(genesis2);
+        let mut v3 = make_vertex(vec![gid2], 1);
+        v3.epoch = 0;
+        v3.vrf_proof = Some(vrf_a.clone());
+        let v3_id = v3.id;
+        dag2.insert_unchecked(v3).unwrap();
+        dag2.finalize(&v3_id);
+        let mix_single = dag2.epoch_vrf_mix(0);
+
+        assert_ne!(
+            mix, mix_single,
+            "mix with two proofs must differ from mix with one"
+        );
+    }
+
+    #[test]
+    fn epoch_vrf_mix_deterministic() {
+        use crate::crypto::keys::SigningKeypair;
+        use crate::crypto::vrf::{EpochSeed, VrfOutput};
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let kp = SigningKeypair::generate();
+        let seed = EpochSeed::genesis();
+        let vrf = VrfOutput::evaluate(&kp, &seed.vrf_input(&kp.public.fingerprint()));
+
+        let mut v = make_vertex(vec![gid], 1);
+        v.epoch = 0;
+        v.vrf_proof = Some(vrf);
+        let vid = v.id;
+        dag.insert_unchecked(v).unwrap();
+        dag.finalize(&vid);
+
+        let mix1 = dag.epoch_vrf_mix(0);
+        let mix2 = dag.epoch_vrf_mix(0);
+        assert_eq!(mix1, mix2, "epoch_vrf_mix must be deterministic");
+    }
+
+    #[test]
+    fn epoch_vrf_mix_ignores_other_epochs() {
+        use crate::crypto::keys::SigningKeypair;
+        use crate::crypto::vrf::{EpochSeed, VrfOutput};
+
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag = Dag::new(genesis);
+
+        let seed = EpochSeed::genesis();
+
+        let kp0 = SigningKeypair::generate();
+        let vrf0 = VrfOutput::evaluate(&kp0, &seed.vrf_input(&kp0.public.fingerprint()));
+
+        let kp1 = SigningKeypair::generate();
+        let vrf1 = VrfOutput::evaluate(&kp1, &seed.vrf_input(&kp1.public.fingerprint()));
+
+        // Vertex in epoch 0
+        let mut v0 = make_vertex(vec![gid], 1);
+        v0.epoch = 0;
+        v0.vrf_proof = Some(vrf0);
+        let v0_id = v0.id;
+        dag.insert_unchecked(v0).unwrap();
+        dag.finalize(&v0_id);
+
+        let mix_before = dag.epoch_vrf_mix(0);
+
+        // Vertex in epoch 1 (round = EPOCH_LENGTH) — should not affect epoch 0 mix
+        let mut v1 = make_vertex(vec![v0_id], crate::constants::EPOCH_LENGTH);
+        // epoch is derived from round: EPOCH_LENGTH / EPOCH_LENGTH = 1
+        v1.vrf_proof = Some(vrf1);
+        let v1_id = v1.id;
+        dag.insert_unchecked(v1).unwrap();
+        dag.finalize(&v1_id);
+
+        let mix_after = dag.epoch_vrf_mix(0);
+        assert_eq!(
+            mix_before, mix_after,
+            "epoch 1 vertex must not change epoch 0 vrf_mix"
+        );
+    }
+
+    #[test]
+    fn epoch_vrf_mix_deduplicates_per_proposer() {
+        // A proposer with two finalized vertices in the same epoch has the same
+        // deterministic VRF value for both. After dedup, they contribute exactly
+        // once, so the mix equals the one produced by a DAG with only one vertex
+        // from that proposer.
+        use crate::crypto::keys::SigningKeypair;
+        use crate::crypto::vrf::{EpochSeed, VrfOutput};
+
+        let seed = EpochSeed::genesis();
+        let kp = SigningKeypair::generate();
+        let vrf = VrfOutput::evaluate(&kp, &seed.vrf_input(&kp.public.fingerprint()));
+
+        // DAG with one vertex from the proposer.
+        let genesis = Dag::genesis_vertex();
+        let gid = genesis.id;
+        let mut dag_one = Dag::new(genesis);
+        let mut v1 = make_vertex(vec![gid], 1);
+        v1.epoch = 0;
+        v1.vrf_proof = Some(vrf.clone());
+        let v1_id = v1.id;
+        dag_one.insert_unchecked(v1).unwrap();
+        dag_one.finalize(&v1_id);
+        let mix_one = dag_one.epoch_vrf_mix(0);
+
+        // DAG with two vertices from the same proposer (same VRF value).
+        let genesis2 = Dag::genesis_vertex();
+        let gid2 = genesis2.id;
+        let mut dag_two = Dag::new(genesis2);
+        let mut va = make_vertex(vec![gid2], 1);
+        va.epoch = 0;
+        va.vrf_proof = Some(vrf.clone());
+        let va_id = va.id;
+        dag_two.insert_unchecked(va).unwrap();
+        dag_two.finalize(&va_id);
+        let mut vb = make_vertex(vec![va_id], 2);
+        vb.epoch = 0;
+        vb.vrf_proof = Some(vrf.clone());
+        let vb_id = vb.id;
+        dag_two.insert_unchecked(vb).unwrap();
+        dag_two.finalize(&vb_id);
+        let mix_two = dag_two.epoch_vrf_mix(0);
+
+        assert_eq!(
+            mix_one, mix_two,
+            "duplicate VRF values must be deduplicated: two vertices from the same proposer must produce the same mix as one"
+        );
     }
 }

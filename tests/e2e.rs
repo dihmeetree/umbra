@@ -830,8 +830,8 @@ fn test_validator_registration_e2e() {
     );
     assert_eq!(
         state.get_validator(&vid).unwrap().activation_epoch,
-        1,
-        "activation should be next epoch (current=0, so activation=1)"
+        umbra::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS,
+        "activation should be delayed by COMMITTEE_ELIGIBILITY_DELAY_EPOCHS (current=0, so activation=2)"
     );
     assert_eq!(
         state.validator_bond(&vid),
@@ -1001,15 +1001,25 @@ fn test_validator_full_lifecycle() {
 
     let vid = new_signing.public.fingerprint();
     assert!(state.is_active_validator(&vid));
-    assert_eq!(state.get_validator(&vid).unwrap().activation_epoch, 1);
+    assert_eq!(
+        state.get_validator(&vid).unwrap().activation_epoch,
+        umbra::constants::COMMITTEE_ELIGIBILITY_DELAY_EPOCHS
+    );
 
-    // --- Phase 2: Advance epoch so validator activates ---
+    // --- Phase 2: Advance epochs so validator activates ---
+    // COMMITTEE_ELIGIBILITY_DELAY_EPOCHS = 2, so must advance twice
     state.advance_epoch();
     assert_eq!(state.epoch(), 1);
-    let eligible = state.eligible_validators(1);
+    assert!(
+        state.eligible_validators(1).iter().all(|v| v.id != vid),
+        "validator must not be eligible after only 1 epoch advance"
+    );
+    state.advance_epoch();
+    assert_eq!(state.epoch(), 2);
+    let eligible = state.eligible_validators(2);
     assert!(
         eligible.iter().any(|v| v.id == vid),
-        "validator should be eligible after activation epoch"
+        "validator should be eligible after COMMITTEE_ELIGIBILITY_DELAY_EPOCHS epochs"
     );
 
     // --- Phase 3: Deregister the validator ---
@@ -1033,7 +1043,8 @@ fn test_validator_full_lifecycle() {
     let stealth_result =
         umbra::crypto::stealth::StealthAddress::generate(&new_kem.public, 0).unwrap();
     let note_data = {
-        let mut d = Vec::with_capacity(40);
+        let mut d = Vec::with_capacity(41);
+        d.push(1u8); // NOTE_VERSION
         d.extend_from_slice(&bond.to_le_bytes());
         d.extend_from_slice(&dereg_blinding_bytes);
         d

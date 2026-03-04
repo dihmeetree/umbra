@@ -35,10 +35,6 @@ const SEEN_MESSAGES_CAPACITY: usize = 10_000;
 /// Maximum number of sync batch rounds before giving up on the current peer.
 const MAX_SYNC_ROUNDS: u64 = 1000;
 
-/// Maximum number of distinct state_root entries in the snapshot manifest map
-/// to prevent memory exhaustion from many unique manifests during sync.
-const MAX_MANIFEST_ENTRIES: usize = 256;
-
 /// Shared node state accessible from RPC handlers.
 pub struct NodeState {
     pub ledger: Ledger,
@@ -221,6 +217,8 @@ pub struct Node {
     snapshot_cache: Option<(Vec<u8>, u32, super::storage::ChainStateMeta, Instant)>,
     /// Per-peer timestamp of last snapshot chunk request served (DDoS rate limiting).
     chunk_request_timestamps: HashMap<crate::network::PeerId, Instant>,
+    /// Per-peer timestamp of last GetSnapshot request served (DDoS rate limiting).
+    get_snapshot_timestamps: HashMap<crate::network::PeerId, Instant>,
     /// UPnP gateway handle for lease renewal and cleanup (None if UPnP is not active).
     upnp_gateway: Option<(crate::network::nat::UpnpGateway, SocketAddr)>,
     /// Last epoch for which VRF was refreshed (avoids redundant evaluations).
@@ -597,6 +595,7 @@ impl Node {
             sync_peer_last_claimed: 0,
             snapshot_cache: None,
             chunk_request_timestamps: HashMap::new(),
+            get_snapshot_timestamps: HashMap::new(),
             upnp_gateway: upnp_gateway.map(|(_ext_addr, gw)| (gw, config.listen_addr)),
             last_vrf_epoch: 0,
             snapshot_manifests: HashMap::new(),
@@ -1337,6 +1336,9 @@ impl Node {
 
                         // Validate vertex structure (signature, ID) and transactions
                         // to prevent a malicious sync peer from injecting bad data.
+                        // Note: VRF proofs are not checked during sync because synced
+                        // vertices come from finalized history. Full STARK proof
+                        // verification occurs in apply_vertex/apply_vertex_state_only.
                         if vertex.round > 0 {
                             if let Err(e) = vertex.validate_structure(false) {
                                 tracing::warn!(error = %e, seq, "Sync: rejected vertex with invalid structure");
@@ -1519,6 +1521,10 @@ impl Node {
                             }
                         }
                         tracing::info!("Sync complete");
+                        {
+                            let mut state = self.state.write().await;
+                            state.ledger.clear_sync_dedup();
+                        }
                         self.sync_state = SyncState::Synced;
                     }
                 }
@@ -1587,6 +1593,35 @@ impl Node {
             }
             // ── Snapshot Sync ──
             Message::GetSnapshot => {
+                // Rate limit manifest responses per peer to prevent DoS via
+                // repeated snapshot serialization. One manifest per 5 seconds is enough.
+                let now = Instant::now();
+                let manifest_interval = std::time::Duration::from_secs(5);
+                if let Some(last) = self.get_snapshot_timestamps.get(&from) {
+                    if now.duration_since(*last) < manifest_interval {
+                        return;
+                    }
+                }
+                self.get_snapshot_timestamps.insert(from, now);
+                // Enforce hard cap: first prune stale entries, then evict oldest
+                // if the map is still over the limit. The age-only retain is
+                // insufficient when many fresh entries arrive under peer churn.
+                if self.get_snapshot_timestamps.len() > crate::constants::MAX_PEERS {
+                    let cutoff = now - std::time::Duration::from_secs(30);
+                    self.get_snapshot_timestamps.retain(|_, t| *t > cutoff);
+                    while self.get_snapshot_timestamps.len() > crate::constants::MAX_PEERS {
+                        if let Some(oldest) = self
+                            .get_snapshot_timestamps
+                            .iter()
+                            .min_by_key(|(_, ts)| **ts)
+                            .map(|(peer, _)| *peer)
+                        {
+                            self.get_snapshot_timestamps.remove(&oldest);
+                        } else {
+                            break;
+                        }
+                    }
+                }
                 if let Some((ref bytes, total_chunks, ref meta, ref created)) = self.snapshot_cache
                 {
                     if created.elapsed()
@@ -1731,24 +1766,25 @@ impl Node {
 
                     // Require SNAPSHOT_QUORUM peers to agree on the same state_root
                     // before trusting a snapshot manifest and downloading it.
+                    // Cap the number of tracked state_roots to prevent Sybil peers
+                    // from exhausting memory by sending unique roots.
                     let state_root = meta.state_root;
-                    if self.snapshot_manifests.len() >= MAX_MANIFEST_ENTRIES
-                        && !self.snapshot_manifests.contains_key(&state_root)
+                    if !self.snapshot_manifests.contains_key(&state_root)
+                        && self.snapshot_manifests.len()
+                            >= crate::constants::MAX_SNAPSHOT_MANIFEST_ROOTS
                     {
-                        // Evict the entry with the fewest peer endorsements (lowest signal)
-                        // so that newly-seen roots are always considered.
-                        let evict = self
+                        // Evict the entry with the fewest votes rather than silently
+                        // dropping the new root. A Sybil set could otherwise pre-fill
+                        // the map with unique roots and block honest peers from being
+                        // tracked.
+                        if let Some(evict_key) = self
                             .snapshot_manifests
                             .iter()
                             .min_by_key(|(_, v)| v.len())
-                            .map(|(&k, v)| (k, v.len()));
-                        if let Some((evict_root, evict_count)) = evict {
-                            tracing::warn!(
-                                evicted_root = hex::encode(&evict_root[..8]),
-                                evicted_count = evict_count,
-                                "Snapshot manifest map full, evicting lowest-signal entry"
-                            );
-                            self.snapshot_manifests.remove(&evict_root);
+                            .map(|(k, _)| *k)
+                        {
+                            tracing::warn!("Snapshot manifest map full, evicting lowest-vote root");
+                            self.snapshot_manifests.remove(&evict_key);
                         }
                     }
                     let entry = self.snapshot_manifests.entry(state_root).or_default();
@@ -2146,7 +2182,15 @@ impl Node {
                 // Check for epoch transition
                 let dag_epoch = state.ledger.dag.epoch();
                 if dag_epoch > state.bft.epoch {
-                    let vrf_mix = state.bft.vrf_mix_hash();
+                    // Combine two independent VRF entropy sources:
+                    // - bft_mix: VRF proof commitments from votes (commit-reveal,
+                    //   anti-grinding via proof_commitment submitted before epoch seed)
+                    // - dag_mix: VRF output values from finalized vertex proposers
+                    //   (deterministic once finalized, no last-revealer problem)
+                    let bft_mix = state.bft.vrf_mix_hash();
+                    let dag_mix = state.ledger.dag.epoch_vrf_mix(state.bft.epoch);
+                    let payload = crate::hash_concat(&[&bft_mix, &dag_mix]);
+                    let vrf_mix = crate::hash_domain(b"umbra.epoch.combined_mix", &payload);
                     let (fees, new_seed) = state.ledger.state.advance_epoch_with_vrf_mix(&vrf_mix);
                     tracing::info!(epoch = new_seed.epoch, fees = fees, "Epoch advanced");
 
@@ -2377,6 +2421,9 @@ impl Node {
                     let mut state = self.state.write().await;
                     state.bft.advance_round();
                     state.ledger.dag.advance_round();
+                    // Reset the timer to prevent repeated rapid round advancement
+                    // when the node is partitioned or the leader is unresponsive.
+                    state.last_finalized_time = Some(Instant::now());
                     tracing::info!(
                         new_round = state.bft.round,
                         "View-change: advanced to next round"
@@ -2631,6 +2678,10 @@ impl Node {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to insert own vertex");
+                // Return drained transactions to the mempool so they are not lost
+                for tx in vertex.transactions {
+                    let _ = state.mempool.insert(tx);
+                }
             }
         }
     }
@@ -2664,6 +2715,7 @@ impl Node {
             sync_peer_last_claimed: 0,
             snapshot_cache: None,
             chunk_request_timestamps: HashMap::new(),
+            get_snapshot_timestamps: HashMap::new(),
             upnp_gateway: None,
             last_vrf_epoch: 0,
             snapshot_manifests: HashMap::new(),
@@ -3777,7 +3829,7 @@ mod tests {
             "should still be NeedSync after first manifest"
         );
 
-        // Second manifest from different peer with same state_root
+        // Second manifest: quorum not yet reached (need 3)
         let peer2 = crate::hash_domain(b"test-peer", &[2]);
         node.handle_message(
             peer2,
@@ -3790,10 +3842,10 @@ mod tests {
         .await;
         assert!(
             matches!(node.sync_state, SyncState::NeedSync { .. }),
-            "should still be NeedSync after second manifest (quorum is 3)"
+            "should still be NeedSync after second manifest (quorum=3)"
         );
 
-        // Third manifest from yet another peer: quorum reached
+        // Third manifest from different peer with same state_root: quorum reached
         let peer3 = crate::hash_domain(b"test-peer", &[3]);
         node.handle_message(
             peer3,
@@ -3829,9 +3881,10 @@ mod tests {
         let snapshot_size = chunk_size * 2;
         let total_chunks = 2u32;
 
-        // Fill snapshot_manifests to MAX_MANIFEST_ENTRIES (256) distinct roots,
+        // Fill snapshot_manifests to MAX_SNAPSHOT_MANIFEST_ROOTS distinct roots,
         // each with exactly 1 peer endorsement.
-        for i in 0..MAX_MANIFEST_ENTRIES {
+        let max_roots = crate::constants::MAX_SNAPSHOT_MANIFEST_ROOTS;
+        for i in 0..max_roots {
             let mut meta = test_chain_state_meta(1);
             // Each entry gets a unique state_root
             meta.state_root = crate::hash_domain(b"test-root", &(i as u64).to_le_bytes());
@@ -3848,8 +3901,8 @@ mod tests {
         }
         assert_eq!(
             node.snapshot_manifests.len(),
-            MAX_MANIFEST_ENTRIES,
-            "should have exactly MAX_MANIFEST_ENTRIES entries"
+            max_roots,
+            "should have exactly MAX_SNAPSHOT_MANIFEST_ROOTS entries"
         );
 
         // Now insert one more with a brand-new state_root. The eviction logic
@@ -3873,11 +3926,11 @@ mod tests {
             node.snapshot_manifests.contains_key(&new_meta.state_root),
             "new manifest entry should be present after eviction"
         );
-        // Size should remain at MAX_MANIFEST_ENTRIES (one evicted, one added)
+        // Size should remain at max_roots (one evicted, one added)
         assert_eq!(
             node.snapshot_manifests.len(),
-            MAX_MANIFEST_ENTRIES,
-            "map size should stay at MAX_MANIFEST_ENTRIES after eviction"
+            max_roots,
+            "map size should stay at MAX_SNAPSHOT_MANIFEST_ROOTS after eviction"
         );
     }
 

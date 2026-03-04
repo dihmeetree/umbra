@@ -47,6 +47,16 @@ pub mod constants {
     pub const SLASH_REGISTRATION_COOLDOWN_EPOCHS: u64 = 10;
     /// Bond multiplier applied to new registrations during slashing cooldown.
     pub const SLASH_BOND_MULTIPLIER: u64 = 3;
+    /// Minimum number of epochs a validator must be registered before becoming
+    /// committee-eligible. A validator registered in epoch N is eligible starting
+    /// epoch N + COMMITTEE_ELIGIBILITY_DELAY_EPOCHS.
+    ///
+    /// This prevents registration-timing attacks: without a delay, an attacker
+    /// could register validators immediately before a target epoch, temporarily
+    /// spike their fraction of the validator set, participate once, then deregister.
+    /// A 2-epoch delay forces the attacker to sustain their validator count for
+    /// multiple epochs, substantially increasing the cost of a transient spike.
+    pub const COMMITTEE_ELIGIBILITY_DELAY_EPOCHS: u64 = 2;
     /// Maximum transactions per DAG vertex
     pub const MAX_TXS_PER_VERTEX: usize = 10_000;
     /// Target vertex interval in milliseconds
@@ -201,10 +211,15 @@ pub mod constants {
     pub const MAX_VERTICES_PER_PROPOSER_PER_EPOCH: usize = 100;
     /// Maximum eviction iterations when inserting into a full mempool.
     pub const MAX_MEMPOOL_EVICTIONS: usize = 10;
-    /// Number of peers whose snapshot state_root must agree before importing.
-    /// Set to 3 (> f for f=1) to prevent a pair of colluding peers from
-    /// serving a crafted snapshot to a syncing node.
+    /// Number of distinct peers whose snapshot state_root must agree before
+    /// importing. Higher values resist Sybil attacks but require more connected
+    /// peers during initial sync. A syncing node cannot verify validator
+    /// identities (it doesn't have the committee yet), so this quorum relies
+    /// on peer diversity enforced by the P2P layer's per-IP and per-subnet limits.
     pub const SNAPSHOT_QUORUM: usize = 3;
+    /// Maximum distinct state_roots tracked in snapshot_manifests to prevent
+    /// unbounded memory growth from Sybil peers sending unique roots.
+    pub const MAX_SNAPSHOT_MANIFEST_ROOTS: usize = 16;
     /// Upper bound on snapshot blob size accepted by `deserialize_snapshot` (1 GiB).
     pub const MAX_SNAPSHOT_DESERIALIZE_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -833,6 +848,21 @@ mod tests {
             "SNAPSHOT_CHUNK_SIZE ({}) must be < MAX_NETWORK_MESSAGE_BYTES ({})",
             constants::SNAPSHOT_CHUNK_SIZE,
             constants::MAX_NETWORK_MESSAGE_BYTES
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn constants_fee_below_goldilocks_prime() {
+        // The STARK balance proof represents fees as Goldilocks field elements.
+        // If MAX_TX_FEE >= the Goldilocks prime, Felt::new(fee) would reduce
+        // modulo p, breaking the fee equality check in validate_structure.
+        const GOLDILOCKS_PRIME: u64 = 18_446_744_069_414_584_321;
+        assert!(
+            constants::MAX_TX_FEE < GOLDILOCKS_PRIME,
+            "MAX_TX_FEE ({}) must be below the Goldilocks prime ({})",
+            constants::MAX_TX_FEE,
+            GOLDILOCKS_PRIME
         );
     }
 

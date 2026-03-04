@@ -1746,7 +1746,8 @@ mod tests {
         let stealth_result =
             crate::crypto::stealth::StealthAddress::generate(wallet.kem_public_key(), 0).unwrap();
         let stealth_address = stealth_result.address;
-        let mut note_data = Vec::with_capacity(40);
+        let mut note_data = Vec::with_capacity(41);
+        note_data.push(1u8); // NOTE_VERSION
         note_data.extend_from_slice(&amount.to_le_bytes());
         note_data.extend_from_slice(&blinding.0);
         let encrypted_note =
@@ -2103,7 +2104,8 @@ mod tests {
         let stealth_result =
             crate::crypto::stealth::StealthAddress::generate(wallet.kem_public_key(), 0).unwrap();
         let stealth_address = stealth_result.address;
-        let mut note_data = Vec::with_capacity(40);
+        let mut note_data = Vec::with_capacity(41);
+        note_data.push(1u8); // NOTE_VERSION
         note_data.extend_from_slice(&amount.to_le_bytes());
         note_data.extend_from_slice(&blinding.0);
         let encrypted_note =
