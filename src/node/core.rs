@@ -4308,6 +4308,9 @@ mod tests {
         let state = Arc::new(RwLock::new(ns));
         let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
 
+        // Snapshot BFT epoch before
+        let epoch_before = state.read().await.bft.epoch;
+
         let vertex_id = crate::consensus::dag::VertexId([1u8; 32]);
         // Certificate from epoch 5, but node is at epoch 0
         let cert = make_valid_certificate(vertex_id, 5, 0, &keypairs, &chain_id, 3);
@@ -4318,6 +4321,9 @@ mod tests {
 
         // Should not broadcast anything (rejected)
         assert!(cmd_rx.try_recv().is_err());
+        // BFT state should be unchanged
+        let epoch_after = state.read().await.bft.epoch;
+        assert_eq!(epoch_before, epoch_after, "BFT epoch should not change");
     }
 
     #[tokio::test]
@@ -4332,6 +4338,9 @@ mod tests {
         let node_kp = SigningKeypair::generate();
         let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, node_kp);
 
+        // Snapshot BFT epoch before
+        let epoch_before = state.read().await.bft.epoch;
+
         let vertex_id = crate::consensus::dag::VertexId([2u8; 32]);
         // Use random keypairs (not committee members) to sign
         let (fake_keypairs, _) = make_committee(4);
@@ -4343,6 +4352,9 @@ mod tests {
 
         // Should not broadcast (invalid sigs)
         assert!(cmd_rx.try_recv().is_err());
+        // BFT state should be unchanged
+        let epoch_after = state.read().await.bft.epoch;
+        assert_eq!(epoch_before, epoch_after, "BFT epoch should not change");
     }
 
     #[tokio::test]
@@ -4595,12 +4607,13 @@ mod tests {
     fn validate_transaction_against_state_delegates() {
         let ns = test_node_state();
         let tx = make_test_tx(99);
-        // Chain IDs match, but the tx fails structural validation (invalid proof
-        // data from make_test_tx). This verifies the method delegates to ChainState.
-        let result = ns.validate_transaction_against_state(&tx);
-        assert!(
-            result.is_err(),
-            "tx with invalid proof data should be rejected"
+        // Verify delegation: NodeState result must match direct ChainState call.
+        let ns_result = ns.validate_transaction_against_state(&tx);
+        let cs_result = ns.ledger.state.validate_transaction(&tx);
+        assert_eq!(
+            ns_result.as_ref().map_err(|e| e.to_string()),
+            cs_result.as_ref().map_err(|e| e.to_string()),
+            "NodeState should delegate to ChainState::validate_transaction"
         );
     }
 

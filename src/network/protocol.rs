@@ -1030,7 +1030,7 @@ mod tests {
         };
         msg.sanitize();
         if let Message::FinalizedVerticesResponse { vertices, .. } = &msg {
-            assert!(vertices.len() <= 1000);
+            assert_eq!(vertices.len(), std::cmp::min(1500, 1000));
         } else {
             panic!("expected FinalizedVerticesResponse");
         }
@@ -1049,7 +1049,10 @@ mod tests {
         };
         msg.sanitize();
         if let Message::EpochStateResponse { committee, .. } = &msg {
-            assert!(committee.len() <= crate::constants::COMMITTEE_SIZE);
+            assert_eq!(
+                committee.len(),
+                std::cmp::min(100, crate::constants::COMMITTEE_SIZE)
+            );
         } else {
             panic!("expected EpochStateResponse");
         }
@@ -1093,7 +1096,10 @@ mod tests {
         }));
         msg.sanitize();
         if let Message::NewVertex(v) = &msg {
-            assert!(v.transactions.len() <= crate::constants::VERTEX_MAX_DRAIN);
+            assert_eq!(
+                v.transactions.len(),
+                std::cmp::min(2000, crate::constants::VERTEX_MAX_DRAIN)
+            );
         } else {
             panic!("expected NewVertex");
         }

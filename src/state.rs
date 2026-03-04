@@ -3846,8 +3846,7 @@ mod tests {
 
         // Create the stealth address and encrypted note for bond return output
         let stealth_result =
-            crate::crypto::stealth::StealthAddress::generate(&kem_keys[0].public, bond as u32)
-                .unwrap();
+            crate::crypto::stealth::StealthAddress::generate(&kem_keys[0].public, 0).unwrap();
         let encrypted_note =
             crate::crypto::encryption::EncryptedPayload::encrypt(&kem_keys[0].public, b"bond")
                 .unwrap();
