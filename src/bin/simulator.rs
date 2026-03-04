@@ -90,7 +90,7 @@ async fn async_main() {
         "[Phase 1] Bootstrapping validator network...".yellow()
     );
 
-    let (node_states, _temp_dirs, node_keypairs, node_tokens) =
+    let (node_states, mut temp_dirs, node_keypairs, node_tokens) =
         match bootstrap_network(shutdown.clone()).await {
             Ok(v) => {
                 println!(
@@ -415,18 +415,18 @@ async fn async_main() {
         }
     }
 
-    // ── Phase 7: Concurrent Transaction Flood ──
+    // ── Phase 7: Rapid Sequential Transactions ──
     println!(
         "\n{}",
-        "[Phase 7] Testing concurrent transaction flood...".yellow()
+        "[Phase 7] Testing rapid sequential transactions...".yellow()
     );
 
     {
         let bob_bal_before = bob_wallet.balance();
         let mut submitted = 0u32;
 
-        // Submit 5 transactions rapidly — each needs the previous change output
-        // to be available, so we send+finalize in quick succession
+        // Submit 5 transactions in quick succession — each depends on the
+        // previous change output, so we finalize between sends
         for i in 0..5u32 {
             let send_result = {
                 let mut sg = node_states[0].write().await;
@@ -464,7 +464,7 @@ async fn async_main() {
                     bob_gained
                 );
                 results.push(TestResult::pass(
-                    "Concurrent Flood",
+                    "Rapid Sequential Txs",
                     &format!("{} txs finalized, Bob gained {}", submitted, bob_gained),
                 ));
             } else {
@@ -476,7 +476,7 @@ async fn async_main() {
                     submitted
                 );
                 results.push(TestResult::fail(
-                    "Concurrent Flood",
+                    "Rapid Sequential Txs",
                     &format!(
                         "Bob gained {} but expected {} from {} txs",
                         bob_gained, expected_gain, submitted
@@ -485,7 +485,7 @@ async fn async_main() {
             }
         } else {
             results.push(TestResult::fail(
-                "Concurrent Flood",
+                "Rapid Sequential Txs",
                 "no transactions submitted successfully",
             ));
         }
@@ -612,8 +612,10 @@ async fn async_main() {
             ));
         }
 
-        // State roots should match if counts match; otherwise expected to differ
+        // State roots will differ because each node has its own genesis validator
+        // (independent genesis). Verify each root is non-zero (state initialized).
         let all_same_root = roots.windows(2).all(|w| w[0] == w[1]);
+        let all_nonzero = roots.iter().all(|r| r != &[0u8; 32]);
         if all_same_root {
             println!(
                 "  {} State roots match across all nodes",
@@ -623,40 +625,87 @@ async fn async_main() {
                 "Cross-Node: state roots",
                 "all 3 nodes have identical state root",
             ));
-        } else {
-            // Roots differ because nodes have different finalized counts
+        } else if all_nonzero {
+            // Roots differ due to independent genesis validators and/or
+            // finalization lag — expected in the simulator's topology.
             println!(
-                "  {} State roots differ (expected: finalized counts differ by {})",
+                "  {} State roots differ (expected: independent genesis, count_diff={})",
                 "OK".green().bold(),
                 count_diff
             );
             results.push(TestResult::pass(
                 "Cross-Node: state roots",
-                &format!("roots differ due to finalization lag (diff={})", count_diff),
+                &format!(
+                    "roots differ (independent genesis, count_diff={}), all non-zero",
+                    count_diff
+                ),
+            ));
+        } else {
+            // A zero root means a node failed to initialize state
+            let zero_nodes: Vec<_> = roots
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| *r == &[0u8; 32])
+                .map(|(i, _)| format!("node {}", i))
+                .collect();
+            println!(
+                "  {} State roots: zero root on {}",
+                "FAIL".red().bold(),
+                zero_nodes.join(", ")
+            );
+            results.push(TestResult::fail(
+                "Cross-Node: state roots",
+                &format!("zero state root on: {}", zero_nodes.join(", ")),
             ));
         }
 
-        // Verify validator set is consistent
-        let mut validator_counts = Vec::new();
+        // Verify validator sets are consistent.
+        // Each node is an independent genesis validator, so memberships naturally
+        // differ (each node knows only its own validator). Check that counts match
+        // and that membership is non-empty.
+        let mut validator_sets: Vec<Vec<umbra::Hash>> = Vec::new();
         for ns in node_states.iter().take(3) {
             let sg = ns.read().await;
-            validator_counts.push(sg.total_validators());
+            validator_sets.push(sg.active_validator_ids());
         }
-        let all_same_validators = validator_counts.windows(2).all(|w| w[0] == w[1]);
-        if all_same_validators {
+        let counts: Vec<_> = validator_sets.iter().map(|s| s.len()).collect();
+        let all_same_count = counts.windows(2).all(|w| w[0] == w[1]);
+        let all_nonempty = counts.iter().all(|&c| c > 0);
+        if all_same_count && all_nonempty {
             println!(
-                "  {} Validator sets consistent ({} active on all nodes)",
+                "  {} Validator sets consistent ({} active on each node)",
                 "OK".green().bold(),
-                validator_counts[0]
+                counts[0]
             );
             results.push(TestResult::pass(
                 "Cross-Node: validator sets",
-                &format!("{} active validators on all nodes", validator_counts[0]),
+                &format!("{} active validators on each node", counts[0]),
             ));
-        } else {
+        } else if !all_nonempty {
+            let empty: Vec<_> = counts
+                .iter()
+                .enumerate()
+                .filter(|(_, &c)| c == 0)
+                .map(|(i, _)| format!("node {}", i))
+                .collect();
+            println!(
+                "  {} Empty validator sets: {}",
+                "FAIL".red().bold(),
+                empty.join(", ")
+            );
             results.push(TestResult::fail(
                 "Cross-Node: validator sets",
-                &format!("validator counts differ: {:?}", validator_counts),
+                &format!("no validators on: {}", empty.join(", ")),
+            ));
+        } else {
+            println!(
+                "  {} Validator counts differ: {:?}",
+                "FAIL".red().bold(),
+                counts
+            );
+            results.push(TestResult::fail(
+                "Cross-Node: validator sets",
+                &format!("validator counts differ: {:?}", counts),
             ));
         }
     }
@@ -726,9 +775,13 @@ async fn async_main() {
 
                 // Wait for new node to begin syncing (up to 30 seconds)
                 // Snapshot sync is multi-step (manifest + chunks + reassembly),
-                // so we just check that the node made *any* progress.
+                // so we just check that the node made progress beyond its initial state.
+                let initial_count = {
+                    let sg = state.read().await;
+                    sg.finalized_vertex_count().unwrap_or(0)
+                };
                 let mut synced = false;
-                let mut final_count = 0u64;
+                let mut final_count = initial_count;
                 for _ in 0..60 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     let current = {
@@ -736,7 +789,7 @@ async fn async_main() {
                         sg.finalized_vertex_count().unwrap_or(0)
                     };
                     final_count = current;
-                    if current > 0 {
+                    if current > initial_count {
                         synced = true;
                         break;
                     }
@@ -761,22 +814,24 @@ async fn async_main() {
                     // Snapshot sync may not complete in the simulator's
                     // short-lived network. Report as a known limitation.
                     println!(
-                        "  {} Snapshot sync did not complete (0/{} vertices in 30s)",
+                        "  {} Snapshot sync did not progress ({}/{} vertices in 30s, initial={})",
                         "WARN".yellow().bold(),
-                        reference_count
+                        final_count,
+                        reference_count,
+                        initial_count
                     );
                     println!("    (snapshot sync requires multi-step handshake; may need longer network lifetime)");
                     results.push(TestResult::pass(
                         "State Sync: node initialized",
                         &format!(
-                            "node started but snapshot sync incomplete (0/{} in 30s, known limitation)",
-                            reference_count
+                            "node started but snapshot sync incomplete ({}/{} in 30s, initial={}, known limitation)",
+                            final_count, reference_count, initial_count
                         ),
                     ));
                 }
 
-                // Keep temp_dir alive until end
-                std::mem::forget(temp_dir);
+                // Keep temp_dir alive until process exit
+                temp_dirs.push(temp_dir);
             }
             Err(e) => {
                 println!("  {} node init failed: {}", "FAIL".red().bold(), e);
@@ -2296,83 +2351,132 @@ async fn run_monitoring(node_states: &[Arc<RwLock<NodeState>>]) -> Vec<TestResul
     // Check 2: State consistency (all nodes should have same epoch)
     {
         let mut epochs = Vec::new();
-        let mut state_roots = Vec::new();
         let mut commitment_counts = Vec::new();
 
         for state in node_states {
             let s = state.read().await;
             epochs.push(s.epoch());
-            state_roots.push(hex::encode(s.state_root()));
             commitment_counts.push(s.commitment_count());
         }
 
-        // With independent genesis validators, each node has its own chain
-        // The important thing is each node's state is internally consistent
-        let node0_epoch = epochs[0];
-        results.push(TestResult::pass(
-            "Epoch State",
-            &format!("node 0 epoch={}, all nodes initialized", node0_epoch),
-        ));
+        // All nodes should agree on epoch
+        let majority_epoch = epochs[0];
+        let epoch_mismatch: Vec<_> = epochs
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e != majority_epoch)
+            .map(|(i, &e)| format!("node {} epoch={}", i, e))
+            .collect();
+        if epoch_mismatch.is_empty() {
+            results.push(TestResult::pass(
+                "Epoch State",
+                &format!(
+                    "all {} nodes at epoch={}",
+                    node_states.len(),
+                    majority_epoch
+                ),
+            ));
+        } else {
+            results.push(TestResult::fail(
+                "Epoch State",
+                &format!(
+                    "epoch mismatch: expected {}, divergent: {}",
+                    majority_epoch,
+                    epoch_mismatch.join(", ")
+                ),
+            ));
+        }
 
-        let node0_commitments = commitment_counts[0];
-        if node0_commitments > 0 {
+        // All nodes should have commitments
+        let zero_nodes: Vec<_> = commitment_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c == 0)
+            .map(|(i, _)| format!("node {}", i))
+            .collect();
+        if zero_nodes.is_empty() {
             results.push(TestResult::pass(
                 "Commitment Tree",
-                &format!("node 0 has {} commitments", node0_commitments),
+                &format!("all nodes have commitments: {:?}", commitment_counts),
             ));
         } else {
             results.push(TestResult::fail(
                 "Commitment Tree",
-                "node 0 has zero commitments",
+                &format!("zero commitments on: {}", zero_nodes.join(", ")),
             ));
         }
     }
 
-    // Check 3: Validator set integrity
+    // Check 3: Validator set integrity (all nodes)
     {
-        let s = node_states[0].read().await;
-        let validator_count = s.total_validators();
-        if validator_count > 0 {
+        let mut validator_counts = Vec::new();
+        for state in node_states {
+            let s = state.read().await;
+            validator_counts.push(s.total_validators());
+        }
+        let no_validators: Vec<_> = validator_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c == 0)
+            .map(|(i, _)| format!("node {}", i))
+            .collect();
+        if no_validators.is_empty() {
             results.push(TestResult::pass(
                 "Validator Set",
-                &format!("{} validators registered on node 0", validator_count),
+                &format!("validators across nodes: {:?}", validator_counts),
             ));
         } else {
             results.push(TestResult::fail(
                 "Validator Set",
-                "no validators registered",
+                &format!("no validators on: {}", no_validators.join(", ")),
             ));
         }
     }
 
-    // Check 4: Mempool health (should be mostly drained)
+    // Check 4: Mempool health (all nodes should be mostly drained)
     {
-        let s = node_states[0].read().await;
-        let mempool_size = s.mempool_len();
-        if mempool_size <= 10 {
+        let mut stuck_nodes = Vec::new();
+        let mut sizes = Vec::new();
+        for (i, state) in node_states.iter().enumerate() {
+            let s = state.read().await;
+            let size = s.mempool_len();
+            sizes.push(size);
+            if size > 10 {
+                stuck_nodes.push(format!("node {} has {}", i, size));
+            }
+        }
+        if stuck_nodes.is_empty() {
             results.push(TestResult::pass(
                 "Mempool Health",
-                &format!("{} pending txs", mempool_size),
+                &format!("pending txs across nodes: {:?}", sizes),
             ));
         } else {
             results.push(TestResult::fail(
                 "Mempool Health",
-                &format!("{} txs stuck in mempool", mempool_size),
+                &format!("txs stuck: {}", stuck_nodes.join(", ")),
             ));
         }
     }
 
-    // Check 5: Validators still active
+    // Check 5: Validators still active (all nodes)
     {
-        let s = node_states[0].read().await;
-        let active = s.total_validators();
-        if active >= 1 {
+        let mut inactive_nodes = Vec::new();
+        for (i, state) in node_states.iter().enumerate() {
+            let s = state.read().await;
+            if s.total_validators() < 1 {
+                inactive_nodes.push(format!("node {}", i));
+            }
+        }
+        if inactive_nodes.is_empty() {
             results.push(TestResult::pass(
                 "Validator Health",
-                &format!("{} active validators on node 0", active),
+                &format!("all {} nodes have active validators", node_states.len()),
             ));
         } else {
-            results.push(TestResult::fail("Validator Health", "no active validators"));
+            results.push(TestResult::fail(
+                "Validator Health",
+                &format!("no active validators on: {}", inactive_nodes.join(", ")),
+            ));
         }
     }
 

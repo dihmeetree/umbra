@@ -110,6 +110,16 @@ impl NodeState {
         self.ledger.state.total_validators()
     }
 
+    /// IDs of all active validators.
+    pub fn active_validator_ids(&self) -> Vec<Hash> {
+        self.ledger
+            .state
+            .active_validators()
+            .iter()
+            .map(|v| v.id)
+            .collect()
+    }
+
     /// Current mempool size (pending transaction count).
     pub fn mempool_len(&self) -> usize {
         self.mempool.len()
