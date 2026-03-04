@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~46k lines across 53 source files with 1270 tests. Single crate, no workspace.
+Umbra is a post-quantum private cryptocurrency with DAG-BFT consensus, written in Rust. ~47k lines across 54 source files with 1279 tests. Single crate, no workspace.
 
 ## Build & Test
 
 ```bash
 cargo build --release        # Full build (requires C compiler for PQClean backends)
 cargo check                  # Fast type-check
-cargo test --features fast-tests # Fast suite (~1270 tests, ~1.5 min)
+cargo test --features fast-tests # Fast suite (~1279 tests, ~1.5 min)
 cargo test                       # Full suite (includes real SPHINCS+, ~3 hrs)
 cargo test <module>::tests       # Run specific module tests (e.g., consensus::bft::tests)
 cargo clippy --all-targets       # Lint — must be warning-free
@@ -29,6 +29,7 @@ Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` eve
 | `transaction/`                    | `src/transaction/mod.rs` | Transaction types (Transfer, ContractDeploy, ContractCall), validation (`validate_structure`), `TxInput`/`TxOutput`                                            |
 | `transaction/builder.rs`          |                          | `TransactionBuilder` API for constructing transactions with STARK proofs                                                                                       |
 | `vm/`                             | `src/vm/*.rs`            | Contract VM: register-based execution over Goldilocks field, STARK-provable traces, contract state, bytecode opcodes, call builder                             |
+| `contracts/`                      | `src/contracts/*.rs`     | High-level contract DSL (ContractBuilder compiles to VM opcodes), example marketplace contract                                                                 |
 | `consensus/dag.rs`                |                          | DAG data structure (vertices, tips, finalized ordering, pruning)                                                                                               |
 | `consensus/bft.rs`                |                          | BFT voting, certificates, equivocation detection, VRF committee selection                                                                                      |
 | `state.rs`                        | `src/state.rs`           | `ChainState` (validators, bonds, slashing, epoch management, contract registry, contract state), `Ledger` (DAG + state + Merkle tree), `restore_from_storage`  |

@@ -20,7 +20,8 @@
 //! `input_commitments[0][0]` selects the function:
 //! - `1` = list, `2` = buy, `3` = cancel
 
-use crate::vm::{ContractCode, Opcode};
+use crate::contracts::dsl::{ContractBuilder, FieldType, StateType};
+use crate::vm::ContractCode;
 use crate::Hash;
 use winterfell::math::fields::f64::BaseElement as Felt;
 use winterfell::math::FieldElement;
@@ -41,9 +42,6 @@ pub const RECORD_SIZE: u64 = 8;
 /// Maximum number of listings supported.
 pub const MAX_LISTINGS: u64 = 2000;
 
-// Field offsets within a listing record.
-const FIELD_ACTIVE: u64 = 6;
-
 // ── Types ────────────────────────────────────────────────────────────────
 
 /// A decoded marketplace listing.
@@ -56,390 +54,67 @@ pub struct Listing {
     pub active: bool,
 }
 
-// ── Bytecode Generation ──────────────────────────────────────────────────
+// ── Contract Definition ──────────────────────────────────────────────────
 
-/// Build the marketplace contract bytecode.
+/// Build the marketplace contract bytecode using the high-level DSL.
 pub fn marketplace_contract() -> ContractCode {
-    // Build each section separately, then compute jump targets.
-    let dispatch = build_dispatch_section();
-    let list = build_list_section();
-    let mut buy = build_buy_section();
-    let mut cancel = build_cancel_section();
+    ContractBuilder::new()
+        .state("listing_count", StateType::U64)
+        .record(
+            "Listing",
+            &[
+                ("seller", FieldType::Identity), // 4 felts
+                ("item_id", FieldType::U64),
+                ("price", FieldType::U64),
+                ("active", FieldType::Bool),
+                ("_reserved", FieldType::U64),
+            ],
+        )
+        .array("listings", "Listing", MAX_LISTINGS)
+        .function("list", |f| {
+            let seller = f.caller();
+            let item_id = f.param(0);
+            let price = f.param(1);
 
-    let list_start = dispatch.len() as u32;
-    let buy_start = list_start + list.len() as u32;
-    let cancel_start = buy_start + buy.len() as u32;
+            let count = f.load("listing_count");
+            let rec = f.index("listings", count);
+            f.set(&rec, "seller", seller);
+            f.set(&rec, "item_id", item_id);
+            f.set(&rec, "price", price);
+            f.set_const(&rec, "active", 1);
 
-    // Patch dispatch jump targets (indices 5, 8, 11).
-    let mut code = dispatch;
-    patch_jump(&mut code, 5, list_start);
-    patch_jump(&mut code, 8, buy_start);
-    patch_jump(&mut code, 11, cancel_start);
+            let one = f.lit(1);
+            let new_count = f.add(count, one);
+            f.store("listing_count", new_count);
+            f.emit(seller);
+        })
+        .function("buy", |f| {
+            let _buyer = f.caller();
+            let listing_id = f.param(0);
 
-    // Patch BUY internal CJump: buy[9] skips Fail at buy[10] -> buy_start + 11
-    patch_jump(&mut buy, 9, buy_start + 11);
+            let rec = f.index("listings", listing_id);
+            let active = f.get(&rec, "active");
+            let one = f.lit(1);
+            f.require_eq(active, one);
+            f.set_const(&rec, "active", 0);
 
-    // Patch CANCEL internal CJumps:
-    // cancel[9] skips Fail at cancel[10] (active check) -> cancel_start + 11
-    // cancel[26] skips Fail at cancel[27] (seller check) -> cancel_start + 28
-    patch_jump(&mut cancel, 9, cancel_start + 11);
-    patch_jump(&mut cancel, 26, cancel_start + 28);
+            let seller = f.get(&rec, "seller");
+            f.emit(seller);
+            f.nullify(seller);
+        })
+        .function("cancel", |f| {
+            let seller = f.caller();
+            let listing_id = f.param(0);
 
-    code.extend(list);
-    code.extend(buy);
-    code.extend(cancel);
-
-    ContractCode::new(code).expect("marketplace bytecode is valid")
-}
-
-/// Build the dispatch preamble (13 instructions).
-fn build_dispatch_section() -> Vec<Opcode> {
-    use Opcode::*;
-    vec![
-        LoadInput { dst: 0, index: 0 }, // 0: r0..r3 = selector
-        LoadInput { dst: 4, index: 1 }, // 1: r4..r7 = identity
-        LoadInput { dst: 8, index: 2 }, // 2: r8..r11 = parameters
-        Const {
-            dst: 14,
-            value: LIST_SELECTOR,
-        }, // 3
-        Eq {
-            dst: 13,
-            lhs: 0,
-            rhs: 14,
-        }, // 4
-        CJump {
-            cond: 13,
-            target: 0,
-        }, // 5: -> LIST (patched)
-        Const {
-            dst: 14,
-            value: BUY_SELECTOR,
-        }, // 6
-        Eq {
-            dst: 13,
-            lhs: 0,
-            rhs: 14,
-        }, // 7
-        CJump {
-            cond: 13,
-            target: 0,
-        }, // 8: -> BUY (patched)
-        Const {
-            dst: 14,
-            value: CANCEL_SELECTOR,
-        }, // 9
-        Eq {
-            dst: 13,
-            lhs: 0,
-            rhs: 14,
-        }, // 10
-        CJump {
-            cond: 13,
-            target: 0,
-        }, // 11: -> CANCEL (patched)
-        Fail,                           // 12: unknown selector
-    ]
-}
-
-/// Build the LIST handler (~24 instructions).
-fn build_list_section() -> Vec<Opcode> {
-    use Opcode::*;
-    vec![
-        // Load listing_count from mem[0]
-        Const { dst: 12, value: 0 }, // 0
-        Load { dst: 15, addr: 12 },  // 1: r15 = listing_count
-        // Compute base = 8 + listing_count * 8
-        Const {
-            dst: 14,
-            value: RECORD_SIZE,
-        }, // 2: r14 = 8
-        Mul {
-            dst: 13,
-            lhs: 15,
-            rhs: 14,
-        }, // 3: r13 = count * 8
-        Const {
-            dst: 14,
-            value: HEADER_SIZE,
-        }, // 4: r14 = 8
-        Add {
-            dst: 12,
-            lhs: 14,
-            rhs: 13,
-        }, // 5: r12 = 8 + count*8 = base
-        // Store seller identity (r4..r7) at base+0..base+3
-        Store { src: 4, addr: 12 },  // 6: mem[base+0] = seller_0
-        Const { dst: 14, value: 1 }, // 7
-        Add {
-            dst: 12,
-            lhs: 12,
-            rhs: 14,
-        }, // 8: r12 = base+1
-        Store { src: 5, addr: 12 },  // 9: mem[base+1] = seller_1
-        Add {
-            dst: 12,
-            lhs: 12,
-            rhs: 14,
-        }, // 10: r12 = base+2
-        Store { src: 6, addr: 12 },  // 11: mem[base+2] = seller_2
-        Add {
-            dst: 12,
-            lhs: 12,
-            rhs: 14,
-        }, // 12: r12 = base+3
-        Store { src: 7, addr: 12 },  // 13: mem[base+3] = seller_3
-        // Store item_id (r8) at base+4
-        Add {
-            dst: 12,
-            lhs: 12,
-            rhs: 14,
-        }, // 14: r12 = base+4
-        Store { src: 8, addr: 12 }, // 15: mem[base+4] = item_id
-        // Store price (r9) at base+5
-        Add {
-            dst: 12,
-            lhs: 12,
-            rhs: 14,
-        }, // 16: r12 = base+5
-        Store { src: 9, addr: 12 }, // 17: mem[base+5] = price
-        // Store active = 1 at base+6
-        Add {
-            dst: 12,
-            lhs: 12,
-            rhs: 14,
-        }, // 18: r12 = base+6
-        Store { src: 14, addr: 12 }, // 19: mem[base+6] = 1 (r14=1)
-        // Increment listing_count
-        Add {
-            dst: 15,
-            lhs: 15,
-            rhs: 14,
-        }, // 20: r15 = count + 1
-        Const { dst: 12, value: 0 }, // 21
-        Store { src: 15, addr: 12 }, // 22: mem[0] = count + 1
-        // Emit listing receipt
-        EmitOutput { src: 4 }, // 23: emit [seller_0..seller_3]
-        Halt,                  // 24
-    ]
-}
-
-/// Build the BUY handler (~27 instructions).
-fn build_buy_section() -> Vec<Opcode> {
-    use Opcode::*;
-    vec![
-        // Compute base = 8 + listing_id * 8  (r8 = listing_id)
-        Const {
-            dst: 14,
-            value: RECORD_SIZE,
-        }, // 0
-        Mul {
-            dst: 13,
-            lhs: 8,
-            rhs: 14,
-        }, // 1: r13 = listing_id * 8
-        Const {
-            dst: 14,
-            value: HEADER_SIZE,
-        }, // 2
-        Add {
-            dst: 12,
-            lhs: 14,
-            rhs: 13,
-        }, // 3: r12 = base
-        // Load active flag at base+6
-        Const {
-            dst: 14,
-            value: FIELD_ACTIVE,
-        }, // 4
-        Add {
-            dst: 13,
-            lhs: 12,
-            rhs: 14,
-        }, // 5: r13 = base+6
-        Load { dst: 15, addr: 13 }, // 6: r15 = active
-        // Check active == 1
-        Const { dst: 14, value: 1 }, // 7
-        Eq {
-            dst: 13,
-            lhs: 15,
-            rhs: 14,
-        }, // 8: r13 = (active==1)?
-        CJump {
-            cond: 13,
-            target: 0,
-        }, // 9: skip Fail (patched)
-        Fail,                        // 10: listing not active
-        // Load seller identity from base+0..base+3 into r0..r3
-        Load { dst: 0, addr: 12 },   // 11: r0 = mem[base+0]
-        Const { dst: 14, value: 1 }, // 12
-        Add {
-            dst: 13,
-            lhs: 12,
-            rhs: 14,
-        }, // 13: r13 = base+1
-        Load { dst: 1, addr: 13 },   // 14: r1 = mem[base+1]
-        Add {
-            dst: 13,
-            lhs: 13,
-            rhs: 14,
-        }, // 15: r13 = base+2
-        Load { dst: 2, addr: 13 },   // 16: r2 = mem[base+2]
-        Add {
-            dst: 13,
-            lhs: 13,
-            rhs: 14,
-        }, // 17: r13 = base+3
-        Load { dst: 3, addr: 13 },   // 18: r3 = mem[base+3]
-        // Mark inactive: mem[base+6] = 0
-        Const {
-            dst: 14,
-            value: FIELD_ACTIVE,
-        }, // 19
-        Add {
-            dst: 13,
-            lhs: 12,
-            rhs: 14,
-        }, // 20: r13 = base+6
-        Const { dst: 15, value: 0 }, // 21
-        Store { src: 15, addr: 13 }, // 22: mem[base+6] = 0
-        // Emit buyer receipt and listing nullifier
-        EmitOutput { src: 4 },    // 23: emit buyer identity
-        EmitNullifier { src: 0 }, // 24: emit seller identity as nullifier
-        Halt,                     // 25
-    ]
-}
-
-/// Build the CANCEL handler (~32 instructions).
-fn build_cancel_section() -> Vec<Opcode> {
-    use Opcode::*;
-    vec![
-        // Compute base = 8 + listing_id * 8  (r8 = listing_id)
-        Const {
-            dst: 14,
-            value: RECORD_SIZE,
-        }, // 0
-        Mul {
-            dst: 13,
-            lhs: 8,
-            rhs: 14,
-        }, // 1
-        Const {
-            dst: 14,
-            value: HEADER_SIZE,
-        }, // 2
-        Add {
-            dst: 12,
-            lhs: 14,
-            rhs: 13,
-        }, // 3: r12 = base
-        // Load active flag at base+6
-        Const {
-            dst: 14,
-            value: FIELD_ACTIVE,
-        }, // 4
-        Add {
-            dst: 13,
-            lhs: 12,
-            rhs: 14,
-        }, // 5: r13 = base+6
-        Load { dst: 15, addr: 13 }, // 6: r15 = active
-        // Check active == 1
-        Const { dst: 14, value: 1 }, // 7
-        Eq {
-            dst: 13,
-            lhs: 15,
-            rhs: 14,
-        }, // 8
-        CJump {
-            cond: 13,
-            target: 0,
-        }, // 9: skip Fail (patched)
-        Fail,                        // 10: listing not active
-        // Load seller from base+0..base+3 into r0..r3
-        Load { dst: 0, addr: 12 },   // 11: r0 = mem[base+0]
-        Const { dst: 14, value: 1 }, // 12
-        Add {
-            dst: 13,
-            lhs: 12,
-            rhs: 14,
-        }, // 13
-        Load { dst: 1, addr: 13 },   // 14
-        Add {
-            dst: 13,
-            lhs: 13,
-            rhs: 14,
-        }, // 15
-        Load { dst: 2, addr: 13 },   // 16
-        Add {
-            dst: 13,
-            lhs: 13,
-            rhs: 14,
-        }, // 17
-        Load { dst: 3, addr: 13 },   // 18
-        // Compare stored seller (r0..r3) with input seller (r4..r7)
-        Eq {
-            dst: 13,
-            lhs: 0,
-            rhs: 4,
-        }, // 19
-        Eq {
-            dst: 15,
-            lhs: 1,
-            rhs: 5,
-        }, // 20
-        Mul {
-            dst: 13,
-            lhs: 13,
-            rhs: 15,
-        }, // 21: AND
-        Eq {
-            dst: 15,
-            lhs: 2,
-            rhs: 6,
-        }, // 22
-        Mul {
-            dst: 13,
-            lhs: 13,
-            rhs: 15,
-        }, // 23: AND
-        Eq {
-            dst: 15,
-            lhs: 3,
-            rhs: 7,
-        }, // 24
-        Mul {
-            dst: 13,
-            lhs: 13,
-            rhs: 15,
-        }, // 25: AND (all 4 match?)
-        CJump {
-            cond: 13,
-            target: 0,
-        }, // 26: skip Fail (patched)
-        Fail, // 27: seller mismatch
-        // Mark inactive
-        Const {
-            dst: 14,
-            value: FIELD_ACTIVE,
-        }, // 28
-        Add {
-            dst: 13,
-            lhs: 12,
-            rhs: 14,
-        }, // 29
-        Const { dst: 15, value: 0 }, // 30
-        Store { src: 15, addr: 13 }, // 31: mem[base+6] = 0
-        Halt,                        // 32
-    ]
-}
-
-fn patch_jump(code: &mut [Opcode], index: usize, target: u32) {
-    match &mut code[index] {
-        Opcode::CJump { target: t, .. } => *t = target,
-        Opcode::Jump { target: t } => *t = target,
-        _ => panic!("not a jump at index {index}"),
-    }
+            let rec = f.index("listings", listing_id);
+            let stored_seller = f.get(&rec, "seller");
+            f.require_eq(stored_seller, seller);
+            let active = f.get(&rec, "active");
+            let one = f.lit(1);
+            f.require_eq(active, one);
+            f.set_const(&rec, "active", 0);
+        })
+        .build()
 }
 
 // ── Function Hashes ──────────────────────────────────────────────────────
