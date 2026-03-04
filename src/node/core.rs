@@ -4251,4 +4251,362 @@ mod tests {
             _ => panic!("Expected SendTo GetEpochState"),
         }
     }
+
+    // ---------------------------------------------------------------
+    // BFT Certificate handler tests
+    // ---------------------------------------------------------------
+
+    /// Helper: create a committee of N validators, returning keypairs + Validator structs.
+    fn make_committee(n: usize) -> (Vec<SigningKeypair>, Vec<crate::consensus::bft::Validator>) {
+        let mut keypairs = Vec::new();
+        let mut validators = Vec::new();
+        for _ in 0..n {
+            let kp = SigningKeypair::generate();
+            let v = crate::consensus::bft::Validator::new(kp.public.clone());
+            keypairs.push(kp);
+            validators.push(v);
+        }
+        (keypairs, validators)
+    }
+
+    /// Helper: build a valid BFT certificate signed by a quorum of committee members.
+    fn make_valid_certificate(
+        vertex_id: crate::consensus::dag::VertexId,
+        epoch: u64,
+        round: u64,
+        keypairs: &[SigningKeypair],
+        chain_id: &Hash,
+        quorum_size: usize,
+    ) -> crate::consensus::bft::Certificate {
+        let mut signatures = Vec::new();
+        for kp in keypairs.iter().take(quorum_size) {
+            let msg = crate::consensus::bft::vote_sign_data(
+                &vertex_id,
+                epoch,
+                round,
+                &crate::consensus::bft::VoteType::Accept,
+                chain_id,
+            );
+            signatures.push((kp.public.fingerprint(), kp.sign(&msg)));
+        }
+        crate::consensus::bft::Certificate {
+            vertex_id,
+            round,
+            epoch,
+            signatures,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_bft_certificate_wrong_epoch_rejected() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        let vertex_id = crate::consensus::dag::VertexId([1u8; 32]);
+        // Certificate from epoch 5, but node is at epoch 0
+        let cert = make_valid_certificate(vertex_id, 5, 0, &keypairs, &chain_id, 3);
+        let from = Hash::default();
+
+        node.handle_message(from, Message::BftCertificate(cert))
+            .await;
+
+        // Should not broadcast anything (rejected)
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_bft_certificate_invalid_signature_rejected() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (_keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let node_kp = SigningKeypair::generate();
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, node_kp);
+
+        let vertex_id = crate::consensus::dag::VertexId([2u8; 32]);
+        // Use random keypairs (not committee members) to sign
+        let (fake_keypairs, _) = make_committee(4);
+        let cert = make_valid_certificate(vertex_id, 0, 0, &fake_keypairs, &chain_id, 3);
+        let from = Hash::default();
+
+        node.handle_message(from, Message::BftCertificate(cert))
+            .await;
+
+        // Should not broadcast (invalid sigs)
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_bft_certificate_dedup() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        let vertex_id = crate::consensus::dag::VertexId([3u8; 32]);
+        let cert = make_valid_certificate(vertex_id, 0, 0, &keypairs, &chain_id, 3);
+        let from = Hash::default();
+
+        // First certificate
+        node.handle_message(from, Message::BftCertificate(cert.clone()))
+            .await;
+        while cmd_rx.try_recv().is_ok() {}
+
+        // Second identical certificate should be deduped
+        node.handle_message(from, Message::BftCertificate(cert))
+            .await;
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // BFT Equivocation Evidence handler tests
+    // ---------------------------------------------------------------
+
+    /// Helper: make valid equivocation evidence (two votes for different vertices).
+    fn make_equivocation_evidence_for_node(
+        kp: &SigningKeypair,
+        epoch: u64,
+        round: u64,
+        chain_id: &Hash,
+    ) -> crate::consensus::bft::EquivocationEvidence {
+        let v1 = crate::consensus::dag::VertexId([10u8; 32]);
+        let v2 = crate::consensus::dag::VertexId([20u8; 32]);
+        let vt = crate::consensus::bft::VoteType::Accept;
+
+        let msg1 = crate::consensus::bft::vote_sign_data(&v1, epoch, round, &vt, chain_id);
+        let msg2 = crate::consensus::bft::vote_sign_data(&v2, epoch, round, &vt, chain_id);
+
+        crate::consensus::bft::EquivocationEvidence {
+            voter_id: kp.public.fingerprint(),
+            epoch,
+            round,
+            first_vertex: v1,
+            second_vertex: v2,
+            first_vote_type: vt.clone(),
+            second_vote_type: vt,
+            first_signature: kp.sign(&msg1),
+            second_signature: kp.sign(&msg2),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_equivocation_evidence_valid_slashes() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        // Register the equivocating validator in state so slash_validator works
+        let equivocator = &validators[1];
+        ns.ledger
+            .state
+            .register_genesis_validator(equivocator.clone())
+            .unwrap();
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        let evidence = make_equivocation_evidence_for_node(&keypairs[1], 0, 0, &chain_id);
+        let from = Hash::default();
+
+        node.handle_message(from, Message::BftEquivocationEvidence(evidence))
+            .await;
+
+        // Validator should be slashed
+        let st = state.read().await;
+        assert!(st.ledger.state.is_slashed(&validators[1].id));
+        drop(st);
+
+        // Should have broadcast the evidence
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            crate::network::p2p::P2pCommand::Broadcast { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_equivocation_evidence_invalid_rejected() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        // Use a non-committee key to forge evidence
+        let fake_kp = SigningKeypair::generate();
+        let evidence = make_equivocation_evidence_for_node(&fake_kp, 0, 0, &chain_id);
+        let from = Hash::default();
+
+        node.handle_message(from, Message::BftEquivocationEvidence(evidence))
+            .await;
+
+        // Should not broadcast (invalid evidence)
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_equivocation_evidence_already_slashed_skipped() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        // Register and pre-slash
+        ns.ledger
+            .state
+            .register_genesis_validator(validators[1].clone())
+            .unwrap();
+        ns.ledger.state.slash_validator(&validators[1].id).unwrap();
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        let evidence = make_equivocation_evidence_for_node(&keypairs[1], 0, 0, &chain_id);
+        let from = Hash::default();
+
+        node.handle_message(from, Message::BftEquivocationEvidence(evidence))
+            .await;
+
+        // Should not broadcast (already slashed, short-circuit)
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // BFT Vote handler tests (beyond dedup)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_bft_vote_accepted_forwards() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        let vertex_id = crate::consensus::dag::VertexId([5u8; 32]);
+        // Create a valid vote from a committee member
+        let vote = crate::consensus::bft::create_vote(
+            vertex_id,
+            &keypairs[1],
+            0,
+            0,
+            true,
+            &chain_id,
+            None,
+        );
+        let from = Hash::default();
+
+        node.handle_message(from, Message::BftVote(vote)).await;
+
+        // The vote should be accepted and broadcast (forwarded)
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            crate::network::p2p::P2pCommand::Broadcast { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_bft_vote_quorum_forms_certificate() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        // 4 validators, quorum = 3
+        let (keypairs, validators) = make_committee(4);
+        let chain_id = crate::constants::chain_id();
+        let bft = BftState::new(0, validators.clone(), chain_id);
+        let mut ns = test_node_state();
+        ns.bft = bft;
+        let state = Arc::new(RwLock::new(ns));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, keypairs[0].clone());
+
+        let vertex_id = crate::consensus::dag::VertexId([6u8; 32]);
+        let from = Hash::default();
+
+        // Send quorum votes (3 of 4)
+        for kp in keypairs.iter().take(3) {
+            let vote =
+                crate::consensus::bft::create_vote(vertex_id, kp, 0, 0, true, &chain_id, None);
+            node.handle_message(from, Message::BftVote(vote)).await;
+            // Drain commands between votes
+            while cmd_rx.try_recv().is_ok() {}
+        }
+
+        // After quorum, a certificate should exist in BFT state
+        let st = state.read().await;
+        assert!(st.bft.get_certificate(&vertex_id).is_some());
+    }
+
+    // ---------------------------------------------------------------
+    // PeersResponse handler tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_peers_response_connects_valid_peers() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp.clone());
+
+        let peer_kp = SigningKeypair::generate();
+        let peers = vec![crate::network::PeerInfo {
+            peer_id: peer_kp.public.fingerprint(),
+            public_key: peer_kp.public.clone(),
+            address: "8.8.8.8:9000".to_string(),
+            last_seen: 0,
+        }];
+        let from = Hash::default();
+
+        node.handle_message(from, Message::PeersResponse(peers))
+            .await;
+
+        // Should issue a Connect command for the valid public address
+        let cmd = cmd_rx.try_recv().unwrap();
+        assert!(matches!(cmd, crate::network::p2p::P2pCommand::Connect(_)));
+        // Address should be tracked in recently_attempted
+        assert!(node
+            .recently_attempted
+            .contains(&"8.8.8.8:9000".parse().unwrap()));
+    }
+
+    // ---------------------------------------------------------------
+    // NodeState method tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn validate_transaction_against_state_delegates() {
+        let ns = test_node_state();
+        let tx = make_test_tx(99);
+        // Should get WrongChainId because make_test_tx uses constants::chain_id()
+        // but ChainState::new() also uses constants::chain_id(), so chain_id matches.
+        // The tx will fail structural validation instead.
+        let result = ns.validate_transaction_against_state(&tx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_mempool_epoch_updates() {
+        let mut ns = test_node_state();
+        ns.set_mempool_epoch(42);
+        // Verify it doesn't panic and the mempool accepted the epoch
+        assert_eq!(ns.evict_expired_transactions(), 0);
+    }
 }

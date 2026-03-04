@@ -2162,4 +2162,126 @@ mod tests {
         let err = wallet.select_coins(1000, 0).unwrap_err();
         assert!(matches!(err, WalletError::ArithmeticOverflow));
     }
+
+    #[test]
+    fn clear_history_empties() {
+        let mut wallet = Wallet::new();
+        // Push a history entry by scanning a transaction
+        let recipient = crate::crypto::keys::FullKeypair::generate();
+        let tx = crate::transaction::builder::TransactionBuilder::new()
+            .add_input(crate::transaction::builder::InputSpec {
+                value: 300,
+                blinding: BlindingFactor::from_bytes([1u8; 32]),
+                spend_auth: crate::hash_domain(b"test", &[1]),
+                merkle_path: vec![],
+            })
+            .add_output(recipient.kem.public.clone(), 100)
+            .build()
+            .unwrap();
+        wallet.scan_transaction(&tx);
+        // Even if nothing was claimed, calling clear_history should not panic
+        wallet.clear_history();
+        assert!(wallet.history.is_empty());
+    }
+
+    #[test]
+    fn cancel_nonexistent_transaction_noop() {
+        let mut wallet = wallet_with_utxos(&[1000]);
+        let fake_binding = crate::hash_domain(b"fake", &[42]);
+        // Should not panic when canceling a non-existent pending transaction
+        wallet.cancel_transaction(&fake_binding);
+        // All outputs should remain unspent
+        assert!(wallet
+            .outputs
+            .iter()
+            .all(|o| matches!(o.status, SpendStatus::Unspent)));
+    }
+
+    #[test]
+    fn resolve_commitment_indices_backfills() {
+        let mut wallet = wallet_with_utxos(&[500, 600]);
+        // All commitment_index should be None initially
+        assert!(wallet.outputs.iter().all(|o| o.commitment_index.is_none()));
+
+        // Create a ChainState and add the same commitments
+        let mut state = crate::state::ChainState::new();
+        for output in &wallet.outputs {
+            state.add_commitment(output.commitment).unwrap();
+        }
+
+        // Resolve should backfill the indices
+        wallet.resolve_commitment_indices(&state);
+        assert!(wallet.outputs.iter().all(|o| o.commitment_index.is_some()));
+        // Indices should be 0 and 1
+        let indices: Vec<usize> = wallet
+            .outputs
+            .iter()
+            .map(|o| o.commitment_index.unwrap())
+            .collect();
+        assert!(indices.contains(&0));
+        assert!(indices.contains(&1));
+    }
+
+    #[test]
+    fn scan_transaction_with_state_populates_index() {
+        use crate::transaction::builder::{InputSpec, TransactionBuilder};
+
+        let mut wallet = Wallet::new();
+        let mut state = crate::state::ChainState::new();
+
+        // Build a transaction that sends to this wallet
+        let tx = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 300,
+                blinding: BlindingFactor::from_bytes([1u8; 32]),
+                spend_auth: crate::hash_domain(b"test", &[1]),
+                merkle_path: vec![],
+            })
+            .add_output(wallet.kem_public_key().clone(), 100)
+            .build()
+            .unwrap();
+
+        // Add the output commitments to state first so find_commitment works
+        for output in &tx.outputs {
+            state.add_commitment(output.commitment).unwrap();
+        }
+
+        // Scan with state should populate commitment_index
+        wallet.scan_transaction_with_state(&tx, Some(&state));
+
+        // Check that any claimed outputs have commitment_index set
+        for output in &wallet.outputs {
+            assert!(
+                output.commitment_index.is_some(),
+                "commitment_index should be populated when scanning with state"
+            );
+        }
+    }
+
+    #[test]
+    fn wallet_sync_empty_node() {
+        use crate::consensus::bft::BftState;
+        use crate::node::mempool::Mempool;
+        use crate::node::storage::SledStorage;
+        use crate::node::NodeState;
+        use crate::state::Ledger;
+        use std::time::Instant;
+
+        let ns = NodeState {
+            ledger: Ledger::new(),
+            mempool: Mempool::with_defaults(),
+            storage: SledStorage::open_temporary().unwrap(),
+            bft: BftState::new(0, vec![], crate::constants::chain_id()),
+            last_finalized_time: None,
+            peer_highest_round: 0,
+            node_start_time: Instant::now(),
+            version_signals: std::collections::HashMap::new(),
+            network: crate::constants::NetworkId::Mainnet,
+        };
+
+        let mut wallet = Wallet::new();
+        // Sync against empty node should succeed without errors
+        wallet.sync(&ns).unwrap();
+        assert_eq!(wallet.balance(), 0);
+    }
 }
