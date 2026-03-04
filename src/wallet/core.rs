@@ -341,7 +341,7 @@ impl Wallet {
         // Pick the smallest that pushes total past needed.
         let remaining = &candidates[..base_start];
         for &(idx, value) in remaining.iter().rev() {
-            let total = base_sum.saturating_add(value);
+            let total = base_sum.checked_add(value)?;
             if total >= needed {
                 let mut indices = base_indices.clone();
                 indices.push(idx);
