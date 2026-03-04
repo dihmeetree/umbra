@@ -408,7 +408,7 @@ pub struct P2pConfig {
     pub chain_id: crate::Hash,
 }
 
-/// Peer reputation tracking (F7).
+/// Peer reputation tracking.
 struct PeerReputation {
     score: i32,
     violations: u32,

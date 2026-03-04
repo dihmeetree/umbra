@@ -223,7 +223,7 @@ pub struct BftState {
     round_votes: HashMap<(Hash, u64), VertexId>,
     /// Detected equivocation evidence (slashable misbehaviour)
     equivocations: Vec<EquivocationEvidence>,
-    /// Epoch seed for VRF verification of votes (H1).
+    /// Epoch seed for VRF verification of votes.
     epoch_seed: Option<EpochSeed>,
     /// Total validators for VRF is_selected check.
     total_validators: usize,
@@ -272,7 +272,7 @@ impl BftState {
         self.our_vrf_proof = Some(vrf);
     }
 
-    /// Set the epoch seed and total validators for VRF verification (H1).
+    /// Set the epoch seed and total validators for VRF verification.
     pub fn set_epoch_context(&mut self, epoch_seed: EpochSeed, total_validators: usize) {
         self.epoch_seed = Some(epoch_seed);
         self.total_validators = total_validators;
@@ -542,7 +542,7 @@ impl BftState {
 
     /// Try to certify a vertex if it has enough Accept votes.
     ///
-    /// Design note (L6): Only `Accept` votes count toward quorum. `Reject` votes
+    /// Design note: Only `Accept` votes count toward quorum. `Reject` votes
     /// are recorded but do not prevent or contribute to finalization. This is
     /// intentional — rejections serve as advisory signals (observable via
     /// `rejection_count()`), and the proposer should re-propose if rejections

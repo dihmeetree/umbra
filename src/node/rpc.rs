@@ -535,7 +535,7 @@ async fn get_finalized_vertices(
     }))
 }
 
-// ── GET /health (F3) ──
+// ── GET /health ──
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -564,7 +564,7 @@ async fn get_health(State(state): State<RpcState>) -> Json<HealthResponse> {
     })
 }
 
-// ── GET /metrics (F3) ──
+// ── GET /metrics ──
 
 async fn get_metrics(
     State(state): State<RpcState>,
@@ -631,7 +631,7 @@ async fn get_metrics(
     )
 }
 
-// ── GET /fee-estimate (F4) ──
+// ── GET /fee-estimate ──
 
 #[derive(Deserialize)]
 struct FeeEstimateQuery {
@@ -665,7 +665,7 @@ async fn get_fee_estimate(Query(params): Query<FeeEstimateQuery>) -> Json<FeeEst
     })
 }
 
-// ── GET /vertex/:id (F15) ──
+// ── GET /vertex/:id ──
 
 async fn get_vertex_by_id(
     State(state): State<RpcState>,
@@ -713,7 +713,7 @@ async fn get_vertex_by_id(
     }
 }
 
-// ── GET /commitment-proof/:index (F15) ──
+// ── GET /commitment-proof/:index ──
 // Privacy note: this endpoint allows querying proofs for arbitrary indices.
 // In production, rate-limit or require authentication to prevent tree enumeration.
 
@@ -785,7 +785,7 @@ async fn get_commitment_proof(
     }))
 }
 
-// ── GET /state-summary (F15) ──
+// ── GET /state-summary ──
 
 #[derive(Serialize)]
 struct StateSummaryResponse {

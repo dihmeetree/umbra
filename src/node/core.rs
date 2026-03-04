@@ -47,7 +47,7 @@ pub struct NodeState {
     pub peer_highest_round: u64,
     /// Time the node was started (for health/metrics reporting).
     pub node_start_time: Instant,
-    /// Protocol version signals per epoch (F16).
+    /// Protocol version signals per epoch.
     /// Maps version -> set of proposer fingerprints that signaled it.
     pub version_signals: HashMap<u32, HashSet<Hash>>,
     /// Network this node is running on.
@@ -2161,7 +2161,7 @@ impl Node {
                         .await;
                 }
 
-                // Track protocol version signal (F16), deduplicated per validator
+                // Track protocol version signal, deduplicated per validator
                 if let Some(v) = state.ledger.dag.get(vertex_id) {
                     if state.version_signals.contains_key(&v.protocol_version)
                         || state.version_signals.len() < crate::constants::MAX_VERSION_SIGNALS

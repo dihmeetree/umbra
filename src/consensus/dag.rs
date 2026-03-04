@@ -45,7 +45,7 @@ pub struct Vertex {
     /// `None` only for the genesis vertex.
     #[serde(default)]
     pub vrf_proof: Option<VrfOutput>,
-    /// Protocol version signaled by this vertex (F16).
+    /// Protocol version signaled by this vertex.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u32,
 }

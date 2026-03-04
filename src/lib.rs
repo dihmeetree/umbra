@@ -138,7 +138,7 @@ pub mod constants {
 
     /// Peer exchange interval in milliseconds (peer discovery gossip).
     pub const PEER_EXCHANGE_INTERVAL_MS: u64 = 60_000;
-    /// Maximum new peers to connect per discovery round (F5).
+    /// Maximum new peers to connect per discovery round.
     pub const PEER_DISCOVERY_MAX: usize = 5;
 
     /// Padding bucket size (bytes) for encrypted P2P frames. Messages are padded
@@ -146,9 +146,9 @@ pub mod constants {
     /// Set to 1024 to reduce message type classification by size bucket.
     pub const P2P_PADDING_BUCKET: usize = 1024;
 
-    /// Number of Dandelion++ stem hops before fluffing (F6).
+    /// Number of Dandelion++ stem hops before fluffing.
     pub const DANDELION_STEM_HOPS: u8 = 2;
-    /// Dandelion++ stem timeout in milliseconds (F6).
+    /// Dandelion++ stem timeout in milliseconds.
     pub const DANDELION_TIMEOUT_MS: u64 = 5_000;
     /// Maximum entries in the Dandelion++ stem_txs tracking map.
     pub const MAX_STEM_TXS: usize = 5_000;
@@ -157,30 +157,30 @@ pub mod constants {
     /// Maximum random delay (ms) before Dandelion++ stem forwarding (anti-timing).
     pub const DANDELION_STEM_DELAY_MAX_MS: u64 = 500;
 
-    /// Initial reputation score for new peers (F7).
+    /// Initial reputation score for new peers.
     pub const PEER_INITIAL_REPUTATION: i32 = 100;
-    /// Reputation threshold below which a peer is banned (F7).
+    /// Reputation threshold below which a peer is banned.
     pub const PEER_BAN_THRESHOLD: i32 = 20;
-    /// Duration of a peer ban in seconds (F7).
+    /// Duration of a peer ban in seconds.
     pub const PEER_BAN_DURATION_SECS: u64 = 3600;
-    /// Reputation penalty for a rate-limit violation (F7).
+    /// Reputation penalty for a rate-limit violation.
     pub const PEER_PENALTY_RATE_LIMIT: i32 = 10;
-    /// Reputation penalty for an invalid message (F7).
+    /// Reputation penalty for an invalid message.
     pub const PEER_PENALTY_INVALID_MSG: i32 = 20;
-    /// Reputation penalty for a handshake failure (F7).
+    /// Reputation penalty for a handshake failure.
     pub const PEER_PENALTY_HANDSHAKE_FAIL: i32 = 30;
 
-    /// Number of epochs of finalized data to retain in memory (F12).
+    /// Number of epochs of finalized data to retain in memory.
     pub const PRUNING_RETAIN_EPOCHS: u64 = 100;
 
-    /// Current protocol version for upgrade signaling (F16).
+    /// Current protocol version for upgrade signaling.
     pub const PROTOCOL_VERSION_ID: u32 = 2;
-    /// Threshold fraction (numerator) for protocol upgrade activation (F16).
+    /// Threshold fraction (numerator) for protocol upgrade activation.
     /// Activation requires > UPGRADE_THRESHOLD_NUM / UPGRADE_THRESHOLD_DEN signals.
     pub const UPGRADE_THRESHOLD_NUM: u64 = 75;
-    /// Threshold fraction (denominator) for protocol upgrade activation (F16).
+    /// Threshold fraction (denominator) for protocol upgrade activation.
     pub const UPGRADE_THRESHOLD_DEN: u64 = 100;
-    /// Maximum distinct protocol versions tracked per epoch (F16).
+    /// Maximum distinct protocol versions tracked per epoch.
     pub const MAX_VERSION_SIGNALS: usize = 64;
 
     // ── DDoS Protection ──
