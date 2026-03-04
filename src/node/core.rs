@@ -428,7 +428,7 @@ impl Node {
 
         // Genesis validator bootstrap
         let mut our_vrf_output = None;
-        let restored_finalized = storage.finalized_vertex_count().unwrap_or(0);
+        let restored_finalized = storage.finalized_vertex_count()?;
         if config.genesis_validator {
             let validator = Validator::with_kem(
                 config.keypair.public.clone(),
@@ -515,9 +515,20 @@ impl Node {
 
                 tracing::info!("Registered as genesis validator (fresh start)");
             } else {
-                // Restored from storage: advance BFT/DAG rounds to match
-                // the last finalized position so new proposals are accepted.
-                let target_round = restored_finalized + 1;
+                // Restored from storage: advance BFT/DAG rounds past the
+                // highest finalized vertex's round so new proposals are valid.
+                // Rounds can advance without finalization, so we derive the
+                // target from the actual vertex round, not the finalized count.
+                let target_round = if restored_finalized > 0 {
+                    let last_vertices = storage
+                        .get_finalized_vertices_after(restored_finalized.saturating_sub(1), 1)?;
+                    last_vertices
+                        .last()
+                        .map(|(_, v)| v.round + 1)
+                        .unwrap_or(restored_finalized + 1)
+                } else {
+                    1
+                };
                 for _ in 0..target_round {
                     bft.advance_round();
                     ledger.dag.advance_round();

@@ -221,57 +221,69 @@ async fn async_main() {
     );
 
     {
-        let count_before = {
-            let s = node_states[0].read().await;
-            s.finalized_vertex_count().unwrap_or(0)
-        };
+        // Record starting counts for all surviving nodes (0, 1, 2)
+        let mut counts_before = Vec::new();
+        for ns in node_states.iter().take(3) {
+            let s = ns.read().await;
+            counts_before.push(s.finalized_vertex_count().unwrap_or(0));
+        }
 
         println!("  Shutting down validator 3...");
         node_tokens[3].cancel();
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         println!("  Waiting for finalization with 3/4 validators...");
-        let target = count_before + 2;
+        // Require a quorum (2 of 3 surviving) to finalize at least 2 new vertices
+        let quorum_needed = 2;
         let mut finalized = false;
 
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let current = {
-                let s = node_states[0].read().await;
-                s.finalized_vertex_count().unwrap_or(0)
-            };
-            if current >= target {
+            let mut reached = 0;
+            for (i, ns) in node_states.iter().take(3).enumerate() {
+                let current = {
+                    let s = ns.read().await;
+                    s.finalized_vertex_count().unwrap_or(0)
+                };
+                if current >= counts_before[i] + 2 {
+                    reached += 1;
+                }
+            }
+            if reached >= quorum_needed {
                 finalized = true;
                 break;
             }
         }
 
         if finalized {
-            let count_after = {
-                let s = node_states[0].read().await;
-                s.finalized_vertex_count().unwrap_or(0)
-            };
+            let mut counts_after = Vec::new();
+            for ns in node_states.iter().take(3) {
+                let s = ns.read().await;
+                counts_after.push(s.finalized_vertex_count().unwrap_or(0));
+            }
             println!(
-                "  {} Consensus continued: {} -> {} finalized vertices",
+                "  {} Consensus continued: {:?} -> {:?} finalized vertices ({}/{} quorum)",
                 "OK".green().bold(),
-                count_before,
-                count_after
+                counts_before,
+                counts_after,
+                quorum_needed,
+                3
             );
             results.push(TestResult::pass(
                 "Fault Tolerance: 1-of-4 offline",
-                &format!(
-                    "finalization continued ({} -> {} vertices)",
-                    count_before, count_after
-                ),
+                &format!("quorum reached: {:?} -> {:?}", counts_before, counts_after),
             ));
         } else {
             println!(
-                "  {} Consensus stalled after validator shutdown",
+                "  {} Consensus stalled after validator shutdown (quorum not reached)",
                 "FAIL".red().bold()
             );
             results.push(TestResult::fail(
                 "Fault Tolerance: 1-of-4 offline",
-                "no new vertices finalized within 20s after shutting down 1 validator",
+                &format!(
+                    "quorum of {}/3 not reached within 20s (started at {:?})",
+                    quorum_needed, counts_before
+                ),
             ));
         }
     }
