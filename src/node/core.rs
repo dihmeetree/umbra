@@ -1208,6 +1208,7 @@ impl Node {
             Message::EpochStateResponse {
                 epoch: peer_epoch,
                 nullifier_count,
+                commitment_root,
                 ..
             } => {
                 // Check if we need to sync from this peer
@@ -1220,10 +1221,16 @@ impl Node {
 
                     let state = self.state.read().await;
                     let our_nullifiers = state.ledger.state.nullifier_count() as u64;
+                    let our_commitment_root = state.ledger.state.commitment_root();
                     drop(state);
 
-                    // Use nullifier count as a rough proxy for how far ahead the peer is
-                    if nullifier_count > our_nullifiers || our_finalized == 0 {
+                    // Use nullifier count and commitment root to detect divergence.
+                    // Nullifier count alone misses empty consensus rounds (no txs),
+                    // so also compare commitment roots to catch any state difference.
+                    if nullifier_count > our_nullifiers
+                        || our_finalized == 0
+                        || commitment_root != our_commitment_root
+                    {
                         let gap = nullifier_count.saturating_sub(our_nullifiers);
                         let use_snapshot =
                             our_finalized == 0 || gap > crate::constants::SNAPSHOT_SYNC_THRESHOLD;
