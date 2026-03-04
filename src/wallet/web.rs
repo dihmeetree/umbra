@@ -446,9 +446,14 @@ async fn init_action(
         .into_response();
     }
 
-    // Use the password from the form (empty string -> None)
-    let raw_pw = form.password.filter(|p| !p.is_empty());
-    let raw_confirm = form.password_confirm.filter(|p| !p.is_empty());
+    // Use the password from the form (empty string -> None).
+    // Wrap in Zeroizing immediately so both are wiped on any exit path.
+    let raw_pw: Option<Zeroizing<String>> =
+        form.password.filter(|p| !p.is_empty()).map(Zeroizing::new);
+    let raw_confirm: Option<Zeroizing<String>> = form
+        .password_confirm
+        .filter(|p| !p.is_empty())
+        .map(Zeroizing::new);
 
     // Validate password confirmation
     match (&raw_pw, &raw_confirm) {
@@ -470,8 +475,9 @@ async fn init_action(
         }
         _ => {} // Both None or both match
     }
+    drop(raw_confirm);
 
-    let password = raw_pw.map(|p| Arc::new(Zeroizing::new(p)));
+    let password = raw_pw.map(Arc::new);
     let wallet = Wallet::new();
 
     // Run blocking save off the async runtime thread
