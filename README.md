@@ -163,7 +163,7 @@ umbra/
     error.html              Error display
 ```
 
-**~35,000 lines of Rust** across 45 source files with **1175 tests**.
+**~35,000 lines of Rust** across 45 source files with **1203 tests**.
 
 ## Building
 
@@ -539,13 +539,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (1175 tests)
+cargo test                       # Full suite (1203 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1175 tests cover:
+All 1203 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -1034,7 +1034,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1175 tests
+- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1203 tests
 
 ## License
 

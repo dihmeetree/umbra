@@ -524,11 +524,13 @@ pub fn cmd_init_with_recovery(data_dir: &Path) -> Result<(), Box<dyn std::error:
     // Prompt user to confirm they have written down the phrase before
     // clearing it from the terminal. This reduces the risk of the phrase
     // being lost if the user did not notice or save it.
-    println!("Have you written down the recovery phrase? (type 'yes' to confirm)");
-    let mut confirmation = String::new();
-    let _ = std::io::stdin().read_line(&mut confirmation);
-    if confirmation.trim().to_lowercase() != "yes" {
-        println!("WARNING: You did not confirm. Make sure to save the phrase above!");
+    if !cfg!(test) {
+        println!("Have you written down the recovery phrase? (type 'yes' to confirm)");
+        let mut confirmation = String::new();
+        let _ = std::io::stdin().read_line(&mut confirmation);
+        if confirmation.trim().to_lowercase() != "yes" {
+            println!("WARNING: You did not confirm. Make sure to save the phrase above!");
+        }
     }
 
     // Clear terminal screen AND scrollback buffer via ANSI escape codes.
@@ -860,5 +862,17 @@ mod tests {
         let export_path = dir.path().join("exported.umbra-address");
         let result = cmd_export(dir.path(), &export_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pw_str_some() {
+        let pw = Some(Zeroizing::new("secret".to_string()));
+        assert_eq!(pw_str(&pw), Some("secret"));
+    }
+
+    #[test]
+    fn pw_str_none() {
+        let pw: Option<Zeroizing<String>> = None;
+        assert_eq!(pw_str(&pw), None);
     }
 }

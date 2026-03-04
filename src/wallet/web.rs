@@ -1385,4 +1385,42 @@ mod tests {
         // Should return 200 with error flash, not redirect
         assert_eq!(resp.status(), 200);
     }
+
+    #[test]
+    fn is_password_required_matches_variant() {
+        assert!(is_password_required(&WalletError::PasswordRequired));
+    }
+
+    #[test]
+    fn is_password_required_rejects_other_errors() {
+        assert!(!is_password_required(&WalletError::InsufficientFunds {
+            available: 0,
+            needed: 100,
+        }));
+        assert!(!is_password_required(&WalletError::Rpc("test".into())));
+        assert!(!is_password_required(&WalletError::ArithmeticOverflow));
+    }
+
+    #[tokio::test]
+    async fn send_action_rejects_invalid_csrf() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state);
+        let body = "csrf_token=bad-token&recipient=test&amount=100";
+        let resp = send_request(
+            app,
+            Request::post("/send")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+        // CSRF rejection returns 200 with error flash message
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("Invalid CSRF token"));
+    }
 }
