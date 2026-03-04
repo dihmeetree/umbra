@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod consensus;
+pub mod contracts;
 pub mod crypto;
 pub mod demo;
 pub mod network;
