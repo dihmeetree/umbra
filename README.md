@@ -163,7 +163,7 @@ umbra/
     error.html              Error display
 ```
 
-**~43,000 lines of Rust** across 45 source files with **1207 tests**.
+**~43,000 lines of Rust** across 45 source files with **1277 tests**.
 
 ## Building
 
@@ -539,13 +539,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (1207 tests)
+cargo test                       # Full suite (1277 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1207 tests cover:
+All 1277 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -568,6 +568,17 @@ All 1207 tests cover:
 - **Wallet** — scanning, balance tracking, spending with change, pending transaction confirm/cancel, balance excludes pending, keypair preservation; file save/load roundtrip (keys, outputs, messages, pending status, history); encrypted file save/load roundtrip (wrong password rejected, no password on encrypted file rejected, unencrypted backward compatibility); transaction history recording (send, receive, coinbase); mnemonic generation and roundtrip with checksum validation; recovery backup encrypt/decrypt, nonce uniqueness; UTXO consolidation (success path with history, fee exceeds total); pending output expiry (basic, not-yet-expired, exact boundary epoch); insufficient funds and arithmetic overflow; saturating balance addition; history cap enforcement; coinbase output scanning; blake3_binding mismatch rejection
 - **Wallet CLI** — init with recovery phrase (creates wallet + backup files), recover from mnemonic + backup, history display, address display, export creates valid address file, messages on empty wallet; RPC client creation (HTTP, mTLS missing files), wallet_path/address_path helpers, load_wallet_from_nonexistent_path, cmd_export_fails_without_init
 - **End-to-end** — fund, transfer, message decrypt, bystander non-detection
+- **Cross-chain replay** (integration) — chain_id differs per network, BFT vote wrong chain_id rejected, certificate wrong chain_id rejected, cross-epoch vote isolation, Hello message chain_id filtering
+- **Dandelion++ privacy** (integration) — transaction propagation between peers, broadcast reaches all peers, unicast reaches only target, transaction message integrity through encrypted transport
+- **Epoch transitions** (integration) — multi-epoch advance, fee distribution on epoch advance, validator activation delay, epoch seed determinism, committee fallback for small sets, epoch advance preserves validator state, VRF committee selection fairness, epoch seed monotonic advancement
+- **Mempool stress** (integration) — fee-priority ordering, eviction of lowest-fee tx, nullifier conflict rejection, duplicate tx rejection, epoch expiry eviction, real STARK tx insert and drain
+- **Network resilience** (integration) — BFT view change on stale round, round advancement clears votes, sync dedup prevents double apply, peer ban storage roundtrip, multiple rounds produce no stale certificates
+- **P2P handshake** (integration) — two-node handshake, encrypted message exchange, chain_id mismatch rejected, peer disconnect event, get_peers, broadcast to multiple peers
+- **RPC API** (integration) — health, state populated, state summary, peers, mempool with tx, validators, validator by id, fee estimate, metrics, commitment proof, commitment proof rate limit, submit tx and retrieve, submit invalid tx
+- **Snapshot sync** (integration) — snapshot with validators and txs, snapshot preserves nullifiers, commitment tree integrity, validator bonds preserved, serialization roundtrip
+- **Storage recovery** (integration) — vertex persist and restore across sled reopen, finalization batch atomic, chain state meta roundtrip, validator storage roundtrip, ledger restore from storage, peer ban persistence, crash recovery markers
+- **Validator lifecycle** (integration) — register genesis validator, register multiple, activation delay enforcement, equivocation detection and slashing, slashing permanent, deregister via slashing removes from active, max validators cap
+- **Wallet sync** (integration) — wallet sync picks up coinbase, sync idempotent, stealth address generate and detect, wallet creation and balance, scan coinbase, change output tracking, send and scan recipient, encrypted message scan
 - **Mempool** — fee-priority ordering, nullifier conflict detection, eviction, drain, expired transaction eviction, fee percentile estimation (empty, single-tx edge case, populated pools); byte-limit eviction with total_bytes tracking, fee boundary rejection (equal fee rejected), drain cleans nullifier index, epoch-based expiry on insert, total_bytes accuracy across insert/remove/drain
 - **Storage** — vertex/transaction/nullifier/validator/coinbase persistence and roundtrips, not-found returns None, vertex overwrite, chain state meta roundtrips (including total_minted), finalized index roundtrip and batch retrieval, commitment level bulk retrieval, snapshot import tree clearing
 - **State** — genesis validator registration and query, bond slashing, epoch advancement (fee reset, seed rotation), inactive validator tracking, last-finalized tracking, sled-backed nullifier lookups, nullifier migration from memory to sled; apply_vertex (basic state transition, too many transactions, intra-vertex duplicate nullifier, epoch fee accumulation regression); validate_transaction (wrong chain_id, double spend, already registered); record_nullifier Result return type (regression); coinbase output creation (with and without KEM key); eligible_validators activation epoch filtering
@@ -1040,7 +1051,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1207 tests
+- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1277 tests
 
 ## License
 
