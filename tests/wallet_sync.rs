@@ -251,7 +251,9 @@ fn test_wallet_send_and_scan_recipient() {
     let genesis_id = VertexId([0u8; 32]);
     let vertex = build_test_vertex(vec![genesis_id], 1, 0, &signing.public, vec![tx.clone()]);
     // Apply the vertex to state
-    let _ = state.apply_vertex(&vertex);
+    state
+        .apply_vertex(&vertex)
+        .expect("apply_vertex should succeed");
 
     // Bob scans the transaction
     bob.scan_transaction_with_state(&tx, Some(&state));

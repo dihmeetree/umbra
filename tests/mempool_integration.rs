@@ -7,7 +7,7 @@ use umbra::constants;
 use umbra::crypto::commitment::BlindingFactor;
 use umbra::crypto::keys::FullKeypair;
 use umbra::hash_domain;
-use umbra::node::mempool::{Mempool, MempoolConfig};
+use umbra::node::mempool::{Mempool, MempoolConfig, MempoolError};
 use umbra::transaction::builder::{InputSpec, TransactionBuilder};
 use umbra::transaction::Transaction;
 
@@ -155,7 +155,11 @@ fn test_nullifier_conflict_rejection() {
     assert_eq!(tx1_nullifiers, tx2_nullifiers);
 
     let result = pool.insert(tx2);
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(MempoolError::NullifierConflict(_))),
+        "expected NullifierConflict, got {:?}",
+        result
+    );
 }
 
 #[test]
@@ -166,7 +170,11 @@ fn test_duplicate_tx_rejection() {
     pool.insert(tx.clone()).unwrap();
 
     let result = pool.insert(tx);
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(MempoolError::Duplicate)),
+        "expected Duplicate, got {:?}",
+        result
+    );
 }
 
 #[test]

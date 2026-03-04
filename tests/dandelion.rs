@@ -40,7 +40,7 @@ fn make_test_tx(seed: u8) -> Transaction {
         .add_input(InputSpec {
             value: 1000,
             blinding: BlindingFactor::from_bytes([seed; 32]),
-            spend_auth: hash_domain(b"test.spend_auth", &[seed]),
+            spend_auth: hash_domain(b"umbra.spend_auth", &[seed]),
             merkle_path: vec![],
         })
         .add_output(recipient.kem.public.clone(), 1000 - fee)

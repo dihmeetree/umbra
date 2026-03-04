@@ -57,34 +57,37 @@ fn test_bft_vote_wrong_chain_id() {
     let epoch = 0u64;
     let round = mainnet_bft.round;
 
-    // Sign vote with TESTNET chain_id (wrong)
-    let wrong_sign_data = vote_sign_data(
-        &vertex_id,
-        epoch,
-        round,
-        &VoteType::Accept,
-        &testnet_chain_id,
-    );
-    let wrong_sig = mainnet_kps[0].sign(&wrong_sign_data);
-
-    let wrong_vote = Vote {
-        vertex_id,
-        voter_id: mainnet_vals[0].id,
-        epoch,
-        round,
-        vote_type: VoteType::Accept,
-        signature: wrong_sig,
-        vrf_proof: None,
-    };
-
-    // Wrong chain_id → signature fails → no certificate contribution
-    let cert = mainnet_bft.receive_vote(wrong_vote);
+    // Submit 3 votes signed with TESTNET chain_id (wrong) — enough for quorum
+    // if they were accepted, proving chain_id rejection prevents certification.
+    let mut cert = None;
+    for i in 0..3 {
+        let wrong_sign_data = vote_sign_data(
+            &vertex_id,
+            epoch,
+            round,
+            &VoteType::Accept,
+            &testnet_chain_id,
+        );
+        let wrong_sig = mainnet_kps[i].sign(&wrong_sign_data);
+        let wrong_vote = Vote {
+            vertex_id,
+            voter_id: mainnet_vals[i].id,
+            epoch,
+            round,
+            vote_type: VoteType::Accept,
+            signature: wrong_sig,
+            vrf_proof: None,
+        };
+        if let Some(c) = mainnet_bft.receive_vote(wrong_vote) {
+            cert = Some(c);
+        }
+    }
     assert!(
         cert.is_none(),
-        "vote with wrong chain_id should not produce certificate"
+        "3 wrong-chain votes should not produce certificate"
     );
 
-    // Correct chain_id votes form a certificate
+    // Same 3 validators with correct chain_id DO form a certificate
     let mut cert = None;
     for i in 0..3 {
         let sign_data = vote_sign_data(
@@ -174,29 +177,49 @@ fn test_cross_epoch_vote_isolation() {
         validators.push(v);
     }
 
-    let bft_epoch0 = BftState::new(0, validators.clone(), chain_id);
     let vertex_id = VertexId([55u8; 32]);
-    let round = bft_epoch0.round;
+    let round = 0u64;
 
-    // Sign vote for epoch 0
-    let sign_data = vote_sign_data(&vertex_id, 0, round, &VoteType::Accept, &chain_id);
-    let sig = keypairs[0].sign(&sign_data);
-    let epoch0_vote = Vote {
-        vertex_id,
-        voter_id: validators[0].id,
-        epoch: 0,
-        round,
-        vote_type: VoteType::Accept,
-        signature: sig,
-        vrf_proof: None,
-    };
+    // Build 3 epoch-0 votes (enough for quorum with 4 validators)
+    let mut epoch0_votes = Vec::new();
+    for i in 0..3 {
+        let sign_data = vote_sign_data(&vertex_id, 0, round, &VoteType::Accept, &chain_id);
+        let sig = keypairs[i].sign(&sign_data);
+        epoch0_votes.push(Vote {
+            vertex_id,
+            voter_id: validators[i].id,
+            epoch: 0,
+            round,
+            vote_type: VoteType::Accept,
+            signature: sig,
+            vrf_proof: None,
+        });
+    }
 
-    // Submit to epoch 1 BFT — should be rejected
+    // Submit all 3 to epoch 1 BFT — none should be accepted
     let mut bft_epoch1 = BftState::new(1, validators.clone(), chain_id);
-    let cert = bft_epoch1.receive_vote(epoch0_vote);
+    let mut cert = None;
+    for vote in epoch0_votes.clone() {
+        if let Some(c) = bft_epoch1.receive_vote(vote) {
+            cert = Some(c);
+        }
+    }
     assert!(
         cert.is_none(),
-        "epoch 0 vote should not form certificate in epoch 1"
+        "3 epoch-0 votes should not form certificate in epoch-1 BFT"
+    );
+
+    // Same 3 votes DO form a certificate in epoch-0 BFT
+    let mut bft_epoch0 = BftState::new(0, validators.clone(), chain_id);
+    let mut cert = None;
+    for vote in epoch0_votes {
+        if let Some(c) = bft_epoch0.receive_vote(vote) {
+            cert = Some(c);
+        }
+    }
+    assert!(
+        cert.is_some(),
+        "3 epoch-0 votes should form certificate in epoch-0 BFT"
     );
 }
 

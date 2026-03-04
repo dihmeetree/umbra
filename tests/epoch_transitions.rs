@@ -3,7 +3,7 @@
 //! Tests multi-epoch advancement, fee distribution, VRF-based committee
 //! selection, validator activation delays, and epoch seed determinism.
 
-use umbra::consensus::bft::Validator;
+use umbra::consensus::bft::{select_committee, Validator};
 use umbra::constants;
 use umbra::crypto::keys::{KemKeypair, SigningKeypair};
 use umbra::crypto::vrf::EpochSeed;
@@ -175,32 +175,34 @@ fn test_epoch_advance_preserves_validator_state() {
 fn test_vrf_committee_selection_fairness() {
     let mut state = ChainState::new();
 
-    // Register 10 validators
-    let mut val_ids = Vec::new();
+    // Register 10 validators, keeping keypairs for VRF evaluation
+    let mut validators_with_keys: Vec<(SigningKeypair, Validator)> = Vec::new();
     for _ in 0..10 {
-        let (_s, _k, v) = register_genesis_validator(&mut state);
-        val_ids.push(v.id);
+        let (s, _k, v) = register_genesis_validator(&mut state);
+        validators_with_keys.push((s, v));
     }
 
-    // Track how many times each validator is eligible across epochs
+    // Track how many times each validator is VRF-selected across epochs
     let mut selection_counts = [0u32; 10];
+    let committee_size = constants::MIN_COMMITTEE_SIZE;
     let num_epochs = 50;
 
     for _ in 0..num_epochs {
-        let eligible = state.eligible_validators(state.epoch());
-        for (i, id) in val_ids.iter().enumerate() {
-            if eligible.iter().any(|v| v.id == *id) {
+        let seed = state.epoch_seed();
+        let committee = select_committee(seed, &validators_with_keys, committee_size);
+        for (i, (_kp, v)) in validators_with_keys.iter().enumerate() {
+            if committee.iter().any(|(cv, _)| cv.id == v.id) {
                 selection_counts[i] += 1;
             }
         }
         state.advance_epoch();
     }
 
-    // All genesis validators should be eligible every epoch (activation_epoch=0)
+    // Every validator should be VRF-selected at least once across 50 epochs
     for (i, count) in selection_counts.iter().enumerate() {
         assert!(
             *count > 0,
-            "validator {} was never eligible across {} epochs",
+            "validator {} was never VRF-selected across {} epochs",
             i,
             num_epochs
         );
