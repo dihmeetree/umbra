@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772685727500,
+  "lastUpdate": 1772686050131,
   "repoUrl": "https://github.com/dihmeetree/umbra",
   "entries": {
     "Benchmark": [
@@ -500,6 +500,172 @@ window.BENCHMARK_DATA = {
             "name": "deserialize_tx",
             "value": 104605,
             "range": "± 87",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dmitry@snoculars.com",
+            "name": "root"
+          },
+          "committer": {
+            "email": "dmitry@snoculars.com",
+            "name": "root"
+          },
+          "distinct": true,
+          "id": "82c44c5fd03417c5defa071190f2f89191d6d19e",
+          "message": "Increase simulator finalized-count tolerance from 65 to 80\n\nNode 3 is taken offline and restarted during state sync tests, so it\nconsistently lags behind. CI runners with variable performance push\nthe diff just past 65. Widen to 80 to reduce flakiness.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-05T04:38:00Z",
+          "tree_id": "96124b893610d86f0c25810dff4c2ee5a8ee6a6a",
+          "url": "https://github.com/dihmeetree/umbra/commit/82c44c5fd03417c5defa071190f2f89191d6d19e"
+        },
+        "date": 1772686049704,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dilithium5_sign",
+            "value": 540084848,
+            "range": "± 7097474",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dilithium5_verify",
+            "value": 1059407,
+            "range": "± 19192",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "blake3_hash_domain",
+            "value": 405,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "blake3_hash_concat",
+            "value": 288,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rescue_prime_commitment",
+            "value": 7895,
+            "range": "± 36",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vrf_evaluate",
+            "value": 539879385,
+            "range": "± 4442303",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/10",
+            "value": 5149,
+            "range": "± 7814",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/100",
+            "value": 14931,
+            "range": "± 12656",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/1000",
+            "value": 116883,
+            "range": "± 17171",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/10",
+            "value": 1575,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/100",
+            "value": 17014,
+            "range": "± 424",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/1000",
+            "value": 227722,
+            "range": "± 6369",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_prune/100",
+            "value": 29895,
+            "range": "± 15285",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_prune/1000",
+            "value": 306085,
+            "range": "± 29628",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_balance",
+            "value": 72992654,
+            "range": "± 202548",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend",
+            "value": 161247534,
+            "range": "± 174548",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "verify_balance_proof",
+            "value": 9369479,
+            "range": "± 427781",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "verify_spend_proof",
+            "value": 8404433,
+            "range": "± 15770",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend_sequential/2",
+            "value": 327156389,
+            "range": "± 263745",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend_sequential/4",
+            "value": 654782080,
+            "range": "± 2628802",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "build_tx_parallel/2",
+            "value": 255321161,
+            "range": "± 9313011",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "build_tx_parallel/4",
+            "value": 476106731,
+            "range": "± 4902203",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "serialize_tx",
+            "value": 116620,
+            "range": "± 1359",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "deserialize_tx",
+            "value": 169133,
+            "range": "± 1120",
             "unit": "ns/iter"
           }
         ]
