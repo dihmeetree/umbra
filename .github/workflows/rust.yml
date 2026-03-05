@@ -28,7 +28,7 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -71,6 +71,9 @@ jobs:
   # Fails if any benchmark regresses more than 15%.
   bench:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 

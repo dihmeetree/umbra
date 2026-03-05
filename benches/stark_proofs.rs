@@ -13,20 +13,9 @@ use umbra::crypto::stark::types::{
 use umbra::crypto::stark::verify::{verify_balance_proof, verify_spend_proof};
 use winterfell::math::fields::f64::BaseElement as Felt;
 use winterfell::math::FieldElement;
-use winterfell::ProofOptions;
 
-fn light_proof_options() -> ProofOptions {
-    ProofOptions::new(
-        42,
-        8,
-        10,
-        winterfell::FieldExtension::Cubic,
-        8,
-        255,
-        winterfell::BatchingMethod::Linear,
-        winterfell::BatchingMethod::Linear,
-    )
-}
+mod common;
+use common::light_proof_options;
 
 fn make_input_proof_link(value: u64, blinding: &[Felt; 4], link_nonce: &[Felt; 4]) -> [Felt; 4] {
     let commitment = rescue::hash_commitment(Felt::new(value), blinding);

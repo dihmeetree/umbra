@@ -9,20 +9,9 @@ use umbra::crypto::keys::KemKeypair;
 use umbra::crypto::proof::MerkleNode;
 use umbra::transaction::builder::{InputSpec, TransactionBuilder};
 use umbra::transaction::Transaction;
-use winterfell::ProofOptions;
 
-fn light_proof_options() -> ProofOptions {
-    ProofOptions::new(
-        42,
-        8,
-        10,
-        winterfell::FieldExtension::Cubic,
-        8,
-        255,
-        winterfell::BatchingMethod::Linear,
-        winterfell::BatchingMethod::Linear,
-    )
-}
+mod common;
+use common::light_proof_options;
 
 fn build_valid_tx() -> Transaction {
     let recipient = KemKeypair::generate();
