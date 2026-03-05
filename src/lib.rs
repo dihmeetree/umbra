@@ -516,7 +516,8 @@ pub fn deserialize<T: serde::de::DeserializeOwned>(
     if bytes.len() > constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err(bincode::error::DecodeError::LimitExceeded);
     }
-    let (val, _len) = bincode::serde::decode_from_slice(bytes, bincode::config::legacy())?;
+    let config = bincode::config::legacy().with_limit::<{ 16 * 1024 * 1024 }>();
+    let (val, _len) = bincode::serde::decode_from_slice(bytes, config)?;
     Ok(val)
 }
 

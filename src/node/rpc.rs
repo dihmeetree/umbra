@@ -46,6 +46,8 @@ use crate::transaction::TxId;
 
 /// Maximum commitment-proof queries per IP per window.
 const COMMITMENT_PROOF_RATE_LIMIT: u32 = 60;
+/// Maximum transaction submissions per IP per window.
+const SUBMIT_TX_RATE_LIMIT: u32 = 10;
 /// Rate limit window duration in seconds.
 const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Maximum number of entries in the rate limiter map before eviction.
@@ -69,6 +71,46 @@ impl RpcState {
             p2p,
             rate_limiter: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Check per-IP rate limit. Returns `Ok(())` if under the limit, or
+    /// `Err(429)` if the limit is exceeded.
+    async fn check_rate_limit(
+        &self,
+        ip: std::net::IpAddr,
+        limit: u32,
+        endpoint: &str,
+    ) -> Result<(), (StatusCode, String)> {
+        let mut limiter = self.rate_limiter.lock().await;
+        let now = std::time::Instant::now();
+
+        // Proactive eviction of expired entries to prevent memory bloat.
+        if limiter.len() > RATE_LIMITER_MAX_ENTRIES / 2 {
+            limiter.retain(|_, (_, start)| {
+                now.duration_since(*start).as_secs() < RATE_LIMIT_WINDOW_SECS
+            });
+            if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
+                tracing::warn!(
+                    entries = limiter.len(),
+                    "rate limiter over capacity after eviction"
+                );
+            }
+        }
+
+        let entry = limiter.entry(ip).or_insert((0, now));
+        let elapsed = now.saturating_duration_since(entry.1).as_secs();
+        if elapsed >= RATE_LIMIT_WINDOW_SECS {
+            *entry = (1, now);
+        } else {
+            entry.0 += 1;
+            if entry.0 > limit {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("rate limit exceeded for {endpoint}"),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -214,8 +256,14 @@ struct SubmitTxResponse {
 
 async fn submit_tx(
     State(state): State<RpcState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<SubmitTxRequest>,
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
+    // Rate limit: prevent CPU exhaustion from STARK proof verification
+    state
+        .check_rate_limit(addr.ip(), SUBMIT_TX_RATE_LIMIT, "transaction submission")
+        .await?;
+
     // Reject oversized payloads before decoding
     if req.tx_hex.len() > 2 * crate::constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err((StatusCode::BAD_REQUEST, "transaction too large".to_string()));
@@ -240,22 +288,21 @@ async fn submit_tx(
         (StatusCode::BAD_REQUEST, "transaction rejected".to_string())
     })?;
 
-    // Dandelion++ stem phase: send to a single random peer instead of broadcasting
-    // to all peers. This prevents the RPC-connected node from being identified as
-    // the transaction originator. The receiving peer will either continue the stem
-    // relay or fluff (broadcast) according to the Dandelion++ protocol.
+    // Dandelion++ stem phase: send a StemTransaction to one random peer.
+    // The receiving peer will either continue the stem relay (decrementing
+    // hops_remaining) or fluff (broadcast as NewTransaction) when hops reach 0.
     drop(node); // Release write lock before async send
+    let stem_msg = crate::network::Message::StemTransaction {
+        tx: tx.clone(),
+        hops_remaining: crate::constants::DANDELION_STEM_HOPS,
+    };
     let stem_target = state.p2p.get_peers().await.ok().and_then(|peers| {
         use rand::prelude::IndexedRandom;
         peers.choose(&mut rand::rng()).map(|p| p.peer_id)
     });
     match stem_target {
         Some(peer_id) => {
-            if let Err(e) = state
-                .p2p
-                .send_to(peer_id, crate::network::Message::NewTransaction(tx.clone()))
-                .await
-            {
+            if let Err(e) = state.p2p.send_to(peer_id, stem_msg).await {
                 tracing::warn!(error = %e, "Failed to stem-send transaction, falling back to broadcast");
                 let _ = state
                     .p2p
@@ -731,42 +778,13 @@ async fn get_commitment_proof(
     Path(index): Path<usize>,
 ) -> Result<Json<CommitmentProofResponse>, (StatusCode, String)> {
     // Rate limit: prevent tree enumeration attacks
-    {
-        let mut limiter = state.rate_limiter.lock().await;
-        let now = std::time::Instant::now();
-
-        // Proactive eviction of expired entries on every request to prevent
-        // memory bloat from many unique IPs. Only scan if over half capacity.
-        if limiter.len() > RATE_LIMITER_MAX_ENTRIES / 2 {
-            limiter.retain(|_, (_, start)| {
-                now.duration_since(*start).as_secs() < RATE_LIMIT_WINDOW_SECS
-            });
-            if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
-                tracing::warn!(
-                    entries = limiter.len(),
-                    "rate limiter over capacity after eviction"
-                );
-            }
-        }
-
-        let entry = limiter.entry(addr.ip()).or_insert((0, now));
-        // Use duration_since (monotonic) to handle clock skew safely.
-        // If the entry's start time is somehow in the future (shouldn't happen
-        // with Instant but defensive), treat the window as expired.
-        let elapsed = now.saturating_duration_since(entry.1).as_secs();
-        if elapsed >= RATE_LIMIT_WINDOW_SECS {
-            // Reset window
-            *entry = (1, now);
-        } else {
-            entry.0 += 1;
-            if entry.0 > COMMITMENT_PROOF_RATE_LIMIT {
-                return Err((
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "rate limit exceeded for commitment-proof queries".to_string(),
-                ));
-            }
-        }
-    }
+    state
+        .check_rate_limit(
+            addr.ip(),
+            COMMITMENT_PROOF_RATE_LIMIT,
+            "commitment-proof queries",
+        )
+        .await?;
 
     let node = state.node.read().await;
     let path = node.ledger.state.commitment_path(index).ok_or((
@@ -851,6 +869,19 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let p2p = P2pHandle::from_sender(tx);
         RpcState::new(node_state, p2p)
+    }
+
+    /// Build a POST request to `/tx` with ConnectInfo for rate limiting.
+    fn post_tx_request(body: &str) -> Request<axum::body::Body> {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/tx")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+        req
     }
 
     async fn get_json(app: &axum::Router, path: &str) -> (HttpStatus, serde_json::Value) {
@@ -946,14 +977,7 @@ mod tests {
         let state = test_rpc_state();
         let app = router(state);
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/tx")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"tx_hex":"not_valid_hex!!!"}"#))
-                    .unwrap(),
-            )
+            .oneshot(post_tx_request(r#"{"tx_hex":"not_valid_hex!!!"}"#))
             .await
             .unwrap();
         assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
@@ -1113,16 +1137,9 @@ mod tests {
         // Submit
         let app = router(state.clone());
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/tx")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({"tx_hex": tx_hex}).to_string(),
-                    ))
-                    .unwrap(),
-            )
+            .oneshot(post_tx_request(
+                &serde_json::json!({"tx_hex": tx_hex}).to_string(),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), HttpStatus::OK);
@@ -1172,16 +1189,9 @@ mod tests {
     async fn post_tx_hex(app: &axum::Router, tx_hex: &str) -> (HttpStatus, String) {
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/tx")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({"tx_hex": tx_hex}).to_string(),
-                    ))
-                    .unwrap(),
-            )
+            .oneshot(post_tx_request(
+                &serde_json::json!({"tx_hex": tx_hex}).to_string(),
+            ))
             .await
             .unwrap();
         let status = response.status();
@@ -1205,17 +1215,7 @@ mod tests {
             "payload must exceed body limit"
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/tx")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(large_json))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(post_tx_request(&large_json)).await.unwrap();
         // Axum's DefaultBodyLimit returns 413 Payload Too Large
         assert_eq!(response.status(), HttpStatus::PAYLOAD_TOO_LARGE);
     }
@@ -1366,6 +1366,32 @@ mod tests {
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
         let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), HttpStatus::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn submit_tx_rate_limit() {
+        let state = test_rpc_state();
+        let app = router(state);
+
+        // Make SUBMIT_TX_RATE_LIMIT requests (should all get through to validation,
+        // which will return 400 for invalid hex — but NOT 429)
+        for _ in 0..SUBMIT_TX_RATE_LIMIT {
+            let response = app
+                .clone()
+                .oneshot(post_tx_request(r#"{"tx_hex":"deadbeef"}"#))
+                .await
+                .unwrap();
+            // 400 = passed rate limit, failed at validation (bad bincode)
+            assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
+        }
+
+        // Next request should be rate limited (429)
+        let response = app
+            .clone()
+            .oneshot(post_tx_request(r#"{"tx_hex":"deadbeef"}"#))
+            .await
+            .unwrap();
         assert_eq!(response.status(), HttpStatus::TOO_MANY_REQUESTS);
     }
 
@@ -1623,16 +1649,9 @@ mod tests {
 
         let app = router(state);
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/tx")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({"tx_hex": tx_hex}).to_string(),
-                    ))
-                    .unwrap(),
-            )
+            .oneshot(post_tx_request(
+                &serde_json::json!({"tx_hex": tx_hex}).to_string(),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), HttpStatus::OK);
