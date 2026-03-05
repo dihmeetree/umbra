@@ -137,10 +137,26 @@ umbra/
     bin/
       simulator.rs          Network simulator: multi-node BFT consensus, traffic, attack scenarios
       faucet.rs             Testnet faucet: rate-limited coin distribution via HTTP
+  benches/
+    stark_proofs.rs         Criterion benchmarks: STARK proof generation and verification
+    crypto.rs               Criterion benchmarks: signatures, hashing, VRF
+    dag.rs                  Criterion benchmarks: DAG insert, finalized_order, prune
+    transaction.rs          Criterion benchmarks: transaction serialization
   tests/
     e2e.rs                  End-to-end integration tests (25 tests across 3 groups)
     consensus_properties.rs Consensus property tests: BFT safety, liveness, consistency (12 tests)
     stark_constraints.rs    AIR constraint soundness verification (44 adversarial tests)
+    cross_chain.rs          Cross-chain replay prevention tests
+    dandelion.rs            Dandelion++ privacy relay tests
+    epoch_transitions.rs    Multi-epoch and committee rotation tests
+    mempool_integration.rs  Mempool fee priority and conflict detection tests
+    network_resilience.rs   Partition, ban, and sync dedup tests
+    p2p_integration.rs      P2P handshake and transport tests
+    rpc.rs                  RPC API integration tests
+    snapshot_sync.rs        Snapshot export/import/restore tests
+    storage_recovery.rs     Persistence and restart recovery tests
+    validator_lifecycle.rs  Validator registration, slashing, deregistration tests
+    wallet_sync.rs          Wallet sync, stealth address, and balance tests
   fuzz/
     Cargo.toml              Fuzz crate configuration (cargo-fuzz / libfuzzer-sys)
     fuzz_targets/
@@ -150,7 +166,7 @@ umbra/
       fuzz_transaction_validate.rs    Transaction method fuzzing (non-STARK)
   .github/
     workflows/
-      rust.yml              CI pipeline: build, clippy, fmt, tests, cargo-audit
+      rust.yml              CI pipeline: build, clippy, fmt, tests, benchmarks, cargo-audit
   templates/
     base.html               Base layout with navigation and CSS
     dashboard.html          Balance, outputs, chain state, scan button
@@ -859,7 +875,7 @@ Proves in zero knowledge:
 | `askama` + `askama_web`          | Type-safe compiled HTML templates for wallet web UI       |
 | `tokio-util`                     | Graceful shutdown via `CancellationToken`                 |
 | `toml`                           | TOML config file parsing                                  |
-| `rayon`                          | Parallel proof verification for vertex validation         |
+| `rayon`                          | Parallel proof verification and spend proof generation    |
 | `tempfile`                       | Temporary directories for simulator and testing           |
 | `colored`                        | Terminal color output for simulator results               |
 | `igd-next`                       | UPnP port mapping for NAT traversal                       |
@@ -943,6 +959,7 @@ All transaction validity is verified via zk-STARKs:
 - **Wallet recovery phrases** — 24-word BIP39 mnemonic with BLAKE3 checksum; key material encrypted with XChaCha20-Poly1305. Both the phrase and the encrypted backup file are required for recovery, preventing single-point-of-failure key loss
 - **Sled-backed nullifier storage** — nullifier lookups check in-memory set first, then fall back to sled, allowing the nullifier set to scale beyond available RAM
 - **Parallel proof verification** — vertex validation uses `rayon::par_iter()` for independent transaction proof verification, with sequential state mutation, maintaining correctness while improving throughput
+- **Parallel spend proof generation** — `TransactionBuilder` generates spend proofs for multi-input transactions in parallel via `rayon::par_iter()`, reducing build time from O(N) to O(N/p) where p is the number of cores (each spend proof takes ~115ms)
 - **Dandelion++ sender privacy** — new transactions propagate through a stem phase (private forwarding to single peers) before fluff (broadcast), obscuring the originating node
 - **Connection diversity** — inbound and outbound peer slots are tracked separately, reserving half of max peers for each direction, preventing eclipse attacks via inbound slot exhaustion
 - **Peer reputation and banning** — peers accumulate reputation penalties for rate limit violations, invalid messages, and handshake failures; peers below threshold are temporarily banned (1 hour) with bans persisted to storage

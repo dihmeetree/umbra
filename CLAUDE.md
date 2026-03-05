@@ -14,6 +14,8 @@ cargo test                       # Full suite (includes real SPHINCS+, ~3 hrs)
 cargo test <module>::tests       # Run specific module tests (e.g., consensus::bft::tests)
 cargo clippy --all-targets       # Lint — must be warning-free
 cargo fmt                        # Format — must pass `cargo fmt -- --check`
+cargo bench                      # Run all criterion benchmarks (release mode)
+cargo bench --bench stark_proofs # Run a specific benchmark group
 ```
 
 Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` even in dev/test profile (see `Cargo.toml`), so proof generation is fast. The `fast-tests` feature skips SPHINCS+ signing/verification for further speedup. Use `cargo test <filter>` to run targeted subsets during development.
@@ -50,6 +52,8 @@ Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` eve
 - **P2P messages**: Add variants to `Message` enum in `network.rs`. Messages auto-derive `Serialize`/`Deserialize`. Always add a roundtrip test.
 - **Gossip dedup**: Two-generation `seen_messages` sets (10k capacity each). Use `self.is_seen()` / `self.mark_seen()` in node.rs message handlers.
 - **Testing**: Each module has `#[cfg(test)] mod tests` inline. Storage tests use `SledStorage::open_temporary()`.
+- **Benchmarks**: Criterion benchmarks in `benches/` (stark_proofs, crypto, dag, transaction). CI runs them with regression detection (15% threshold). Cannot use `--features fast-tests` in bench mode (release profile triggers compile_error).
+- **Parallelism**: `TransactionBuilder::build()` uses `rayon::par_iter()` for spend proof generation when there are 2+ inputs.
 
 ## Conventions
 

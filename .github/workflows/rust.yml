@@ -10,6 +10,7 @@
 # 2. Lint: Clippy (subsumes cargo check) with fast-tests feature
 # 3. Test: Execute test suite with fast-tests
 # 4. Security: Scan for known vulnerabilities in dependencies
+# 5. Bench: Criterion benchmarks with regression detection (15% threshold)
 # =============================================================================
 
 name: Rust
@@ -64,6 +65,41 @@ jobs:
 
       - name: Run security audit
         run: cargo audit
+
+  # Benchmark regression detection: runs criterion benchmarks, compares against
+  # baseline stored in gh-pages branch, and comments on PRs with changes.
+  # Fails if any benchmark regresses more than 15%.
+  bench:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: set -o pipefail; cargo bench --bench stark_proofs --bench crypto --bench dag --bench transaction -- --output-format bencher 2>&1 | tee output.txt
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: output.txt
+          # On push to main, update the baseline in gh-pages
+          auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # On PRs, comment with comparison but don't update baseline
+          comment-on-alert: ${{ github.event_name == 'pull_request' }}
+          alert-threshold: "115%"
+          fail-on-alert: true
+          alert-comment-cc-users: "@dihmeetree"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          benchmark-data-dir-path: bench
 
   # Fuzz testing on nightly (libfuzzer requires nightly + Linux)
   fuzz:
