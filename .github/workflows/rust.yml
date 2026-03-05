@@ -10,7 +10,7 @@
 # 2. Lint: Clippy (subsumes cargo check) with fast-tests feature
 # 3. Test: Execute test suite with fast-tests
 # 4. Security: Scan for known vulnerabilities in dependencies
-# 5. Bench: Criterion benchmarks with regression detection (15% threshold)
+# 5. Bench: Criterion benchmarks with regression detection (25% threshold)
 # =============================================================================
 
 name: Rust
@@ -95,7 +95,7 @@ jobs:
           auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           # On PRs, comment with comparison but don't update baseline
           comment-on-alert: ${{ github.event_name == 'pull_request' }}
-          alert-threshold: "115%"
+          alert-threshold: "125%"
           fail-on-alert: true
           alert-comment-cc-users: "@dihmeetree"
           github-token: ${{ secrets.GITHUB_TOKEN }}

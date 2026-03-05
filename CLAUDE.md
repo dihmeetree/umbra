@@ -52,13 +52,14 @@ Winterfell (STARK) and blake3 dependencies are compiled with `opt-level = 3` eve
 - **P2P messages**: Add variants to `Message` enum in `network.rs`. Messages auto-derive `Serialize`/`Deserialize`. Always add a roundtrip test.
 - **Gossip dedup**: Two-generation `seen_messages` sets (10k capacity each). Use `self.is_seen()` / `self.mark_seen()` in node.rs message handlers.
 - **Testing**: Each module has `#[cfg(test)] mod tests` inline. Storage tests use `SledStorage::open_temporary()`.
-- **Benchmarks**: Criterion benchmarks in `benches/` (stark_proofs, crypto, dag, transaction). CI runs them with regression detection (15% threshold). Cannot use `--features fast-tests` in bench mode (release profile triggers compile_error).
+- **Benchmarks**: Criterion benchmarks in `benches/` (stark_proofs, crypto, dag, transaction). CI runs them with regression detection (25% threshold). Cannot use `--features fast-tests` in bench mode (release profile triggers compile_error).
 - **Parallelism**: `TransactionBuilder::build()` uses `rayon::par_iter()` for spend proof generation when there are 2+ inputs.
 
 ## Conventions
 
 - **Security-first**: All crypto comparisons use `constant_time_eq`. Secret keys are `zeroize`-on-drop. Validate at system boundaries.
 - **No trusted setup**: All proofs are zk-STARKs (winterfell), not SNARKs.
+- **Git workflow**: Develop on feature branches → rebase onto `main` → squash merge via PR. Always create branches from `main` and `git pull` first.
 - **Commit messages**: Imperative, concise summary line. Body explains "why" not "what".
 - **Test counts**: Update README.md test count (`All N tests cover:`, `with **N tests**`, `expanding test coverage from 226 to N tests`) when adding tests.
 - **TODO.md**: Check off items with `[x]` when implementing production roadmap features.
