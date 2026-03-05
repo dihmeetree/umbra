@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772684823205,
+  "lastUpdate": 1772685727500,
   "repoUrl": "https://github.com/dihmeetree/umbra",
   "entries": {
     "Benchmark": [
@@ -334,6 +334,172 @@ window.BENCHMARK_DATA = {
             "name": "deserialize_tx",
             "value": 110681,
             "range": "± 124",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dmitry@snoculars.com",
+            "name": "root"
+          },
+          "committer": {
+            "email": "dmitry@snoculars.com",
+            "name": "root"
+          },
+          "distinct": true,
+          "id": "5032379dc7e43132f9778c8d3a396f3ed552b45e",
+          "message": "Raise benchmark regression threshold from 15% to 25%\n\nThe with_limit() guard on bincode deserialization (defense-in-depth\nagainst allocation DoS from crafted internal length fields) adds ~22%\noverhead to deserialize_tx. This is an acceptable security trade-off.\n\nAlso add git workflow convention to CLAUDE.md.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-05T04:32:29Z",
+          "tree_id": "65729b7f70547dcfb9e045938ecb59c3f6e948e4",
+          "url": "https://github.com/dihmeetree/umbra/commit/5032379dc7e43132f9778c8d3a396f3ed552b45e"
+        },
+        "date": 1772685727112,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dilithium5_sign",
+            "value": 470519682,
+            "range": "± 2028732",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dilithium5_verify",
+            "value": 913777,
+            "range": "± 2831",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "blake3_hash_domain",
+            "value": 295,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "blake3_hash_concat",
+            "value": 216,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rescue_prime_commitment",
+            "value": 7530,
+            "range": "± 25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vrf_evaluate",
+            "value": 470484059,
+            "range": "± 1688856",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/10",
+            "value": 4278,
+            "range": "± 270",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/100",
+            "value": 14976,
+            "range": "± 1518",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/1000",
+            "value": 134516,
+            "range": "± 18253",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/10",
+            "value": 1608,
+            "range": "± 10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/100",
+            "value": 17130,
+            "range": "± 129",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/1000",
+            "value": 196183,
+            "range": "± 3253",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_prune/100",
+            "value": 30917,
+            "range": "± 6336",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_prune/1000",
+            "value": 393504,
+            "range": "± 32836",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_balance",
+            "value": 70931069,
+            "range": "± 86079",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend",
+            "value": 156884669,
+            "range": "± 113908",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "verify_balance_proof",
+            "value": 9077213,
+            "range": "± 9418",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "verify_spend_proof",
+            "value": 8152555,
+            "range": "± 6971",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend_sequential/2",
+            "value": 315935837,
+            "range": "± 76801",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend_sequential/4",
+            "value": 632109363,
+            "range": "± 551882",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "build_tx_parallel/2",
+            "value": 246952053,
+            "range": "± 20052258",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "build_tx_parallel/4",
+            "value": 475732954,
+            "range": "± 11680991",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "serialize_tx",
+            "value": 58682,
+            "range": "± 69",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "deserialize_tx",
+            "value": 104605,
+            "range": "± 87",
             "unit": "ns/iter"
           }
         ]
