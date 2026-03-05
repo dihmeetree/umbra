@@ -629,6 +629,32 @@ mod tests {
     }
 
     #[test]
+    fn build_rejects_merkle_path_exceeding_depth() {
+        let recipient = FullKeypair::generate();
+        let too_deep: Vec<crate::crypto::proof::MerkleNode> = (0..21)
+            .map(|i| crate::crypto::proof::MerkleNode {
+                hash: [i as u8; 32],
+                is_left: false,
+            })
+            .collect();
+
+        let result = TransactionBuilder::new()
+            .add_input(InputSpec {
+                value: 600,
+                blinding: BlindingFactor::random(),
+                spend_auth: [0u8; 32],
+                merkle_path: too_deep,
+            })
+            .add_output(recipient.kem.public.clone(), 400)
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(TxBuildError::InvalidMerklePathDepth { depth: 21, max: 20 })
+        ));
+    }
+
+    #[test]
     fn note_encode_decode_roundtrip() {
         let value = 123456789u64;
         let blinding = BlindingFactor::random();
