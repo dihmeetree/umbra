@@ -44,7 +44,7 @@ fn build_dag(n: usize, keypairs: &[SigningKeypair]) -> Dag {
         let v = make_vertex(vec![prev], i as u64, i as u8, kp);
         let vid = v.id;
         dag.insert_unchecked(v).unwrap();
-        dag.finalize(&vid);
+        assert!(dag.finalize(&vid));
         prev = vid;
     }
     dag

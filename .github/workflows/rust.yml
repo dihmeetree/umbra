@@ -84,7 +84,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run benchmarks
-        run: cargo bench --bench stark_proofs --bench crypto --bench dag --bench transaction -- --output-format bencher | tee output.txt
+        run: cargo bench --bench stark_proofs --bench crypto --bench dag --bench transaction -- --output-format bencher 2>&1 | tee output.txt
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
@@ -94,7 +94,7 @@ jobs:
           # On push to main, update the baseline in gh-pages
           auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           # On PRs, comment with comparison but don't update baseline
-          comment-on-alert: true
+          comment-on-alert: ${{ github.event_name == 'pull_request' }}
           alert-threshold: "115%"
           fail-on-alert: true
           alert-comment-cc-users: "@dihmeetree"

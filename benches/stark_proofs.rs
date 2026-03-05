@@ -3,7 +3,7 @@
 //! These are the most expensive operations in the system. Uses light proof
 //! options (grinding factor 10) for faster iteration; production uses 16.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use umbra::crypto::stark::balance_prover::prove_balance;
 use umbra::crypto::stark::rescue;
 use umbra::crypto::stark::spend_prover::prove_spend;
@@ -116,7 +116,7 @@ fn bench_prove_balance(c: &mut Criterion) {
     let (witness, pub_inputs) = build_balance_inputs();
     let opts = light_proof_options();
     c.bench_function("prove_balance", |b| {
-        b.iter(|| prove_balance(&witness, &pub_inputs, opts.clone()).unwrap())
+        b.iter(|| black_box(prove_balance(&witness, &pub_inputs, opts.clone()).unwrap()))
     });
 }
 
@@ -124,7 +124,7 @@ fn bench_prove_spend(c: &mut Criterion) {
     let (witness, pub_inputs) = build_spend_inputs(0);
     let opts = light_proof_options();
     c.bench_function("prove_spend", |b| {
-        b.iter(|| prove_spend(&witness, &pub_inputs, opts.clone()).unwrap())
+        b.iter(|| black_box(prove_spend(&witness, &pub_inputs, opts.clone()).unwrap()))
     });
 }
 
@@ -132,7 +132,7 @@ fn bench_verify_balance(c: &mut Criterion) {
     let (witness, pub_inputs) = build_balance_inputs();
     let proof = prove_balance(&witness, &pub_inputs, light_proof_options()).unwrap();
     c.bench_function("verify_balance_proof", |b| {
-        b.iter(|| verify_balance_proof(&proof).unwrap())
+        b.iter(|| black_box(verify_balance_proof(&proof).unwrap()))
     });
 }
 
@@ -140,7 +140,7 @@ fn bench_verify_spend(c: &mut Criterion) {
     let (witness, pub_inputs) = build_spend_inputs(0);
     let proof = prove_spend(&witness, &pub_inputs, light_proof_options()).unwrap();
     c.bench_function("verify_spend_proof", |b| {
-        b.iter(|| verify_spend_proof(&proof).unwrap())
+        b.iter(|| black_box(verify_spend_proof(&proof).unwrap()))
     });
 }
 

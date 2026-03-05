@@ -244,6 +244,16 @@ impl TransactionBuilder {
             });
         }
 
+        // Validate Merkle path depths before doing any expensive work.
+        for spec in &self.inputs {
+            if spec.merkle_path.len() > MERKLE_DEPTH {
+                return Err(TxBuildError::InvalidMerklePathDepth {
+                    depth: spec.merkle_path.len(),
+                    max: MERKLE_DEPTH,
+                });
+            }
+        }
+
         // Build inputs: derive nullifiers, compute proof_links, generate STARK spend proofs.
         // Preparation is sequential (cheap), then spend proofs are generated in parallel.
         let mut rng = rand::rng();
@@ -267,7 +277,9 @@ impl TransactionBuilder {
                 let nullifier = Nullifier::derive(&spec.spend_auth, &commitment.0);
 
                 if spec.merkle_path.is_empty() {
-                    tracing::warn!("Input has empty Merkle path; proof will use all-zero siblings");
+                    tracing::debug!(
+                        "Input has empty Merkle path; proof will use all-zero siblings"
+                    );
                 }
                 let padded_path = pad_merkle_path(&spec.merkle_path, MERKLE_DEPTH);
                 let stark_path = path_to_stark_witness(&padded_path);
@@ -312,13 +324,14 @@ impl TransactionBuilder {
 
         // Generate spend proofs in parallel using rayon when there are multiple inputs
         let spend_proofs: Vec<_> = if prepared.len() > 1 {
-            use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+            use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
             prepared
                 .par_iter()
-                .map(|p| {
+                .enumerate()
+                .map(|(i, p)| {
                     prove_spend(&p.spend_witness, &p.spend_pub, proof_opts.clone()).map_err(
                         |e: crate::crypto::stark::types::StarkError| {
-                            TxBuildError::SpendProofFailed(e.to_string())
+                            TxBuildError::SpendProofFailed(format!("input {i}: {e}"))
                         },
                     )
                 })
@@ -326,10 +339,11 @@ impl TransactionBuilder {
         } else {
             prepared
                 .iter()
-                .map(|p| {
+                .enumerate()
+                .map(|(i, p)| {
                     prove_spend(&p.spend_witness, &p.spend_pub, proof_opts.clone()).map_err(
                         |e: crate::crypto::stark::types::StarkError| {
-                            TxBuildError::SpendProofFailed(e.to_string())
+                            TxBuildError::SpendProofFailed(format!("input {i}: {e}"))
                         },
                     )
                 })
@@ -494,6 +508,8 @@ pub enum TxBuildError {
     BalanceProofFailed(String),
     #[error("spend proof generation failed: {0}")]
     SpendProofFailed(String),
+    #[error("Merkle path depth {depth} exceeds maximum {max}")]
+    InvalidMerklePathDepth { depth: usize, max: usize },
     #[error("too many inputs (max {})", crate::constants::MAX_TX_IO)]
     TooManyInputs,
     #[error("too many outputs (max {})", crate::constants::MAX_TX_IO)]

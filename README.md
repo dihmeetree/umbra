@@ -959,7 +959,7 @@ All transaction validity is verified via zk-STARKs:
 - **Wallet recovery phrases** — 24-word BIP39 mnemonic with BLAKE3 checksum; key material encrypted with XChaCha20-Poly1305. Both the phrase and the encrypted backup file are required for recovery, preventing single-point-of-failure key loss
 - **Sled-backed nullifier storage** — nullifier lookups check in-memory set first, then fall back to sled, allowing the nullifier set to scale beyond available RAM
 - **Parallel proof verification** — vertex validation uses `rayon::par_iter()` for independent transaction proof verification, with sequential state mutation, maintaining correctness while improving throughput
-- **Parallel spend proof generation** — `TransactionBuilder` generates spend proofs for multi-input transactions in parallel via `rayon::par_iter()`, reducing build time from O(N) to O(1) on N+ cores (each spend proof takes ~115ms)
+- **Parallel spend proof generation** — `TransactionBuilder` generates spend proofs for multi-input transactions in parallel via `rayon::par_iter()`, reducing build time from O(N) to O(N/p) where p is the number of cores (each spend proof takes ~115ms)
 - **Dandelion++ sender privacy** — new transactions propagate through a stem phase (private forwarding to single peers) before fluff (broadcast), obscuring the originating node
 - **Connection diversity** — inbound and outbound peer slots are tracked separately, reserving half of max peers for each direction, preventing eclipse attacks via inbound slot exhaustion
 - **Peer reputation and banning** — peers accumulate reputation penalties for rate limit violations, invalid messages, and handshake failures; peers below threshold are temporarily banned (1 hour) with bans persisted to storage
