@@ -84,7 +84,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run benchmarks
-        run: cargo bench --bench stark_proofs --bench crypto --bench dag --bench transaction -- --output-format bencher 2>&1 | tee output.txt
+        run: set -o pipefail; cargo bench --bench stark_proofs --bench crypto --bench dag --bench transaction -- --output-format bencher 2>&1 | tee output.txt
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
