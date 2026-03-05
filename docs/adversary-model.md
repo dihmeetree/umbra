@@ -116,7 +116,7 @@ The network adversary may:
 | Message injection | Session authenticated with Dilithium5; AEAD with per-session keys |
 | Man-in-the-middle | Mutual authentication: both parties sign the KEM handshake transcript |
 | Traffic fingerprinting | Frames padded to `P2P_PADDING_BUCKET = 1024` byte multiples |
-| Transaction linkability | Dandelion++ routing: effectively single-hop stem — receiving nodes immediately fluff; true multi-hop relay requires protocol-level changes (see §4.3) |
+| Transaction linkability | Dandelion++ multi-hop stem relay: `StemTransaction` messages traverse `DANDELION_STEM_HOPS` (2) random relay nodes before fluffing |
 | DoS via message flood | Token bucket rate limiting: 100 msg/s, 200 burst per peer |
 | DoS via large messages | Hard message size cap: 16 MiB deserialization limit |
 | DoS via invalid structs | Structural validation before cryptographic verification |
@@ -129,7 +129,7 @@ The network adversary may:
 - **Hello message is plaintext**: the node's KEM public key is revealed before the encrypted channel is established. This leaks peer identity at connection time. A Noise-protocol handshake would mitigate this.
 - **Static KEM keypair**: the node's KEM keypair does not rotate per connection. Compromise of the static KEM secret key allows decryption of all past session transcripts. Periodic rekeying provides post-compromise security (new sessions are protected) but not full forward secrecy.
 - **Peer reputation not persisted**: reputation scores reset on node restart, giving misbehaving peers a clean slate.
-- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls the stem hop can identify the origin. The current implementation is effectively single-hop — receiving peers immediately fluff rather than forwarding the stem — so only one hop of plausible deniability is provided. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
+- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls all relay nodes in the stem path (`DANDELION_STEM_HOPS = 2` hops) can identify the origin. With random peer selection among 64 peers, the probability of controlling the full stem path is approximately (1/64)^2 per transaction. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
 
 ---
 

@@ -233,12 +233,12 @@ Fluff phase:
   B (or A on timeout) broadcasts transaction to all peers normally
 ```
 
-**Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node is the originator. However, receiving nodes immediately fluff rather than continuing a stem relay — the current implementation is effectively a single-hop stem. True multi-hop Dandelion++ would require protocol-level changes to propagate stem intent to receiving peers (see adversary-model.md §4.3).
+**Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node is the originator. Transactions traverse `DANDELION_STEM_HOPS` (2) relay nodes via `StemTransaction` messages before being fluffed (broadcast as `NewTransaction`). Each relay node independently decrements the hop counter and forwards to a random peer, providing multi-hop plausible deniability.
 
 **Limitations**:
-- A global passive adversary who observes all network traffic can correlate timing: if A → B timing is observed shortly before B fluffs, the adversary can infer A is the originator.
-- The single-hop stem is a probabilistic mechanism: it provides plausible deniability rather than cryptographic anonymity.
-- An adversary who controls the stem-phase hop (peer B) directly learns that A is the transaction originator: B receives the transaction over A's authenticated P2P connection and observes the A → B transmission directly. Single-hop Dandelion++ provides no anonymity against an adversarial direct peer.
+- A global passive adversary who observes all network traffic can correlate timing: if A sends to B sends to C before C fluffs, the adversary can trace the stem path.
+- Dandelion++ is a probabilistic mechanism: it provides plausible deniability rather than cryptographic anonymity.
+- An adversary who controls all `DANDELION_STEM_HOPS` relay nodes in the stem path can identify the originator. With 2 hops and random peer selection among 64 peers, the probability of this is approximately (1/64)^2 per transaction.
 
 ### 7.2 Frame Padding
 
@@ -323,9 +323,9 @@ If a recipient's KEM secret key is compromised, an adversary can:
 
 Compromising the signing key does not additionally compromise transaction privacy (signing keys are used only for validator operations, not for spending UTXOs).
 
-### 10.6 Adversary Controlling the Stem Node
+### 10.6 Adversary Controlling the Stem Path
 
-In the current single-hop implementation, an adversary who controls all peers of the originating node controls the sole stem hop and can trivially identify the originator. This is an eclipse attack combined with Dandelion++ correlation: if the adversary eclipses node A so that all of A's peers are adversarial, every stem-phase forward goes directly to an adversary who already knows A sent it.
+An adversary who eclipses node A (controls all of A's peers) controls the first stem hop and can identify the originator. With multi-hop stem relay (`DANDELION_STEM_HOPS = 2`), subsequent hops select from the relay node's own peer set, so a partial eclipse of A does not automatically compromise the full stem path. However, an adversary who controls both the first and second hop relay nodes can still trace the transaction back to A.
 
 ---
 

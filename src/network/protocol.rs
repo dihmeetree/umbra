@@ -26,8 +26,13 @@ pub type PeerId = Hash;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
     // ── Transaction Pool ──
-    /// Broadcast a new transaction to the mempool
+    /// Broadcast a new transaction to the mempool (fluff phase)
     NewTransaction(Transaction),
+
+    /// Dandelion++ stem-phase transaction relay.
+    /// Receiving nodes decrement `hops_remaining` and either continue the stem
+    /// (forward to one random peer) or fluff (broadcast as `NewTransaction`).
+    StemTransaction { tx: Transaction, hops_remaining: u8 },
 
     /// Request a transaction by its ID
     GetTransaction(Hash),
@@ -201,6 +206,13 @@ impl Message {
                     .transactions
                     .truncate(crate::constants::VERTEX_MAX_DRAIN);
             }
+            Message::StemTransaction { hops_remaining, .. } => {
+                // Clamp hops to prevent abuse (attacker sending huge hop count
+                // to keep a transaction in stem phase indefinitely).
+                if *hops_remaining > crate::constants::DANDELION_STEM_HOPS {
+                    *hops_remaining = crate::constants::DANDELION_STEM_HOPS;
+                }
+            }
             Message::NatInfo {
                 external_addr,
                 observed_addr,
@@ -333,6 +345,60 @@ mod tests {
                 assert_eq!(version, PROTOCOL_VERSION);
                 assert_eq!(chain_id, crate::constants::chain_id());
                 assert_eq!(listen_port, 9000);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    fn dummy_tx() -> Transaction {
+        use crate::crypto::stark::types::BalanceStarkProof;
+        Transaction {
+            tx_type: crate::transaction::TxType::Transfer,
+            inputs: vec![],
+            outputs: vec![],
+            fee: 100,
+            chain_id: crate::constants::chain_id(),
+            expiry_epoch: 0,
+            balance_proof: BalanceStarkProof {
+                proof_bytes: vec![],
+                public_inputs_bytes: vec![],
+            },
+            messages: vec![],
+            tx_binding: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn stem_transaction_roundtrip() {
+        let tx = dummy_tx();
+        let msg = Message::StemTransaction {
+            tx: tx.clone(),
+            hops_remaining: 2,
+        };
+        let bytes = encode_message(&msg).unwrap();
+        let decoded = decode_message(&bytes).unwrap();
+        match decoded {
+            Message::StemTransaction {
+                tx: decoded_tx,
+                hops_remaining,
+            } => {
+                assert_eq!(hops_remaining, 2);
+                assert_eq!(decoded_tx.fee, tx.fee);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn sanitize_clamps_stem_hops() {
+        let mut msg = Message::StemTransaction {
+            tx: dummy_tx(),
+            hops_remaining: 255,
+        };
+        msg.sanitize();
+        match msg {
+            Message::StemTransaction { hops_remaining, .. } => {
+                assert_eq!(hops_remaining, crate::constants::DANDELION_STEM_HOPS);
             }
             _ => panic!("wrong message type"),
         }

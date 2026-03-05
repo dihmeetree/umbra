@@ -30,7 +30,7 @@ use crate::transaction::{Transaction, TxId, TxOutput};
 use crate::Hash;
 
 /// Maximum number of entries in the seen_messages dedup set before clearing.
-const SEEN_MESSAGES_CAPACITY: usize = 10_000;
+const SEEN_MESSAGES_CAPACITY: usize = 50_000;
 
 /// Maximum number of sync batch rounds before giving up on the current peer.
 const MAX_SYNC_ROUNDS: u64 = 1000;
@@ -201,16 +201,10 @@ pub struct Node {
     sync_failed_peers: HashMap<crate::network::PeerId, Instant>,
     /// Dandelion++ stem-phase transactions: tx_hash -> (hops_remaining, inserted_at).
     ///
-    /// **L17: Known limitation -- effectively single-hop stem.** The current
-    /// implementation only stem-forwards from the originating node; receiving
-    /// nodes immediately fluff (broadcast) the transaction rather than
-    /// continuing the stem relay. This means the first peer that receives a
-    /// stem transaction can identify the originator. True multi-hop Dandelion++
-    /// requires each relay node to independently decide (with probability p)
-    /// whether to continue stemming or fluff, which would need protocol-level
-    /// changes to propagate stem/fluff intent between peers. The single-hop
-    /// design was chosen to avoid added latency and complexity while still
-    /// providing some deniability through random peer selection and timing jitter.
+    /// Tracks transactions that are in the stem phase on this node, either
+    /// because we originated them or because we received a `StemTransaction`
+    /// and are relaying it. The timeout flush ensures stems eventually fluff
+    /// even if the relay peer goes offline.
     stem_txs: HashMap<Hash, (u8, Instant)>,
     /// Peers recently attempted for discovery (cleared each round).
     recently_attempted: HashSet<SocketAddr>,
@@ -801,24 +795,11 @@ impl Node {
 
     async fn handle_message(&mut self, from: crate::network::PeerId, message: Message) {
         match message {
-            // Dandelion++: handle received transactions.
-            // Only the originating node uses stem phase. Received txs are
-            // either relayed (if mid-stem) or fluffed (broadcast) to all peers.
+            // Fluff phase: received a fully-broadcast transaction.
             Message::NewTransaction(tx) => {
                 let tx_hash = tx.tx_id().0;
 
-                // If this tx is in our stem relay pipeline, continue stem forwarding
-                if let Some(&(hops, _)) = self.stem_txs.get(&tx_hash) {
-                    if hops > 0 {
-                        self.stem_forward(tx, hops - 1).await;
-                        return;
-                    }
-                    // hops == 0: stem phase complete, remove and fall through to fluff
-                    self.stem_txs.remove(&tx_hash);
-                }
-
-                // Gossip deduplication -- prevents re-processing and re-gossip of
-                // transactions that were evicted from the mempool.
+                // Gossip deduplication
                 if self.is_seen(&tx_hash) {
                     return;
                 }
@@ -832,10 +813,8 @@ impl Node {
                     }
                 }
 
-                // Validate and insert into mempool, then broadcast (fluff)
+                // Validate and insert into mempool, then re-broadcast
                 let mut state = self.state.write().await;
-                // Check nullifiers against finalized state before insert to prevent
-                // accepting transactions that spend already-finalized outputs
                 let already_spent = tx
                     .inputs
                     .iter()
@@ -847,8 +826,6 @@ impl Node {
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
                         drop(state);
-                        // Fluff: broadcast to all peers except sender.
-                        // We are a recipient, not the originator — no stem phase.
                         let _ = self
                             .p2p
                             .broadcast(Message::NewTransaction(tx), Some(from))
@@ -856,6 +833,44 @@ impl Node {
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "Rejected tx");
+                    }
+                }
+            }
+            // Dandelion++ stem phase: received a stem-relayed transaction.
+            // Validate, insert into mempool, then either continue stem or fluff.
+            Message::StemTransaction { tx, hops_remaining } => {
+                let tx_hash = tx.tx_id().0;
+
+                if self.is_seen(&tx_hash) {
+                    return;
+                }
+
+                // Skip if already in mempool
+                {
+                    let state = self.state.read().await;
+                    if state.mempool.contains(&crate::transaction::TxId(tx_hash)) {
+                        return;
+                    }
+                }
+
+                // Validate and insert into mempool
+                let mut state = self.state.write().await;
+                let already_spent = tx
+                    .inputs
+                    .iter()
+                    .any(|i| state.ledger.state.is_spent(&i.nullifier));
+                if already_spent {
+                    tracing::debug!("Rejected stem tx: nullifier already spent");
+                    return;
+                }
+                match state.mempool.insert(tx.clone()) {
+                    Ok(_) => {
+                        drop(state);
+                        // Continue stem or fluff based on hops_remaining
+                        self.stem_forward(tx, hops_remaining).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Rejected stem tx");
                     }
                 }
             }
@@ -2481,23 +2496,27 @@ impl Node {
 
     /// Dandelion++ stem-forward: send tx to one *random* peer, track hops.
     ///
-    /// The delayed send is spawned as a background task to avoid blocking the
-    /// event loop during the exponential-distribution sleep.
+    /// If `hops_remaining == 0`, fluffs (broadcasts as `NewTransaction`).
+    /// Otherwise, sends a `StemTransaction` with decremented hops to one
+    /// random peer after an exponentially-distributed delay.
     async fn stem_forward(&mut self, tx: crate::transaction::Transaction, hops_remaining: u8) {
         let tx_hash = tx.tx_id().0;
         if hops_remaining == 0 {
             // Fluff: broadcast to all
             self.stem_txs.remove(&tx_hash);
+            self.mark_seen(tx_hash);
             let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
         } else {
             // Stem: forward to one random peer
             // Cap stem_txs to prevent unbounded memory growth
             if self.stem_txs.len() >= crate::constants::MAX_STEM_TXS {
+                self.mark_seen(tx_hash);
                 let _ = self.p2p.broadcast(Message::NewTransaction(tx), None).await;
                 return;
             }
             self.stem_txs
                 .insert(tx_hash, (hops_remaining, Instant::now()));
+            let next_hops = hops_remaining - 1;
             // Spawn delayed send in background to avoid blocking the event loop.
             let p2p = self.p2p.clone();
             // Compute delay before spawning to keep RNG out of the async block
@@ -2515,10 +2534,17 @@ impl Node {
                 use rand::prelude::IndexedRandom;
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 if let Ok(peers) = p2p.get_peers().await {
-                    // Scope the RNG so it doesn't live across the await
                     let chosen_id = { peers.choose(&mut rand::rng()).map(|p| p.peer_id) };
                     if let Some(peer_id) = chosen_id {
-                        let _ = p2p.send_to(peer_id, Message::NewTransaction(tx)).await;
+                        let _ = p2p
+                            .send_to(
+                                peer_id,
+                                Message::StemTransaction {
+                                    tx,
+                                    hops_remaining: next_hops,
+                                },
+                            )
+                            .await;
                         return;
                     }
                 }

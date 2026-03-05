@@ -346,19 +346,18 @@ async fn test_submit_tx_and_retrieve() {
 
     // Submit
     let app = router(state.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/tx")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::json!({"tx_hex": tx_hex}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/tx")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({"tx_hex": tx_hex}).to_string(),
+        ))
         .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), HttpStatus::OK);
 
     // Retrieve
@@ -374,16 +373,15 @@ async fn test_submit_tx_and_retrieve() {
 async fn test_submit_invalid_tx() {
     let state = populated_rpc_state();
     let app = router(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/tx")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"tx_hex":"not_valid_hex!!!"}"#))
-                .unwrap(),
-        )
-        .await
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/tx")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"tx_hex":"not_valid_hex!!!"}"#))
         .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), HttpStatus::BAD_REQUEST);
 }

@@ -602,20 +602,21 @@ To protect transaction origin privacy, Umbra implements Dandelion++ (F6):
 
 ```text
 Stem phase:
-  1. New transaction enters stem phase.
-  2. Select one random peer as the next hop.
-  3. Forward after a random delay in [DANDELION_STEM_DELAY_MIN_MS, DANDELION_STEM_DELAY_MAX_MS].
-  4. Attempt up to DANDELION_STEM_HOPS (2) hops; however, in the current implementation
-     receiving nodes immediately fluff rather than continuing the stem, so the effective
-     stem length is 1 hop.
+  1. New transaction enters stem phase as a StemTransaction message with
+     hops_remaining = DANDELION_STEM_HOPS (2).
+  2. Each relay node validates and inserts the transaction into its mempool.
+  3. If hops_remaining > 0: select one random peer, forward a StemTransaction
+     with hops_remaining - 1 after a random delay in
+     [DANDELION_STEM_DELAY_MIN_MS, DANDELION_STEM_DELAY_MAX_MS].
+  4. If hops_remaining == 0: fluff (broadcast as NewTransaction to all peers).
   5. If stem timeout (DANDELION_TIMEOUT_MS = 5000ms) expires without fluffing:
      fluff immediately (broadcast normally).
 
 Fluff phase:
-  Transaction is gossiped to all peers normally.
+  Transaction is gossiped to all peers normally via NewTransaction messages.
 ```
 
-Stem transactions are tracked in `stem_txs` (max `MAX_STEM_TXS = 5000` entries) to prevent double-routing.
+Stem transactions are tracked in `stem_txs` (max `MAX_STEM_TXS = 5000` entries) to prevent double-routing. The `StemTransaction` message includes `hops_remaining` which is clamped to `DANDELION_STEM_HOPS` on receipt to prevent abuse.
 
 ---
 
