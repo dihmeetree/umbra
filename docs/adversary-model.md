@@ -116,7 +116,7 @@ The network adversary may:
 | Message injection | Session authenticated with Dilithium5; AEAD with per-session keys |
 | Man-in-the-middle | Mutual authentication: both parties sign the KEM handshake transcript |
 | Traffic fingerprinting | Frames padded to `P2P_PADDING_BUCKET = 1024` byte multiples |
-| Transaction linkability | Dandelion++ multi-hop stem relay: `StemTransaction` messages traverse `DANDELION_STEM_HOPS` (2) random relay nodes before fluffing |
+| Transaction linkability | Dandelion++ multi-hop stem relay: `StemTransaction` messages traverse up to `DANDELION_STEM_HOPS` (2) random relay nodes before fluffing (best-effort; may fluff earlier if no peers are available or the stem queue is saturated) |
 | DoS via message flood | Token bucket rate limiting: 100 msg/s, 200 burst per peer |
 | DoS via large messages | Hard message size cap: 16 MiB deserialization limit |
 | DoS via invalid structs | Structural validation before cryptographic verification |
@@ -129,7 +129,7 @@ The network adversary may:
 - **Hello message is plaintext**: the node's KEM public key is revealed before the encrypted channel is established. This leaks peer identity at connection time. A Noise-protocol handshake would mitigate this.
 - **Static KEM keypair**: the node's KEM keypair does not rotate per connection. Compromise of the static KEM secret key allows decryption of all past session transcripts. Periodic rekeying provides post-compromise security (new sessions are protected) but not full forward secrecy.
 - **Peer reputation not persisted**: reputation scores reset on node restart, giving misbehaving peers a clean slate.
-- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls all relay nodes in the stem path (`DANDELION_STEM_HOPS = 2` hops) can identify the origin. With random peer selection among 64 peers, the probability of controlling the full stem path is approximately (1/64)^2 per transaction. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
+- **Dandelion++ provides probabilistic anonymity**: a well-positioned network adversary who controls a fraction *p* of relay nodes can identify the origin only if all *h* = `DANDELION_STEM_HOPS` relays in the stem path are compromised, with probability *p^h* per transaction. For example, with *h* = 2 and 64 peers where the adversary controls one, *p* = 1/64 and the probability is (1/64)^2 ≈ 2.4 × 10⁻⁴. See [privacy-threat-model.md](./privacy-threat-model.md) for the detailed analysis.
 
 ---
 

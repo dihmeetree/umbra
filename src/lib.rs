@@ -516,7 +516,7 @@ pub fn deserialize<T: serde::de::DeserializeOwned>(
     if bytes.len() > constants::MAX_NETWORK_MESSAGE_BYTES {
         return Err(bincode::error::DecodeError::LimitExceeded);
     }
-    let config = bincode::config::legacy().with_limit::<{ 16 * 1024 * 1024 }>();
+    let config = bincode::config::legacy().with_limit::<{ constants::MAX_NETWORK_MESSAGE_BYTES }>();
     let (val, _len) = bincode::serde::decode_from_slice(bytes, config)?;
     Ok(val)
 }
@@ -1149,5 +1149,28 @@ mod tests {
         let bytes = serialize(&id).unwrap();
         let restored: constants::NetworkId = deserialize(&bytes).unwrap();
         assert_eq!(restored, id);
+    }
+
+    #[test]
+    fn deserialize_rejects_oversized_internal_length() {
+        // Craft a small buffer that encodes a Vec<u8> with a huge length prefix.
+        // bincode legacy format for Vec<u8>: 8-byte LE u64 length + payload bytes.
+        // We claim 1 billion bytes but only provide 4 bytes of actual data.
+        // The total buffer is 12 bytes (well under 16 MiB), so the outer
+        // bytes.len() check passes, but with_limit should reject the decode.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1_000_000_000u64.to_le_bytes()); // 8 bytes: claimed length
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // 4 bytes: dummy payload
+
+        assert!(
+            buf.len() < constants::MAX_NETWORK_MESSAGE_BYTES,
+            "buffer must be small enough to pass the outer size check"
+        );
+
+        let result = deserialize::<Vec<u8>>(&buf);
+        assert!(
+            result.is_err(),
+            "with_limit should reject oversized internal allocation"
+        );
     }
 }

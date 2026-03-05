@@ -2287,6 +2287,7 @@ mod tests {
             node_start_time: Instant::now(),
             version_signals: std::collections::HashMap::new(),
             network: crate::constants::NetworkId::Mainnet,
+            pending_stem_fluffs: Vec::new(),
         };
 
         let mut wallet = Wallet::new();

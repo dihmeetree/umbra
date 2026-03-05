@@ -74,6 +74,7 @@ fn populated_rpc_state() -> RpcState {
         node_start_time: Instant::now(),
         version_signals: HashMap::new(),
         network: constants::NetworkId::Mainnet,
+        pending_stem_fluffs: Vec::new(),
     }));
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
     let p2p = umbra::network::p2p::P2pHandle::from_sender(tx);

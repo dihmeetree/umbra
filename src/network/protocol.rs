@@ -29,11 +29,6 @@ pub enum Message {
     /// Broadcast a new transaction to the mempool (fluff phase)
     NewTransaction(Transaction),
 
-    /// Dandelion++ stem-phase transaction relay.
-    /// Receiving nodes decrement `hops_remaining` and either continue the stem
-    /// (forward to one random peer) or fluff (broadcast as `NewTransaction`).
-    StemTransaction { tx: Transaction, hops_remaining: u8 },
-
     /// Request a transaction by its ID
     GetTransaction(Hash),
 
@@ -162,6 +157,12 @@ pub enum Message {
 
     /// Acknowledge a rekey request. The receiver has derived new session keys.
     RekeyAck,
+
+    // ── Dandelion++ (v4) ──
+    /// Dandelion++ stem-phase transaction relay.
+    /// Receiving nodes decrement `hops_remaining` and either continue the stem
+    /// (forward to one random peer) or fluff (broadcast as `NewTransaction`).
+    StemTransaction { tx: Transaction, hops_remaining: u8 },
 }
 
 /// Truncate a string to at most `max_bytes` bytes, respecting UTF-8 char
@@ -251,7 +252,7 @@ pub struct PeerInfo {
 }
 
 /// Protocol version (v3: encrypted transport + NAT traversal).
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Network errors.
 #[derive(Clone, Debug, thiserror::Error)]

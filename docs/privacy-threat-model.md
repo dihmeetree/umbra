@@ -224,21 +224,22 @@ Transaction fees are plaintext — validators must be able to evaluate fee rate 
 Transactions are broadcast using Dandelion++ to prevent network-level linkability of transactions to their originating node:
 
 ```text
-Stem phase (effectively 1 hop — known limitation):
-  Node A (originator) → forwards to random peer B (with random delay)
-  Peer B immediately fluffs (broadcasts to all peers)
-  After DANDELION_TIMEOUT_MS (5s): A fluffs if no confirmation
+Stem phase (DANDELION_STEM_HOPS = 2):
+  Node A (originator) sends StemTransaction { hops_remaining: 2 } to random peer B
+  Peer B decrements counter → sends StemTransaction { hops_remaining: 1 } to random peer C
+  Peer C decrements counter → hops_remaining reaches 0 → fluffs (broadcasts as NewTransaction)
+  After DANDELION_TIMEOUT_MS (5s): A fluffs if it has not seen the tx return via gossip
 
 Fluff phase:
-  B (or A on timeout) broadcasts transaction to all peers normally
+  C (or A on timeout) broadcasts NewTransaction to all peers normally
 ```
 
-**Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node is the originator. Transactions traverse `DANDELION_STEM_HOPS` (2) relay nodes via `StemTransaction` messages before being fluffed (broadcast as `NewTransaction`). Each relay node independently decrements the hop counter and forwards to a random peer, providing multi-hop plausible deniability.
+**Privacy model**: a passive observer who sees a transaction broadcast during the fluff phase cannot easily determine whether the broadcasting node is the originator. Transactions traverse up to `DANDELION_STEM_HOPS` (2) relay nodes via `StemTransaction` messages before being fluffed (broadcast as `NewTransaction`). Each relay node independently decrements the hop counter and forwards to a random peer, providing multi-hop plausible deniability. The stem may terminate earlier than `DANDELION_STEM_HOPS` if no peers are available or the stem queue is saturated.
 
 **Limitations**:
 - A global passive adversary who observes all network traffic can correlate timing: if A sends to B sends to C before C fluffs, the adversary can trace the stem path.
 - Dandelion++ is a probabilistic mechanism: it provides plausible deniability rather than cryptographic anonymity.
-- An adversary who controls all `DANDELION_STEM_HOPS` relay nodes in the stem path can identify the originator. With 2 hops and random peer selection among 64 peers, the probability of this is approximately (1/64)^2 per transaction.
+- An adversary who controls a fraction *p* of relay nodes can identify the originator if all *h* = `DANDELION_STEM_HOPS` relays in the stem path are compromised, with probability *p^h* per transaction. For example, with *h* = 2 and an adversary controlling 1 of 64 peers (*p* = 1/64), the probability is (1/64)^2 ≈ 2.4 × 10⁻⁴.
 
 ### 7.2 Frame Padding
 

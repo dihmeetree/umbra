@@ -95,6 +95,7 @@ fn setup_node_with_funded_wallet() -> (NodeState, SigningKeypair, Wallet) {
         node_start_time: Instant::now(),
         version_signals: HashMap::new(),
         network: constants::NetworkId::Mainnet,
+        pending_stem_fluffs: Vec::new(),
     };
 
     (node_state, signing, wallet)

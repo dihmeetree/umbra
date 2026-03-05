@@ -52,6 +52,9 @@ pub struct NodeState {
     pub version_signals: HashMap<u32, HashSet<Hash>>,
     /// Network this node is running on.
     pub network: crate::constants::NetworkId,
+    /// Pending stem-phase transactions submitted via RPC that need timeout-based
+    /// fluff fallback. Entries are `(tx_hash, insertion_time)`.
+    pub pending_stem_fluffs: Vec<(Hash, Instant)>,
 }
 
 impl NodeState {
@@ -598,6 +601,7 @@ impl Node {
             node_start_time: Instant::now(),
             version_signals: HashMap::new(),
             network,
+            pending_stem_fluffs: Vec::new(),
         }));
 
         let sync_state = SyncState::NeedSync { our_finalized };
@@ -825,6 +829,9 @@ impl Node {
                 }
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
+                        // Clear any stale stem tracking so flush_dandelion_stems
+                        // won't re-fluff a transaction that already arrived via gossip.
+                        self.stem_txs.remove(&tx_hash);
                         drop(state);
                         let _ = self
                             .p2p
@@ -866,6 +873,7 @@ impl Node {
                 match state.mempool.insert(tx.clone()) {
                     Ok(_) => {
                         drop(state);
+                        self.mark_seen(tx_hash);
                         // Continue stem or fluff based on hops_remaining
                         self.stem_forward(tx, hops_remaining).await;
                     }
@@ -2559,6 +2567,14 @@ impl Node {
     /// Collects expired entries and spawns a background task for the jittered
     /// broadcasts to avoid blocking the event loop.
     async fn flush_dandelion_stems(&mut self) {
+        // Absorb RPC-originated pending stems into stem_txs for timeout tracking.
+        {
+            let mut state = self.state.write().await;
+            for (hash, ts) in state.pending_stem_fluffs.drain(..) {
+                self.stem_txs.entry(hash).or_insert((0, ts));
+            }
+        }
+
         let timeout = std::time::Duration::from_millis(crate::constants::DANDELION_TIMEOUT_MS);
         let expired: Vec<Hash> = self
             .stem_txs
@@ -2811,6 +2827,7 @@ mod tests {
             node_start_time: Instant::now(),
             version_signals: HashMap::new(),
             network: crate::constants::NetworkId::Mainnet,
+            pending_stem_fluffs: Vec::new(),
         }
     }
 
@@ -4695,5 +4712,171 @@ mod tests {
         ns.set_mempool_epoch(42);
         // Verify it doesn't panic and the mempool accepted the epoch
         assert_eq!(ns.evict_expired_transactions(), 0);
+    }
+
+    // ---------------------------------------------------------------
+    // StemTransaction handler tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_stem_transaction_dedup_skip() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(70);
+        let tx_hash = tx.tx_id().0;
+        let from = Hash::default();
+
+        // Pre-mark the tx hash as seen
+        node.mark_seen(tx_hash);
+
+        node.handle_message(
+            from,
+            Message::StemTransaction {
+                tx: tx.clone(),
+                hops_remaining: 2,
+            },
+        )
+        .await;
+
+        // Should not be in mempool (skipped by dedup)
+        let s = state.read().await;
+        assert!(
+            !s.mempool.contains(&tx.tx_id()),
+            "tx should not be in mempool when dedup-skipped"
+        );
+        drop(s);
+
+        // No P2P command should have been sent
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no command should be sent for dedup-skipped stem tx"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_stem_transaction_mempool_skip() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(71);
+        let tx_id = tx.tx_id();
+        let from = Hash::default();
+
+        // Pre-insert the tx into the mempool
+        state.write().await.mempool.insert(tx.clone()).unwrap();
+
+        node.handle_message(
+            from,
+            Message::StemTransaction {
+                tx,
+                hops_remaining: 2,
+            },
+        )
+        .await;
+
+        // Still in mempool (was already there), but no forwarding
+        let s = state.read().await;
+        assert!(s.mempool.contains(&tx_id));
+        drop(s);
+
+        // No P2P command should have been sent
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no command should be sent when tx already in mempool"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_stem_transaction_spent_nullifier() {
+        let (p2p, mut cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(72);
+        let tx_id = tx.tx_id();
+        let from = Hash::default();
+
+        // Mark the first input's nullifier as already spent
+        let nullifier = tx.inputs[0].nullifier;
+        state
+            .write()
+            .await
+            .ledger
+            .state
+            .mark_nullifier(nullifier)
+            .unwrap();
+
+        node.handle_message(
+            from,
+            Message::StemTransaction {
+                tx,
+                hops_remaining: 2,
+            },
+        )
+        .await;
+
+        // Should not be in mempool (rejected due to spent nullifier)
+        let s = state.read().await;
+        assert!(
+            !s.mempool.contains(&tx_id),
+            "tx with spent nullifier should be rejected"
+        );
+        drop(s);
+
+        // No P2P command should have been sent
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no command should be sent for rejected stem tx"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_stem_transaction_success() {
+        let (p2p, _cmd_rx, _evt_tx, evt_rx) = mock_p2p();
+        let kp = SigningKeypair::generate();
+        let state = Arc::new(RwLock::new(test_node_state()));
+        let mut node = Node::new_test(Arc::clone(&state), p2p, evt_rx, kp);
+
+        let tx = make_test_tx(73);
+        let tx_id = tx.tx_id();
+        let tx_hash = tx_id.0;
+        let from = Hash::default();
+
+        node.handle_message(
+            from,
+            Message::StemTransaction {
+                tx,
+                hops_remaining: 2,
+            },
+        )
+        .await;
+
+        // Transaction should be in mempool
+        let s = state.read().await;
+        assert!(
+            s.mempool.contains(&tx_id),
+            "tx should be in mempool after successful stem handling"
+        );
+        drop(s);
+
+        // Transaction should be marked as seen
+        assert!(
+            node.is_seen(&tx_hash),
+            "tx should be marked as seen after successful stem handling"
+        );
+
+        // stem_forward should have been called. With hops_remaining=2,
+        // it spawns a delayed SendTo (stem) in a background task via tokio::spawn.
+        // The stem_txs map should track the transaction.
+        assert!(
+            node.stem_txs.contains_key(&tx_hash),
+            "stem_txs should track the forwarded transaction"
+        );
     }
 }
