@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1772678290287,
+  "lastUpdate": 1772684823205,
   "repoUrl": "https://github.com/dihmeetree/umbra",
   "entries": {
     "Benchmark": [
@@ -167,6 +167,173 @@ window.BENCHMARK_DATA = {
             "name": "deserialize_tx",
             "value": 90714,
             "range": "± 122",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dmitry@snoculars.com",
+            "name": "root"
+          },
+          "committer": {
+            "email": "20114263+dihmeetree@users.noreply.github.com",
+            "name": "Dmitry",
+            "username": "dihmeetree"
+          },
+          "distinct": true,
+          "id": "3323d600fe8cce9b70bdff1706adc5c3b098b9d7",
+          "message": "Address PR review: wire compat, per-endpoint rate limits, stem tracking, test coverage\n\n- Move StemTransaction to end of Message enum to preserve wire\n  discriminants; bump PROTOCOL_VERSION 3 → 4\n- Per-endpoint rate limiter keys (IpAddr, endpoint) so /tx and\n  /commitment-proof counters are independent\n- Tighten rate limiter cap enforcement (>= instead of >, evict +1)\n- Add pending_stem_fluffs to NodeState so RPC-submitted stems get\n  timeout-based fluff fallback via flush_dandelion_stems\n- Clear stem_txs on NewTransaction receipt to prevent re-fluff\n- Add mark_seen in StemTransaction handler for consistent dedup\n- Use constants::MAX_NETWORK_MESSAGE_BYTES in deserialize with_limit\n- Add 5 tests: 4 StemTransaction handler branches + 1 deserialize\n  with_limit internal-length guard\n- Fix docs: parameterize Dandelion++ probability, add \"up to\"\n  qualifier, correct stem delay bound\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-04T20:17:28-08:00",
+          "tree_id": "09f62e0e100a46cbf68e6bd26cd7b64ddccb6962",
+          "url": "https://github.com/dihmeetree/umbra/commit/3323d600fe8cce9b70bdff1706adc5c3b098b9d7"
+        },
+        "date": 1772684822398,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dilithium5_sign",
+            "value": 470034663,
+            "range": "± 1904593",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dilithium5_verify",
+            "value": 913337,
+            "range": "± 3165",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "blake3_hash_domain",
+            "value": 295,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "blake3_hash_concat",
+            "value": 217,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "rescue_prime_commitment",
+            "value": 7527,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "vrf_evaluate",
+            "value": 470145997,
+            "range": "± 1553404",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/10",
+            "value": 4376,
+            "range": "± 8682",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/100",
+            "value": 15245,
+            "range": "± 5273",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_insert/1000",
+            "value": 128975,
+            "range": "± 14268",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/10",
+            "value": 1643,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/100",
+            "value": 17130,
+            "range": "± 121",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "finalized_order/1000",
+            "value": 195583,
+            "range": "± 1177",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_prune/100",
+            "value": 29215,
+            "range": "± 5783",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dag_prune/1000",
+            "value": 323403,
+            "range": "± 22584",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_balance",
+            "value": 70777907,
+            "range": "± 67250",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend",
+            "value": 156771172,
+            "range": "± 86499",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "verify_balance_proof",
+            "value": 9058577,
+            "range": "± 24695",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "verify_spend_proof",
+            "value": 8136448,
+            "range": "± 4367",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend_sequential/2",
+            "value": 315807469,
+            "range": "± 806230",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "prove_spend_sequential/4",
+            "value": 631413612,
+            "range": "± 294450",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "build_tx_parallel/2",
+            "value": 245550183,
+            "range": "± 9237816",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "build_tx_parallel/4",
+            "value": 484517672,
+            "range": "± 11055388",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "serialize_tx",
+            "value": 62908,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "deserialize_tx",
+            "value": 110681,
+            "range": "± 124",
             "unit": "ns/iter"
           }
         ]
