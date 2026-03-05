@@ -606,8 +606,8 @@ Stem phase:
      hops_remaining = DANDELION_STEM_HOPS (2).
   2. Each relay node validates and inserts the transaction into its mempool.
   3. If hops_remaining > 0: select one random peer, forward a StemTransaction
-     with hops_remaining - 1 after a random delay in
-     [DANDELION_STEM_DELAY_MIN_MS, DANDELION_STEM_DELAY_MAX_MS].
+     with hops_remaining - 1 after an exponentially-distributed random delay
+     clamped to [DANDELION_STEM_DELAY_MIN_MS, DANDELION_STEM_DELAY_MAX_MS * 3].
   4. If hops_remaining == 0: fluff (broadcast as NewTransaction to all peers).
   5. If stem timeout (DANDELION_TIMEOUT_MS = 5000ms) expires without fluffing:
      fluff immediately (broadcast normally).

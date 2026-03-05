@@ -179,7 +179,7 @@ umbra/
     error.html              Error display
 ```
 
-**~43,000 lines of Rust** across 45 source files with **1281 tests**.
+**~43,000 lines of Rust** across 45 source files with **1286 tests**.
 
 ## Building
 
@@ -555,13 +555,13 @@ The `Node` struct ties everything together with a `tokio::select!` event loop:
 ## Testing
 
 ```bash
-cargo test                       # Full suite (1281 tests)
+cargo test                       # Full suite (1286 tests)
 cargo test --features fast-tests # Skip SPHINCS+ signing/verification (~5-20x faster)
 ```
 
 The `fast-tests` feature skips SPHINCS+ (the expensive redundant signature layer) while keeping all Dilithium5 signing and verification. Production builds MUST NOT use this flag.
 
-All 1281 tests cover:
+All 1286 tests cover:
 
 - **Configuration** — default config validation, TOML parsing (with and without TLS sections, with and without NAT sections), missing config file fallback, bootstrap peer parsing, rpc_is_loopback detection, TLS file validation (server + wallet), default NatConfig values
 - **Core utilities** — hash_domain determinism, domain separation, hash_concat length-prefix ambiguity prevention, constant-time equality
@@ -917,7 +917,7 @@ All transaction validity is verified via zk-STARKs:
 - **Minimum committee size** — committee selection falls back to all active validators if VRF selects fewer than `MIN_COMMITTEE_SIZE`, guaranteeing BFT safety
 - **Canonical Merkle depth** — commitment tree is always padded to depth 20 with precomputed zero-subtree hashes, ensuring consistent STARK circuit verification regardless of tree size
 - **Range proofs** — all committed values are proven to be in [0, 2^59) via bit decomposition within the balance AIR; with MAX_IO = 16 per side, the maximum sum is 16 \* 2^59 = 2^63 < p (Goldilocks), preventing inflation via field-arithmetic wraparound
-- **Network message limits** — serialized messages are rejected above `MAX_NETWORK_MESSAGE_BYTES`; bincode deserialization uses size-limited options to prevent allocation-based DoS from crafted internal length fields
+- **Network message limits** — serialized messages are rejected above `MAX_NETWORK_MESSAGE_BYTES` (16 MiB); both `decode_message()` and the generic `crate::deserialize()` use size-limited bincode options (`with_limit`) to prevent allocation-based DoS from crafted internal length fields; `POST /tx` rejects hex payloads exceeding `2 * MAX_NETWORK_MESSAGE_BYTES` before deserialization; all RPC bodies are capped at 2 MB via `DefaultBodyLimit`
 - **Cryptographic type size validation** — public keys, signatures, and KEM ciphertexts are validated on deserialization, rejecting malformed or oversized payloads
 - **Deserialization bounds** — public input deserialization rejects counts exceeding `MAX_TX_IO` (16 inputs/outputs) to prevent allocation DoS
 - **Overflow protection** — all arithmetic uses `checked_add` to prevent overflow; fee accumulation overflow is an explicit error
@@ -960,7 +960,7 @@ All transaction validity is verified via zk-STARKs:
 - **Sled-backed nullifier storage** — nullifier lookups check in-memory set first, then fall back to sled, allowing the nullifier set to scale beyond available RAM
 - **Parallel proof verification** — vertex validation uses `rayon::par_iter()` for independent transaction proof verification, with sequential state mutation, maintaining correctness while improving throughput
 - **Parallel spend proof generation** — `TransactionBuilder` generates spend proofs for multi-input transactions in parallel via `rayon::par_iter()`, reducing build time from O(N) to O(N/p) where p is the number of cores (each spend proof takes ~115ms)
-- **Dandelion++ sender privacy** — new transactions propagate through a stem phase (private forwarding to single peers) before fluff (broadcast), obscuring the originating node
+- **Dandelion++ multi-hop sender privacy** — new transactions propagate through a multi-hop stem phase via `StemTransaction` messages with a decrementing `hops_remaining` counter (`DANDELION_STEM_HOPS = 2`), each relay independently forwarding to a random peer before the final relay fluffs (broadcasts as `NewTransaction`), obscuring the originating node
 - **Connection diversity** — inbound and outbound peer slots are tracked separately, reserving half of max peers for each direction, preventing eclipse attacks via inbound slot exhaustion
 - **Peer reputation and banning** — peers accumulate reputation penalties for rate limit violations, invalid messages, and handshake failures; peers below threshold are temporarily banned (1 hour) with bans persisted to storage
 - **DAG memory pruning** — finalized vertices older than `PRUNING_RETAIN_EPOCHS` are pruned from in-memory maps on epoch transition, preventing unbounded memory growth while retaining data in sled for sync
@@ -972,11 +972,11 @@ All transaction validity is verified via zk-STARKs:
 - **RPC body size limit** — all RPC requests are capped at 2 MB via `DefaultBodyLimit`, preventing memory exhaustion from oversized payloads
 - **Transaction hex validation** — `POST /tx` rejects hex payloads exceeding `2 * MAX_NETWORK_MESSAGE_BYTES` before attempting deserialization, preventing allocation-based DoS
 - **Sync vertex validation** — vertices received during state sync are validated through `apply_finalized_vertex()` (full signature verification + DAG insertion), not applied directly to state
-- **Gossip deduplication** — a two-generation `seen_messages` scheme (10K capacity per generation) prevents re-processing and re-broadcasting of duplicate vertices, votes, and certificates without bulk-clearing recently seen entries
+- **Gossip deduplication** — a two-generation `seen_messages` scheme (50K capacity per generation) with randomized rotation jitter prevents re-processing and re-broadcasting of duplicate vertices, votes, and certificates without bulk-clearing recently seen entries; jittered rotation thresholds prevent spy nodes from probing dedup state transitions to infer message origination timing
 - **Sync bounds checking** — sync is cancelled after 1,000 rounds or if a peer claims an unreasonably high finalized count, preventing infinite sync attacks from malicious peers
 - **Self-connection prevention** — P2P connections to the node's own peer ID are rejected on establishment
 - **Handshake concurrency limit** — a semaphore limits concurrent P2P handshakes to 64, preventing resource exhaustion from handshake flooding
-- **Deferred stem mempool insertion** — Dandelion++ stem-phase transactions are forwarded without being added to the local mempool, preventing timing analysis that could deanonymize the transaction origin
+- **Stem-phase mempool insertion with relay** — Dandelion++ stem-phase transactions are validated and inserted into the local mempool before relaying via `StemTransaction`, ensuring the transaction is available for vertex inclusion while continuing the stem relay; a timeout-based fluff fallback (via `pending_stem_fluffs` and `flush_dandelion_stems`) ensures transactions are eventually broadcast even if the stem relay peer drops them
 - **Wallet web security headers** — the wallet web UI sets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and `Content-Security-Policy` on all responses
 - **Atomic wallet file writes** — wallet data is written to a temporary file then atomically renamed, preventing data loss from interrupted writes
 - **Non-blocking wallet I/O** — synchronous wallet file operations are wrapped in `spawn_blocking()` to avoid blocking the async runtime
@@ -1008,7 +1008,7 @@ All transaction validity is verified via zk-STARKs:
 - **Snapshot peer consistency** — snapshot chunk requests are sent to the quorum-selected peer rather than the vertex sender, preventing chunk fetches from unrelated peers
 - **Stealth detection timing equalization** — stealth address scanning performs dummy key derivation and constant-time comparison on KEM decapsulation failure, equalizing timing with the success path
 - **Deterministic weight-based fees** — transfer fees are computed deterministically from transaction shape (`fee = FEE_BASE + inputs * FEE_PER_INPUT + ceil(message_bytes / 1024) * FEE_PER_MESSAGE_KB`), eliminating fee-based fingerprinting entirely since every transaction of the same shape pays the exact same fee with no user choice involved
-- **RPC rate limiting** — commitment-proof queries are rate-limited per IP (60 requests per 60-second window) to prevent Merkle tree enumeration attacks that could map wallet activity to commitment indices
+- **RPC per-endpoint rate limiting** — sensitive RPC endpoints are rate-limited per IP with independent per-endpoint counters: commitment-proof queries (60 requests per 60-second window) to prevent Merkle tree enumeration, and `POST /tx` submissions (10 per 60-second window) to prevent transaction-flooding DoS; the rate limiter actively enforces a capacity cap by evicting oldest entries when over `RATE_LIMITER_MAX_ENTRIES`
 - **Peer address redaction** — peer discovery responses and RPC endpoints strip IP addresses, preventing validator deanonymization via address correlation
 - **NatInfo privacy** — NatInfo messages send empty observed addresses, preventing peers from learning their own externally-visible IP through the P2P layer
 - **Per-output spend authorization** — `derive_spend_auth` includes the output index, producing unique spend authorization keys per output and preventing cross-output linkability for the same recipient
@@ -1068,7 +1068,7 @@ All transaction validity is verified via zk-STARKs:
 Umbra includes a full node implementation with encrypted P2P networking (Kyber1024 + Dilithium5), persistent storage, state sync with timeout/retry, fee-priority mempool with fee estimation and expiry eviction, health/metrics endpoints, TOML configuration, graceful shutdown, Dandelion++ transaction relay, peer discovery gossip, peer reputation with ban persistence, connection diversity, protocol version signaling, DAG memory pruning, sled-backed nullifier storage, parallel proof verification, light client RPC endpoints, RPC API with mTLS authentication, on-chain validator registration with bond escrow, active BFT consensus participation, VRF-proven committee membership with epoch activation delay, fork resolution, coin emission with halving schedule, per-peer rate limiting, DDoS protections (per-IP limits, subnet eclipse mitigation, snapshot OOM prevention, chunk rate limiting), NAT traversal with UPnP and hole punching, and a client-side wallet (CLI + web UI) with transaction history, UTXO consolidation, and mnemonic recovery phrases. A production deployment would additionally require:
 
 - **Wallet GUI** — graphical interface for non-technical users
-- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1281 tests
+- **External security audit** — planned independent cryptographic protocol review and penetration testing; six internal audits have been completed, addressing 120+ findings across all severity levels and expanding test coverage from 226 to 1286 tests
 
 ## License
 

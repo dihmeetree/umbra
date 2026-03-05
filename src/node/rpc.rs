@@ -53,14 +53,17 @@ const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Maximum number of entries in the rate limiter map before eviction.
 const RATE_LIMITER_MAX_ENTRIES: usize = 50_000;
 
+/// Per-IP, per-endpoint rate limiter map.
+type RateLimiterMap = HashMap<(std::net::IpAddr, &'static str), (u32, std::time::Instant)>;
+
 /// Shared RPC state.
 #[derive(Clone)]
 pub struct RpcState {
     pub node: Arc<RwLock<NodeState>>,
     pub p2p: P2pHandle,
-    /// Per-IP rate limiter for sensitive endpoints (commitment-proof).
-    /// Maps IP → (request_count, window_start).
-    rate_limiter: Arc<tokio::sync::Mutex<HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+    /// Per-IP, per-endpoint rate limiter for sensitive endpoints.
+    /// Maps (IP, endpoint) → (request_count, window_start).
+    rate_limiter: Arc<tokio::sync::Mutex<RateLimiterMap>>,
 }
 
 impl RpcState {
@@ -79,25 +82,30 @@ impl RpcState {
         &self,
         ip: std::net::IpAddr,
         limit: u32,
-        endpoint: &str,
+        endpoint: &'static str,
     ) -> Result<(), (StatusCode, String)> {
         let mut limiter = self.rate_limiter.lock().await;
         let now = std::time::Instant::now();
 
         // Proactive eviction of expired entries to prevent memory bloat.
-        if limiter.len() > RATE_LIMITER_MAX_ENTRIES / 2 {
+        if limiter.len() >= RATE_LIMITER_MAX_ENTRIES / 2 {
             limiter.retain(|_, (_, start)| {
                 now.duration_since(*start).as_secs() < RATE_LIMIT_WINDOW_SECS
             });
-            if limiter.len() > RATE_LIMITER_MAX_ENTRIES {
-                tracing::warn!(
-                    entries = limiter.len(),
-                    "rate limiter over capacity after eviction"
-                );
+            if limiter.len() >= RATE_LIMITER_MAX_ENTRIES {
+                // Actively enforce the cap by removing oldest entries.
+                let mut by_age: Vec<_> =
+                    limiter.iter().map(|(k, (_, start))| (*k, *start)).collect();
+                by_age.sort_by_key(|&(_, ts)| ts);
+                let excess = limiter.len() - RATE_LIMITER_MAX_ENTRIES + 1;
+                for (key, _) in by_age.into_iter().take(excess) {
+                    limiter.remove(&key);
+                }
+                tracing::warn!(entries = limiter.len(), "rate limiter trimmed to capacity");
             }
         }
 
-        let entry = limiter.entry(ip).or_insert((0, now));
+        let entry = limiter.entry((ip, endpoint)).or_insert((0, now));
         let elapsed = now.saturating_duration_since(entry.1).as_secs();
         if elapsed >= RATE_LIMIT_WINDOW_SECS {
             *entry = (1, now);
@@ -308,6 +316,12 @@ async fn submit_tx(
                     .p2p
                     .broadcast(crate::network::Message::NewTransaction(tx), None)
                     .await;
+            } else {
+                // Register for timeout-based fluff fallback so the tx is
+                // eventually broadcast even if the stem relay peer drops it.
+                let mut node = state.node.write().await;
+                node.pending_stem_fluffs
+                    .push((tx_id.0, std::time::Instant::now()));
             }
         }
         None => {
@@ -864,6 +878,7 @@ mod tests {
             node_start_time: std::time::Instant::now(),
             version_signals: std::collections::HashMap::new(),
             network: crate::constants::NetworkId::Mainnet,
+            pending_stem_fluffs: Vec::new(),
         }));
         // Create a P2pHandle from a channel (we won't use it in most tests)
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
