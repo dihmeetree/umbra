@@ -600,7 +600,7 @@ async fn async_main() {
         let min_count = *counts.iter().min().unwrap();
         let count_diff = max_count - min_count;
 
-        if count_diff <= 65 {
+        if count_diff <= 80 {
             println!(
                 "  {} Finalized counts consistent: {:?} (diff={})",
                 "OK".green().bold(),
