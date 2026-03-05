@@ -94,6 +94,23 @@ fast-tests = []
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "stark_proofs"
+harness = false
+
+[[bench]]
+name = "crypto"
+harness = false
+
+[[bench]]
+name = "dag"
+harness = false
+
+[[bench]]
+name = "transaction"
+harness = false
 
 [[bin]]
 name = "simulator"

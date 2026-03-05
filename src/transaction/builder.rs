@@ -244,70 +244,114 @@ impl TransactionBuilder {
             });
         }
 
-        // Build inputs: derive nullifiers, compute proof_links, generate STARK spend proofs
+        // Build inputs: derive nullifiers, compute proof_links, generate STARK spend proofs.
+        // Preparation is sequential (cheap), then spend proofs are generated in parallel.
         let mut rng = rand::rng();
-        let mut tx_inputs = Vec::with_capacity(self.inputs.len());
-        let mut input_values = Vec::with_capacity(self.inputs.len());
-        let mut input_blindings_felts = Vec::with_capacity(self.inputs.len());
-        let mut input_proof_links_felts = Vec::with_capacity(self.inputs.len());
-        let mut input_link_nonces = Vec::with_capacity(self.inputs.len());
 
-        for spec in &self.inputs {
-            let commitment = Commitment::commit(spec.value, &spec.blinding);
-            let nullifier = Nullifier::derive(&spec.spend_auth, &commitment.0);
+        struct PreparedInput {
+            nullifier: Nullifier,
+            proof_link_hash: Hash,
+            proof_link_felts: [Felt; 4],
+            value: u64,
+            blinding_felts: [Felt; 4],
+            link_nonce: [Felt; 4],
+            spend_pub: SpendPublicInputs,
+            spend_witness: SpendWitness,
+        }
 
-            if spec.merkle_path.is_empty() {
-                tracing::warn!("Input has empty Merkle path; proof will use all-zero siblings");
-            }
-            // Pad Merkle path to depth 20 for STARK
-            let padded_path = pad_merkle_path(&spec.merkle_path, MERKLE_DEPTH);
-            let stark_path = path_to_stark_witness(&padded_path);
+        let prepared: Vec<PreparedInput> = self
+            .inputs
+            .iter()
+            .map(|spec| {
+                let commitment = Commitment::commit(spec.value, &spec.blinding);
+                let nullifier = Nullifier::derive(&spec.spend_auth, &commitment.0);
 
-            let commitment_felts = commitment.to_felts();
-            let spend_auth_felts = hash_to_felts(&spec.spend_auth);
+                if spec.merkle_path.is_empty() {
+                    tracing::warn!("Input has empty Merkle path; proof will use all-zero siblings");
+                }
+                let padded_path = pad_merkle_path(&spec.merkle_path, MERKLE_DEPTH);
+                let stark_path = path_to_stark_witness(&padded_path);
 
-            // Generate random link_nonce and compute proof_link
-            let link_nonce: [Felt; 4] = [
-                Felt::new(rng.random::<u64>()),
-                Felt::new(rng.random::<u64>()),
-                Felt::new(rng.random::<u64>()),
-                Felt::new(rng.random::<u64>()),
-            ];
-            let proof_link_felts = rescue::hash_proof_link(&commitment_felts, &link_nonce);
-            let proof_link_hash = felts_to_hash(&proof_link_felts);
+                let commitment_felts = commitment.to_felts();
+                let spend_auth_felts = hash_to_felts(&spec.spend_auth);
 
-            // Compute Merkle root from the padded path
-            let merkle_root_hash =
-                crate::crypto::proof::compute_merkle_root(&commitment.0, &padded_path);
-            let merkle_root_felts = hash_to_felts(&merkle_root_hash);
+                let link_nonce: [Felt; 4] = [
+                    Felt::new(rng.random::<u64>()),
+                    Felt::new(rng.random::<u64>()),
+                    Felt::new(rng.random::<u64>()),
+                    Felt::new(rng.random::<u64>()),
+                ];
+                let proof_link_felts = rescue::hash_proof_link(&commitment_felts, &link_nonce);
+                let proof_link_hash = felts_to_hash(&proof_link_felts);
 
-            let spend_pub = SpendPublicInputs {
-                merkle_root: merkle_root_felts,
-                nullifier: nullifier.to_felts(),
-                proof_link: proof_link_felts,
-            };
-            let spend_witness = SpendWitness {
-                spend_auth: spend_auth_felts,
-                commitment: commitment_felts,
-                link_nonce,
-                merkle_path: stark_path,
-            };
+                let merkle_root_hash =
+                    crate::crypto::proof::compute_merkle_root(&commitment.0, &padded_path);
+                let merkle_root_felts = hash_to_felts(&merkle_root_hash);
 
-            let spend_proof = prove_spend(&spend_witness, &spend_pub, proof_opts.clone()).map_err(
-                |e: crate::crypto::stark::types::StarkError| {
-                    TxBuildError::SpendProofFailed(e.to_string())
-                },
-            )?;
+                PreparedInput {
+                    nullifier,
+                    proof_link_hash,
+                    proof_link_felts,
+                    value: spec.value,
+                    blinding_felts: spec.blinding.to_felts(),
+                    link_nonce,
+                    spend_pub: SpendPublicInputs {
+                        merkle_root: merkle_root_felts,
+                        nullifier: nullifier.to_felts(),
+                        proof_link: proof_link_felts,
+                    },
+                    spend_witness: SpendWitness {
+                        spend_auth: spend_auth_felts,
+                        commitment: commitment_felts,
+                        link_nonce,
+                        merkle_path: stark_path,
+                    },
+                }
+            })
+            .collect();
 
+        // Generate spend proofs in parallel using rayon when there are multiple inputs
+        let spend_proofs: Vec<_> = if prepared.len() > 1 {
+            use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+            prepared
+                .par_iter()
+                .map(|p| {
+                    prove_spend(&p.spend_witness, &p.spend_pub, proof_opts.clone()).map_err(
+                        |e: crate::crypto::stark::types::StarkError| {
+                            TxBuildError::SpendProofFailed(e.to_string())
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            prepared
+                .iter()
+                .map(|p| {
+                    prove_spend(&p.spend_witness, &p.spend_pub, proof_opts.clone()).map_err(
+                        |e: crate::crypto::stark::types::StarkError| {
+                            TxBuildError::SpendProofFailed(e.to_string())
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut tx_inputs = Vec::with_capacity(prepared.len());
+        let mut input_values = Vec::with_capacity(prepared.len());
+        let mut input_blindings_felts = Vec::with_capacity(prepared.len());
+        let mut input_proof_links_felts = Vec::with_capacity(prepared.len());
+        let mut input_link_nonces = Vec::with_capacity(prepared.len());
+
+        for (p, spend_proof) in prepared.into_iter().zip(spend_proofs) {
             tx_inputs.push(TxInput {
-                nullifier,
-                proof_link: proof_link_hash,
+                nullifier: p.nullifier,
+                proof_link: p.proof_link_hash,
                 spend_proof,
             });
-            input_values.push(spec.value);
-            input_blindings_felts.push(spec.blinding.to_felts());
-            input_proof_links_felts.push(proof_link_felts);
-            input_link_nonces.push(link_nonce);
+            input_values.push(p.value);
+            input_blindings_felts.push(p.blinding_felts);
+            input_proof_links_felts.push(p.proof_link_felts);
+            input_link_nonces.push(p.link_nonce);
         }
 
         // Build outputs: generate stealth addresses and encrypt note data
